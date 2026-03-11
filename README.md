@@ -11,6 +11,8 @@ Docker image for performing simple backups of Docker volumes. Main features:
 - Optionally executes commands before/after backing up inside `docker-volume-backup` container and/or on remote host
 - Optionally ships backup metrics to [InfluxDB](https://docs.influxdata.com/influxdb/), for monitoring
 - Optionally encrypts backups with `gpg` before uploading
+- **New**: Supports [Restic](https://restic.net/) for efficient, deduplicated backups.
+- **New**: Supports [Rclone](https://rclone.org/) for uploading to various cloud providers.
 
 ## Examples
 
@@ -29,7 +31,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: jareware/docker-volume-backup
+    image: danielrondongarcia/docker-volume-backup
     volumes:
       - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
       - ./backups:/archive                      # Mount a local folder as the backup archive
@@ -55,7 +57,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: jareware/docker-volume-backup
+    image: danielrondongarcia/docker-volume-backup
     environment:
       AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
@@ -108,7 +110,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: jareware/docker-volume-backup
+    image: danielrondongarcia/docker-volume-backup
     environment:
       SCP_HOST: 192.168.0.42                    # Remote host IP address
       SCP_USER: pi                              # Remote host user to log in
@@ -121,39 +123,118 @@ volumes:
   grafana-data:
 ```
 
+### Backing up with Restic and Rclone
+
+You can use [Restic](https://restic.net/) for efficient, incremental, and encrypted backups. This is particularly useful for large volumes where full backups are too slow or expensive. You can also use [Rclone](https://rclone.org/) as a backend for Restic, allowing you to store your backups on any cloud provider supported by Rclone (Google Drive, OneDrive, Dropbox, etc.).
+
+In this example, we back up 3 example volumes (`vol1`, `vol2`, `vol3`) to a remote location defined in `rclone.conf`.
+
+1.  **Prepare your `rclone.conf`**: Run `rclone config` on your local machine to set up your remote (e.g., named `myremote`).
+2.  **Initialize the repository**:
+    ```bash
+    # You only need to do this once
+    docker run --rm \
+      -v $(pwd)/rclone.conf:/root/.config/rclone/rclone.conf:ro \
+      -e RESTIC_PASSWORD=my-secure-password \
+      danielrondongarcia/docker-volume-backup \
+      restic -r rclone:myremote:/backups/docker-volumes init
+    ```
+3.  **Configure the service**:
+
+```yml
+version: "3"
+
+services:
+  # Example services with data to backup
+  app1:
+    image: alpine
+    command: sh -c "while true; do echo 'app1 data' >> /data/file.txt; sleep 5; done"
+    volumes:
+      - vol1:/data
+
+  app2:
+    image: alpine
+    command: sh -c "while true; do echo 'app2 data' >> /data/file.txt; sleep 5; done"
+    volumes:
+      - vol2:/data
+
+  app3:
+    image: alpine
+    command: sh -c "while true; do echo 'app3 data' >> /data/file.txt; sleep 5; done"
+    volumes:
+      - vol3:/data
+
+  backup:
+    image: danielrondongarcia/docker-volume-backup
+    environment:
+      BACKUP_STRATEGY: restic
+      # Restic repository location.
+      # Syntax: rclone:<remote-name>:<path-in-remote>
+      RESTIC_REPOSITORY: rclone:myremote:/backups/docker-volumes
+      RESTIC_PASSWORD: my-secure-password
+      # Optional: Cron schedule
+      BACKUP_CRON_EXPRESSION: "0 2 * * *"
+    volumes:
+      # Mount the volumes to be backed up
+      - vol1:/backup/vol1:ro
+      - vol2:/backup/vol2:ro
+      - vol3:/backup/vol3:ro
+      # Mount your rclone configuration
+      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
+
+volumes:
+  vol1:
+  vol2:
+  vol3:
+```
+
+### Managing and Verifying Backups
+
+When using Restic, your backups are stored as snapshots in the repository. You can inspect them using the `restic` CLI inside the container.
+
+**List all snapshots:**
+```bash
+docker compose exec backup restic snapshots
+```
+
+**Check repository stats:**
+```bash
+docker compose exec backup restic stats
+```
+
+**Inspect repository content using Rclone (on your local machine):**
+If you want to browse the repository structure on your local machine (e.g., Windows), you can mount the bucket using Rclone. Note that Restic stores data in a specific deduplicated format (`data`, `index`, `keys`, `snapshots`), so you won't see your original files directly.
+
+```bash
+# Mount the bucket to drive X: (Windows)
+rclone mount oci:your-bucket X: --vfs-cache-mode full
+```
+
+To browse the *actual files* inside the backup, you would need to use `restic mount` (requires FUSE) or `restic restore`.
+
 ### Triggering a backup manually
 
-Sometimes it's useful to trigger a backup manually, e.g. right before making some big changes.
+Sometimes it's useful to trigger a backup manually, e.g. right before making some big changes, without waiting for the scheduled cron job.
 
-This is as simple as:
+You can force a backup immediately by executing the backup script inside the running container:
 
-```
-$ docker-compose exec backup ./backup.sh
-
-[INFO] Backup starting
-
-8 containers running on host in total
-1 containers marked to be stopped during backup
-
-...
-...
-...
-
-[INFO] Backup finished
-
-Will wait for next scheduled backup
+```bash
+docker compose exec backup /root/backup.sh
 ```
 
-If you **only** want to back up manually (i.e. not on a schedule), you should either:
+This will run the full backup process (including pre/post commands and notifications) and you will see the logs in your terminal.
 
-1. Run the image without `docker-compose`, override the image entrypoint to `/root/backup.sh`, and ensure you match your env-vars with what the default `src/entrypoint.sh` would normally set up for you, or
-1. Just use `BACKUP_CRON_EXPRESSION="#"` (to ensure scheduled backup never runs) and execute `docker-compose exec backup ./backup.sh` whenever you want to run a backup
+If you **only** want to back up manually (i.e. not on a schedule), you should use `BACKUP_CRON_EXPRESSION="#"` (to ensure scheduled backup never runs) and execute the command above whenever you want to run a backup.
 
 ### Stopping containers while backing up
 
 It's not generally safe to read files to which other processes might be writing. You may end up with corrupted copies.
 
-You can give the backup container access to the Docker socket, and label any containers that need to be stopped while the backup runs:
+**Important:** By default, **NO containers are stopped** during the backup process. This feature is strictly **opt-in** to ensure your application's SLA is not affected unexpectedly.
+
+To enable this feature for a specific container, you must:
+1. Give the backup container access to the Docker socket (`/var/run/docker.sock`).
+2. Add the label `docker-volume-backup.stop-during-backup=true` to the container you want to stop.
 
 ```yml
 version: "3"
@@ -169,7 +250,7 @@ services:
       - "docker-volume-backup.stop-during-backup=true"
 
   backup:
-    image: jareware/docker-volume-backup
+    image: danielrondongarcia/docker-volume-backup
     environment:
       AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
@@ -204,7 +285,7 @@ services:
       - docker-volume-backup.exec-post-backup=rm -rfv /tmp/influxdb
 
   backup:
-    image: jareware/docker-volume-backup
+    image: danielrondongarcia/docker-volume-backup
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro # Allow use of the "pre/post exec" feature
       - influxdb-temp:/backup/influxdb:ro       # Mount the temp space so it gets backed up
@@ -225,6 +306,14 @@ If you need a more complex script for pre/post exec, consider mounting and invok
 
 Variable | Default | Notes
 --- | --- | ---
+`BACKUP_STRATEGY` | `tar` | `tar` or `restic`. Defines the backup strategy to use.
+`RESTIC_REPOSITORY` | | Required when `BACKUP_STRATEGY` is `restic`.
+`RESTIC_PASSWORD` | | Required when `BACKUP_STRATEGY` is `restic`.
+`RESTIC_KEEP_DAILY` | `7` | Number of daily backups to keep (Restic only).
+`RESTIC_KEEP_WEEKLY` | `4` | Number of weekly backups to keep (Restic only).
+`RESTIC_KEEP_MONTHLY` | `12` | Number of monthly backups to keep (Restic only).
+`RESTIC_KEEP_YEARLY` | `1` | Number of yearly backups to keep (Restic only).
+`RCLONE_REMOTE` | | When provided, the backup file will be uploaded using Rclone to this remote path.
 `BACKUP_SOURCES` | `/backup` | Where to read data from. This can be a space-separated list if you need to back up multiple paths, when mounting multiple volumes for example. On the other hand, you can also just mount multiple volumes under `/backup` to have all of them backed up.
 `BACKUP_CRON_EXPRESSION` | `@daily` | Standard debian-flavored `cron` expression for when the backup should run. Use e.g. `0 4 * * *` to back up at 4 AM every night. See the [man page](http://man7.org/linux/man-pages/man8/cron.8.html) or [crontab.guru](https://crontab.guru/) for more.
 `BACKUP_FILENAME` | `backup-%Y-%m-%dT%H-%M-%S.tar.gz` | File name template for the backup file. Is passed through `date` for formatting. See the [man page](http://man7.org/linux/man-pages/man1/date.1.html) for more.
@@ -352,6 +441,7 @@ Some cases may need secrets available in the environment, e.g. for S3 uploads to
 
 ## Releasing
 
-1. [Draft a new release on GitHub](https://github.com/jareware/docker-volume-backup/releases/new)
-1. `docker buildx build --platform linux/amd64,linux/arm64 -t jareware/docker-volume-backup:latest --push .`
-1. `docker buildx build --platform linux/amd64,linux/arm64 -t jareware/docker-volume-backup:x.y.z --push .`
+1. [Draft a new release on GitHub](https://github.com/danielrondongarcia/docker-volume-backup/releases/new)
+2. docker buildx prune --all --force
+3. `docker buildx build --platform linux/amd64,linux/arm64 -t danielrondongarcia/docker-volume-backup:latest --push .`
+3. `docker buildx build --platform linux/amd64,linux/arm64 -t danielrondongarcia/docker-volume-backup:x.y.z --push .`

@@ -1,0 +1,24 @@
+
+services:
+  backup:
+    image: danielrondongarcia/docker-volume-backup
+    environment:
+      BACKUP_STRATEGY: restic
+      # Restic repository location.
+      # Syntax: rclone:<remote-name>:<path-in-remote>
+      RESTIC_REPOSITORY: rclone:myremote:/backups/docker-volumes
+      RESTIC_PASSWORD: my-secure-password
+      # Optional: Cron schedule
+      BACKUP_CRON_EXPRESSION: "0 2 * * *"
+    volumes:
+      # Mount the volumes to be backed up
+      - vol1:/backup/vol1:ro
+      - vol2:/backup/vol2:ro
+      - vol3:/backup/vol3:ro
+      # Mount your rclone configuration
+      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
+
+volumes:
+  vol1:
+  vol2:
+  vol3:
