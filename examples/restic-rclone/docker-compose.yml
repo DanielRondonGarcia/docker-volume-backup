@@ -2,6 +2,7 @@
 services:
   backup:
     image: danielrondongarcia/docker-volume-backup
+    hostname: discourse-backup
     environment:
       BACKUP_STRATEGY: restic
       # Restic repository location.
