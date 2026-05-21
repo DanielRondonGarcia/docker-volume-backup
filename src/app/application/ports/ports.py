@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from src.app.domain.models import BackupConfig, BackupResult, ContainerConfig
+from src.app.domain.models import BackupConfig, BackupResult, ContainerConfig, RestoreCandidate, RestoreConfig, RestoreResult
 
 class StoragePort(ABC):
     @abstractmethod
@@ -10,6 +10,12 @@ class StoragePort(ABC):
     @abstractmethod
     def cleanup(self, file_path: str) -> None:
         pass
+
+    def list_restore_candidates(self, config: RestoreConfig) -> List[RestoreCandidate]:
+        raise NotImplementedError("Restore candidate listing is not implemented for this storage adapter")
+
+    def download_restore_candidate(self, candidate: RestoreCandidate, config: RestoreConfig) -> str:
+        raise NotImplementedError("Restore candidate download is not implemented for this storage adapter")
 
 class ContainerPort(ABC):
     @abstractmethod
@@ -36,6 +42,9 @@ class ContainerPort(ABC):
     def get_container_name(self, container_id: str) -> str:
         pass
 
+    def find_containers_using_volume(self, target_path: str) -> List[str]:
+        return []
+
 class NotifierPort(ABC):
     @abstractmethod
     def send_metrics(self, result: BackupResult) -> None:
@@ -44,4 +53,9 @@ class NotifierPort(ABC):
 class BackupStrategy(ABC):
     @abstractmethod
     def perform_backup(self, config: BackupConfig) -> BackupResult:
+        pass
+
+class RestoreStrategy(ABC):
+    @abstractmethod
+    def restore(self, source_path: str, config: RestoreConfig) -> RestoreResult:
         pass

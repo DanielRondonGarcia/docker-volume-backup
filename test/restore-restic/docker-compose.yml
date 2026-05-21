@@ -1,0 +1,83 @@
+version: "3"
+
+# Manual restore verification for restic latest and selected snapshot restore.
+# Suggested flow:
+#   docker compose --profile setup up seed-restic-repo seed-target
+#   docker compose --profile latest up restore-restic-latest
+#   docker compose --profile latest up verify-restic-restore
+#   RESTIC_SNAPSHOT=<snapshot-id> docker compose --profile selected up restore-restic-selected
+
+services:
+
+  seed-restic-repo:
+    build: ../..
+    profiles: ["setup"]
+    entrypoint: /bin/sh
+    command: >
+      -c "rm -rf /restic-repo/* /source/* &&
+          mkdir -p /source &&
+          printf 'restic restore fixture\n' > /source/restored.txt &&
+          restic init || true &&
+          restic backup /source"
+    environment:
+      RESTIC_REPOSITORY: /restic-repo
+      RESTIC_PASSWORD: restic-test-password
+    volumes:
+      - restic-repo:/restic-repo
+      - restic-source:/source
+
+  seed-target:
+    image: alpine:3.20
+    profiles: ["setup"]
+    command: sh -c "mkdir -p /restore-target && printf 'stale restic target\n' > /restore-target/stale.txt"
+    volumes:
+      - restore-target:/restore-target
+
+  restore-restic-latest:
+    build: ../..
+    profiles: ["latest"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_BACKUP_STRATEGY: restic
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      RESTIC_REPOSITORY: /restic-repo
+      RESTIC_PASSWORD: restic-test-password
+    volumes:
+      - restore-target:/restore-target
+      - restic-repo:/restic-repo
+
+  restore-restic-selected:
+    build: ../..
+    profiles: ["selected"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_BACKUP_STRATEGY: restic
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: ${RESTIC_SNAPSHOT:?set RESTIC_SNAPSHOT}
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      RESTIC_REPOSITORY: /restic-repo
+      RESTIC_PASSWORD: restic-test-password
+    volumes:
+      - restore-target:/restore-target
+      - restic-repo:/restic-repo
+
+  verify-restic-restore:
+    image: alpine:3.20
+    profiles: ["latest"]
+    depends_on:
+      restore-restic-latest:
+        condition: service_completed_successfully
+    command: >
+      sh -c "test -f /restore-target/source/restored.txt &&
+             grep -q 'restic restore fixture' /restore-target/source/restored.txt &&
+             test ! -e /restore-target/stale.txt"
+    volumes:
+      - restore-target:/restore-target:ro
+
+volumes:
+  restic-repo:
+  restic-source:
+  restore-target:

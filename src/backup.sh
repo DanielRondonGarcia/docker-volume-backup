@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Cronjobs don't inherit their env, so load from file
+# Cronjobs don't inherit their env, and restore mode reuses this runner for one-shot execution.
+# Load from the entrypoint-generated env file in both cases.
 # We use set -a to export all variables to child processes (python)
 set -a
 source /root/env.sh

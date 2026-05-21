@@ -37,6 +37,14 @@ RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
 RESTIC_PASSWORD="${RESTIC_PASSWORD:-}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 BACKUP_STRATEGY="${BACKUP_STRATEGY:-tar}"
+RESTORE_MODE="${RESTORE_MODE:-false}"
+RESTORE_TARGET_PATH="${RESTORE_TARGET_PATH:-}"
+RESTORE_SOURCE="${RESTORE_SOURCE:-}"
+RESTORE_DRY_RUN="${RESTORE_DRY_RUN:-true}"
+RESTORE_FORCE_OVERWRITE="${RESTORE_FORCE_OVERWRITE:-false}"
+RESTORE_STOP_CONTAINERS="${RESTORE_STOP_CONTAINERS:-false}"
+RESTORE_CHOWN="${RESTORE_CHOWN:-}"
+RESTORE_BACKUP_STRATEGY="${RESTORE_BACKUP_STRATEGY:-$BACKUP_STRATEGY}"
 PYTHONPATH="${PYTHONPATH:-/app}"
 EOF
 chmod a+x env.sh
@@ -55,6 +63,14 @@ cat <<EOF > .aws/config
 region = ${AWS_DEFAULT_REGION}
 EOF
 fi
+
+case "$(printf '%s' "$RESTORE_MODE" | tr '[:upper:]' '[:lower:]')" in
+  true|1|yes|y|on)
+    echo "RESTORE_MODE=true; running one-shot restore and skipping cron"
+    /root/backup.sh
+    exit $?
+    ;;
+esac
 
 # Add our cron entry, and direct stdout & stderr to Docker commands stdout
 echo "Installing cron.d entry: docker-volume-backup"

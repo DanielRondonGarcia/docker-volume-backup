@@ -35,7 +35,7 @@ COPY src /app/src
 ENV PYTHONPATH=/app
 
 # Scripts
-# entrypoint.sh expects backup.sh at /root/backup.sh
+# entrypoint.sh expects backup.sh at /root/backup.sh for cron backups and one-shot restores
 # It creates env.sh at /root/env.sh
 # So let's symlink or copy them to /root
 RUN cp /app/src/entrypoint.sh /root/entrypoint.sh \

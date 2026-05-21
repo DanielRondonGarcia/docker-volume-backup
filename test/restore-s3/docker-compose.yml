@@ -1,0 +1,44 @@
+version: "3"
+
+# Manual restore verification for S3 candidate listing and selected-source download.
+# Required environment: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+# AWS_DEFAULT_REGION, AWS_S3_BUCKET_NAME, and RESTORE_S3_SOURCE_KEY.
+# Suggested flow:
+#   docker compose --profile dry-run config
+#   docker compose --profile dry-run up restore-s3-dry-run-latest
+#   docker compose --profile selected up restore-s3-force-selected
+
+services:
+
+  restore-s3-dry-run-latest:
+    build: ../..
+    profiles: ["dry-run"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_DRY_RUN: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?set AWS_DEFAULT_REGION}
+      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:?set AWS_S3_BUCKET_NAME}
+    volumes:
+      - restore-target:/restore-target
+
+  restore-s3-force-selected:
+    build: ../..
+    profiles: ["selected"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: s3://${AWS_S3_BUCKET_NAME:?set AWS_S3_BUCKET_NAME}/${RESTORE_S3_SOURCE_KEY:?set RESTORE_S3_SOURCE_KEY}
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?set AWS_DEFAULT_REGION}
+      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:?set AWS_S3_BUCKET_NAME}
+    volumes:
+      - restore-target:/restore-target
+
+volumes:
+  restore-target:

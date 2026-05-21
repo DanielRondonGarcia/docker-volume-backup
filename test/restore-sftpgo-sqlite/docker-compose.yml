@@ -1,0 +1,85 @@
+version: "3"
+
+# Manual SFTPGo/SQLite permission verification.
+# This scenario reproduces the non-root SQLite failure mode: a restored root-owned
+# sftpgo.db and root-owned parent directory can raise "attempt to write a readonly
+# database" for the SFTPGo runtime user. Then it verifies RESTORE_CHOWN fixes it.
+# Suggested flow:
+#   docker compose --profile setup up seed-sftpgo-backup
+#   docker compose --profile readonly up restore-root-owned
+#   docker compose --profile readonly up verify-readonly-database-fails
+#   docker compose --profile writable up restore-chown
+#   docker compose --profile writable up verify-sftpgo-user-can-write
+
+services:
+
+  seed-sftpgo-backup:
+    image: python:3.11-alpine
+    profiles: ["setup"]
+    command: >
+      sh -c "rm -rf /backups/* /fixtures/* &&
+             mkdir -p /fixtures &&
+             python -c \"import sqlite3; conn = sqlite3.connect('/fixtures/sftpgo.db'); conn.execute('create table if not exists checks(id integer primary key, value text)'); conn.execute('insert into checks(value) values (?)', ('seed',)); conn.commit(); conn.close()\" &&
+             chown -R 0:0 /fixtures &&
+             chmod 755 /fixtures &&
+             chmod 644 /fixtures/sftpgo.db &&
+             tar -czpf /backups/sftpgo-root-owned.tar.gz -C /fixtures ."
+    volumes:
+      - ./backups:/backups
+
+  restore-root-owned:
+    build: ../..
+    profiles: ["readonly"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/sftpgo-root-owned.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+    volumes:
+      - sftpgo-data:/restore-target
+      - ./backups:/archive:ro
+
+  verify-readonly-database-fails:
+    image: python:3.11-alpine
+    profiles: ["readonly"]
+    user: "1000:1000"
+    depends_on:
+      restore-root-owned:
+        condition: service_completed_successfully
+    command: >
+      python -c "exec('''import sqlite3\nimport sys\nconn = sqlite3.connect('/srv/sftpgo/sftpgo.db')\ncur = conn.cursor()\ntry:\n    cur.execute('insert into checks(value) values (?)', ('should-fail',))\n    conn.commit()\nexcept sqlite3.OperationalError as exc:\n    print(exc)\n    message = str(exc).lower()\n    sys.exit(0 if 'readonly' in message or 'unable to open database file' in message else 1)\nsys.exit(1)''')"
+    volumes:
+      - sftpgo-data:/srv/sftpgo
+
+  restore-chown:
+    build: ../..
+    profiles: ["writable"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/sftpgo-root-owned.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      RESTORE_CHOWN: "1000:1000"
+    volumes:
+      - sftpgo-data:/restore-target
+      - ./backups:/archive:ro
+
+  verify-sftpgo-user-can-write:
+    image: python:3.11-alpine
+    profiles: ["writable"]
+    user: "1000:1000"
+    depends_on:
+      restore-chown:
+        condition: service_completed_successfully
+    command: >
+      python -c "import sqlite3;
+      conn = sqlite3.connect('/srv/sftpgo/sftpgo.db');
+      conn.execute('insert into checks(value) values (?)', ('write-ok',));
+      conn.commit(); conn.close()"
+    volumes:
+      - sftpgo-data:/srv/sftpgo
+
+volumes:
+  sftpgo-data:

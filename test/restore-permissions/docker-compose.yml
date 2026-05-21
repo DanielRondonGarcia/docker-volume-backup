@@ -1,0 +1,84 @@
+version: "3"
+
+# Manual restore verification for ownership behavior.
+# Suggested flow:
+#   docker compose --profile setup up seed-permission-backup seed-target
+#   docker compose --profile preserve up restore-preserve-archive-ownership
+#   docker compose --profile preserve up verify-preserved-root-owner
+#   docker compose --profile chown up seed-target
+#   docker compose --profile chown up restore-chown
+#   docker compose --profile chown up verify-chown-after-replacement
+
+services:
+
+  seed-permission-backup:
+    image: alpine:3.20
+    profiles: ["setup"]
+    command: >
+      sh -c "rm -rf /backups/* /fixtures/* &&
+             mkdir -p /fixtures/app-data &&
+             printf 'restored permissions fixture\n' > /fixtures/app-data/restored.txt &&
+             chown -R 0:0 /fixtures &&
+             tar -czpf /backups/root-owned.tar.gz -C /fixtures ."
+    volumes:
+      - ./backups:/backups
+
+  seed-target:
+    image: alpine:3.20
+    profiles: ["setup", "chown"]
+    command: sh -c "mkdir -p /restore-target && printf 'must be removed\n' > /restore-target/stale.txt"
+    volumes:
+      - restore-target:/restore-target
+
+  restore-preserve-archive-ownership:
+    build: ../..
+    profiles: ["preserve"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/root-owned.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+    volumes:
+      - restore-target:/restore-target
+      - ./backups:/archive:ro
+
+  verify-preserved-root-owner:
+    image: alpine:3.20
+    profiles: ["preserve"]
+    depends_on:
+      restore-preserve-archive-ownership:
+        condition: service_completed_successfully
+    command: sh -c "test \"$(stat -c '%u:%g' /restore-target/app-data/restored.txt)\" = '0:0'"
+    volumes:
+      - restore-target:/restore-target:ro
+
+  restore-chown:
+    build: ../..
+    profiles: ["chown"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/root-owned.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      RESTORE_CHOWN: "1000:1000"
+    volumes:
+      - restore-target:/restore-target
+      - ./backups:/archive:ro
+
+  verify-chown-after-replacement:
+    image: alpine:3.20
+    profiles: ["chown"]
+    depends_on:
+      restore-chown:
+        condition: service_completed_successfully
+    command: >
+      sh -c "test ! -e /restore-target/stale.txt &&
+             test \"$(stat -c '%u:%g' /restore-target)\" = '1000:1000' &&
+             test \"$(stat -c '%u:%g' /restore-target/app-data/restored.txt)\" = '1000:1000'"
+    volumes:
+      - restore-target:/restore-target:ro
+
+volumes:
+  restore-target:

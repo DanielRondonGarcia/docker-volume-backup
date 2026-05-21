@@ -1,0 +1,96 @@
+version: "3"
+
+# Manual restore verification for local tarball backups.
+# Suggested flow:
+#   docker compose --profile setup up seed-backups seed-target
+#   docker compose --profile dry-run up restore-dry-run-latest
+#   docker compose --profile failures up restore-missing-target restore-no-force
+#   docker compose --profile force up restore-force-overwrite
+#   docker compose --profile force up verify-force-overwrite
+
+services:
+
+  seed-backups:
+    image: alpine:3.20
+    profiles: ["setup"]
+    working_dir: /fixtures
+    command: >
+      sh -c "rm -rf /backups/* &&
+             mkdir -p old latest &&
+             printf 'old backup\n' > old/restored.txt &&
+             printf 'latest backup\n' > latest/restored.txt &&
+             tar -czpf /backups/old.tar.gz -C old . &&
+             sleep 1 &&
+             tar -czpf /backups/latest.tar.gz -C latest ."
+    volumes:
+      - ./backups:/backups
+
+  seed-target:
+    image: alpine:3.20
+    profiles: ["setup"]
+    command: sh -c "mkdir -p /restore-target && printf 'stale target\n' > /restore-target/stale.txt"
+    volumes:
+      - restore-target:/restore-target
+
+  restore-dry-run-latest:
+    build: ../..
+    profiles: ["dry-run"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      BACKUP_ARCHIVE: /archive
+    volumes:
+      - restore-target:/restore-target
+      - ./backups:/archive:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  restore-missing-target:
+    build: ../..
+    profiles: ["failures"]
+    environment:
+      RESTORE_MODE: "true"
+      BACKUP_ARCHIVE: /archive
+    volumes:
+      - ./backups:/archive:ro
+
+  restore-no-force:
+    build: ../..
+    profiles: ["failures"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/latest.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "false"
+    volumes:
+      - restore-target:/restore-target
+      - ./backups:/archive:ro
+
+  restore-force-overwrite:
+    build: ../..
+    profiles: ["force"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      RESTORE_SOURCE: /archive/latest.tar.gz
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+    volumes:
+      - restore-target:/restore-target
+      - ./backups:/archive:ro
+
+  verify-force-overwrite:
+    image: alpine:3.20
+    profiles: ["force"]
+    depends_on:
+      restore-force-overwrite:
+        condition: service_completed_successfully
+    command: >
+      sh -c "test -f /restore-target/restored.txt &&
+             grep -q 'latest backup' /restore-target/restored.txt &&
+             test ! -e /restore-target/stale.txt"
+    volumes:
+      - restore-target:/restore-target:ro
+
+volumes:
+  restore-target:

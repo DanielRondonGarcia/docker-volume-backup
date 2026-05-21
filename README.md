@@ -71,27 +71,164 @@ volumes:
 
 This configuration will back up to AWS S3 instead. See below for additional tips about [S3 Bucket setup](#s3-bucket-setup).
 
-### Restoring from S3
+### Restoring data
 
-Downloading backups from S3 can be done however you usually interact with S3, e.g. via the `aws s3` CLI or the AWS Web Console.
+Run restore as a one-shot container: start with a dry-run, verify the source and target, then run the destructive restore only with `RESTORE_FORCE_OVERWRITE=true`.
 
-However, if you're on the host that's running this image, you can also download the latest backup with:
+**Important:** an actual restore replaces the contents of `RESTORE_TARGET_PATH`. It does not merge files. Keep `RESTORE_DRY_RUN=true` until you're ready to overwrite the target.
 
+#### Quick path
+
+1. Mount the target volume read-write at `RESTORE_TARGET_PATH`.
+2. Run a dry-run restore and verify the selected source, target, affected containers, and permission warnings.
+3. Stop the application container yourself, or enable `RESTORE_STOP_CONTAINERS=true` with Docker socket access.
+4. Run the actual restore with both `RESTORE_DRY_RUN=false` and `RESTORE_FORCE_OVERWRITE=true`.
+5. Verify application ownership and database writability before starting the app again.
+
+```yml
+services:
+  restore:
+    image: danielrondongarcia/docker-volume-backup
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_TARGET_PATH: /restore-target
+      BACKUP_ARCHIVE: /archive
+    volumes:
+      - grafana-data:/restore-target
+      - ./backups:/archive:ro
+
+volumes:
+  grafana-data:
 ```
-$ docker-compose exec -T backup bash -c 'aws s3 cp s3://$AWS_S3_BUCKET_NAME/$BACKUP_FILENAME -' > restore.tar.gz
+
+Preview the latest compatible backup candidate:
+
+```bash
+docker compose run --rm restore
 ```
 
-From here on out the restore process will depend on a variety of things, like whether you've encrypted the backups, how your volumes are configured, and what application it is exactly that you're restoring.
+Restore a specific backup after checking the dry-run output:
 
-But for the sake of example, to finish the restore for the above Grafana setup, you would:
+```bash
+RESTORE_SOURCE=/archive/backup-2026-05-20T10-00-00.tar.gz \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+docker compose run --rm restore
+```
 
-1. Extract the contents of the backup, with e.g. `tar -xf restore.tar.gz`. This would leave you with a new directory called `backup` in the current dir.
-1. Figure out the mount point of the `grafana-data` volume, with e.g. `docker volume ls` and then `docker volume inspect`. Let's say it ends up being `/var/lib/docker/volumes/bla-bla/_data`. This is where your live Grafana keeps its data on the host file system.
-1. Stop Grafana, with `docker-compose stop dashboard`.
-1. Move any existing data aside, with e.g. `sudo mv /var/lib/docker/volumes/bla-bla/_data{,_replaced_during_restore}`. You can also just remove it, if you like to live dangerously.
-1. Move the backed up data to where the live Grafana can find it, with e.g. `sudo cp -r backup/grafana-data /var/lib/docker/volumes/bla-bla/_data`.
-1. Depending on the Grafana version, [you may need to set some permissions manually](http://docs.grafana.org/installation/docker/#migration-from-a-previous-version-of-the-docker-container-to-5-1-or-later), e.g. `sudo chown -R 472:472 /var/lib/docker/volumes/bla-bla/_data`.
-1. Start Grafana back up, with `docker-compose start dashboard`. Your Grafana instance should now have travelled back in time to its latest backup.
+#### Restore environment variables
+
+Required for restore mode:
+
+| Variable | Required | Notes |
+|---|---:|---|
+| `RESTORE_MODE` | Yes | Set to `true` to run restore once and skip cron scheduling. |
+| `RESTORE_TARGET_PATH` | Yes | Container path where the target volume is mounted read-write. Its contents are replaced during actual restore. |
+
+Common optional restore variables:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `RESTORE_SOURCE` | Latest compatible candidate | Use a local path, `s3://bucket/key`, `scp://user@host:/path/file`, `rclone://remote:path/file`, or a Restic snapshot id. |
+| `RESTORE_DRY_RUN` | `true` | When true, reports the plan without downloading, replacing, extracting, stopping containers, or changing files. |
+| `RESTORE_FORCE_OVERWRITE` | `false` | Must be `true` for actual restore. Without it, restore fails before modifying the target. |
+| `RESTORE_BACKUP_STRATEGY` | `BACKUP_STRATEGY` or `tar` | Use `tar` for tarballs/encrypted tarballs or `restic` for Restic snapshots. |
+| `RESTORE_STOP_CONTAINERS` | `false` | Stops and starts containers using the target volume when Docker socket access is mounted. |
+| `RESTORE_CHOWN` | Archive ownership | Numeric `uid:gid` applied recursively after target replacement and extraction/restore. Preferred for non-root application containers. |
+
+Backend variables used during restore:
+
+| Backend | Variables | Notes |
+|---|---|---|
+| Local archive | `BACKUP_ARCHIVE` | Directory or file mounted in the restore container. If `RESTORE_SOURCE` is omitted, the latest file is selected. |
+| S3 | `AWS_S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_DEFAULT_REGION`, `AWS_EXTRA_ARGS` | Lists and downloads `s3://` restore candidates. |
+| SCP | `SCP_HOST`, optional `SCP_USER`, `SCP_DIRECTORY`; mount SSH key at `/ssh/id_rsa` | Lists remote files over SSH and downloads selected `scp://` candidates. |
+| Rclone | `RCLONE_REMOTE`; mount `rclone.conf` if needed | Lists and downloads files via `rclone://` candidates. |
+| Restic | `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` | Restores `latest` or the snapshot id from `RESTORE_SOURCE`. |
+| Encrypted tarball | `GPG_PASSPHRASE` | Required when restoring a `.gpg` tarball. |
+| Glacier | `AWS_GLACIER_VAULT_NAME` | Glacier archives are reported as unavailable because retrieval is delayed; restore them to S3/local storage first. |
+
+#### Restore examples by backend
+
+These examples assume the `restore` service already sets `RESTORE_MODE=true` and mounts the target volume at `RESTORE_TARGET_PATH`.
+
+Local latest dry-run:
+
+```bash
+RESTORE_MODE=true \
+RESTORE_TARGET_PATH=/restore-target \
+BACKUP_ARCHIVE=/archive \
+docker compose run --rm restore
+```
+
+Local force restore with explicit ownership for a non-root app:
+
+```bash
+RESTORE_MODE=true \
+RESTORE_TARGET_PATH=/restore-target \
+RESTORE_SOURCE=/archive/latest.tar.gz \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+RESTORE_CHOWN=472:472 \
+docker compose run --rm restore
+```
+
+S3 selected-source restore:
+
+```bash
+RESTORE_SOURCE=s3://my-backup-bucket/backup-2026-05-20T10-00-00.tar.gz \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+docker compose run --rm restore
+```
+
+Restic latest restore:
+
+```bash
+RESTORE_BACKUP_STRATEGY=restic \
+RESTIC_REPOSITORY=/restic-repo \
+RESTIC_PASSWORD=my-secure-password \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+docker compose run --rm restore
+```
+
+Encrypted tarball restore:
+
+```bash
+RESTORE_SOURCE=/archive/backup.tar.gz.gpg \
+GPG_PASSPHRASE=my-passphrase \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+docker compose run --rm restore
+```
+
+SCP and Rclone restores use the same flow: first dry-run with `SCP_*` or `RCLONE_REMOTE` configured, then pass the selected `scp://...` or `rclone://...` value as `RESTORE_SOURCE` for the force restore.
+
+#### Permissions and SQLite/SFTPGo troubleshooting
+
+If the application container runs as a non-root user, set `RESTORE_CHOWN=uid:gid`. Archive ownership may work when the archived owner already matches the runtime user, but explicit chown is safer because it runs after the target is replaced and after files are extracted or restored.
+
+SQLite-like databases need both the database file and the parent directory writable by the runtime user. Otherwise the app can fail after restore with errors such as `attempt to write a readonly database`, because SQLite needs to create journal, WAL, and temporary files next to the database.
+
+For SFTPGo, identify the UID/GID used by the SFTPGo container, then restore with that ownership:
+
+```bash
+RESTORE_SOURCE=/archive/sftpgo-root-owned.tar.gz \
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+RESTORE_CHOWN=1000:1000 \
+docker compose run --rm restore
+```
+
+After restore, verify both ownership and write access:
+
+```bash
+docker compose run --rm --user 1000:1000 sftpgo \
+  sh -c 'test -w /srv/sftpgo && test -w /srv/sftpgo/sftpgo.db'
+```
+
+Manual restore scenarios live under [`test/restore-local`](test/restore-local/), [`test/restore-permissions`](test/restore-permissions/), [`test/restore-sftpgo-sqlite`](test/restore-sftpgo-sqlite/), [`test/restore-s3`](test/restore-s3/), and [`test/restore-restic`](test/restore-restic/).
 
 ### Backing up to remote host by means of SCP
 

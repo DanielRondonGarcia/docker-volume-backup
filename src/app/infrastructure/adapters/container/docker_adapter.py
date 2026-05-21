@@ -97,3 +97,19 @@ class DockerAdapter(ContainerPort):
             return container.name
         except Exception:
             return container_id
+
+    def find_containers_using_volume(self, target_path: str) -> List[str]:
+        if not self.client: return []
+        try:
+            containers = self.client.containers.list(all=True)
+            result = []
+            for container in containers:
+                mounts = container.attrs.get("Mounts", [])
+                for mount in mounts:
+                    if target_path in (mount.get("Name"), mount.get("Source"), mount.get("Destination")):
+                        result.append(container.id)
+                        break
+            return result
+        except Exception as e:
+            logger.error(f"Error finding containers using {target_path}: {e}")
+            return []
