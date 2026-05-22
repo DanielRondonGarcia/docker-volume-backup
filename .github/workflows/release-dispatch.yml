@@ -3,10 +3,14 @@ name: Create Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version to release (e.g. 1.0.0)'
+      bump:
+        description: 'Version bump type'
         required: true
-        type: string
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
       prerelease:
         description: 'Mark as pre-release'
         required: false
@@ -22,21 +26,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate version format
+      - name: Calculate next version
+        id: version
         run: |
-          echo "Version: ${{ inputs.version }}"
-          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-            echo "::error::Invalid version format. Use semver like 1.0.0 or 1.0.0-beta.1"
-            exit 1
+          # Get the latest semver tag (ignore pre-release suffixes for bump calculation)
+          LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No previous tags found. Starting at 0.1.0"
+            NEW_VERSION="0.1.0"
+          else
+            # Strip leading 'v' if present
+            CLEAN_TAG="${LATEST_TAG#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN_TAG"
+            
+            case "${{ inputs.bump }}" in
+              major)
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+                ;;
+              minor)
+                MINOR=$((MINOR + 1))
+                PATCH=0
+                ;;
+              patch)
+                PATCH=$((PATCH + 1))
+                ;;
+            esac
+            
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           fi
+          
+          echo "Previous tag: ${LATEST_TAG:-none}"
+          echo "Bump: ${{ inputs.bump }}"
+          echo "New version: ${NEW_VERSION}"
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog
         id: changelog
         run: |
-          # Get the previous tag
-          PREV_TAG=$(git tag --sort=-v:refname | head -1 || true)
-
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          
           if [ -z "$PREV_TAG" ]; then
             echo "No previous tag found, generating full changelog"
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" HEAD)
@@ -44,31 +78,36 @@ jobs:
             echo "Generating changelog from $PREV_TAG"
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD")
           fi
-
-          # Save changelog to file for multiline
+          
+          # Handle empty changelog
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="- No changes since last release"
+          fi
+          
           echo "$CHANGELOG" > /tmp/changelog.txt
-
-          # Create full release body
+          
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          
           cat > /tmp/release_body.md <<EOF
           ## What's Changed
-
+          
           $CHANGELOG
-
-          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${{ inputs.version }}
+          
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${NEW_VERSION}
           EOF
 
       - name: Create Git tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
+          git tag -a "${{ steps.version.outputs.new_version }}" -m "Release ${{ steps.version.outputs.new_version }}"
+          git push origin "${{ steps.version.outputs.new_version }}"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ inputs.version }}" \
-            --title "v${{ inputs.version }}" \
+          gh release create "${{ steps.version.outputs.new_version }}" \
+            --title "v${{ steps.version.outputs.new_version }}" \
             --notes-file /tmp/release_body.md \
             ${{ inputs.prerelease && '--prerelease' || '' }}
