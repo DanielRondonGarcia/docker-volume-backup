@@ -31,7 +31,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     volumes:
       - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
       - ./backups:/archive                      # Mount a local folder as the backup archive
@@ -57,7 +57,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     environment:
       AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
@@ -88,7 +88,7 @@ Run restore as a one-shot container: start with a dry-run, verify the source and
 ```yml
 services:
   restore:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     environment:
       RESTORE_MODE: "true"
       RESTORE_TARGET_PATH: /restore-target
@@ -247,7 +247,7 @@ services:
       - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     environment:
       SCP_HOST: 192.168.0.42                    # Remote host IP address
       SCP_USER: pi                              # Remote host user to log in
@@ -273,7 +273,7 @@ In this example, we back up 3 example volumes (`vol1`, `vol2`, `vol3`) to a remo
     docker run --rm \
       -v $(pwd)/rclone.conf:/root/.config/rclone/rclone.conf:ro \
       -e RESTIC_PASSWORD=my-secure-password \
-      danielrondongarcia/docker-volume-backup \
+      ghcr.io/danielrondongarcia/docker-volume-backup \
       restic -r rclone:myremote:/backups/docker-volumes init
     ```
 3.  **Configure the service**:
@@ -302,7 +302,7 @@ services:
       - vol3:/data
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     environment:
       BACKUP_STRATEGY: restic
       # Restic repository location.
@@ -387,7 +387,7 @@ services:
       - "docker-volume-backup.stop-during-backup=true"
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     environment:
       AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
@@ -422,7 +422,7 @@ services:
       - docker-volume-backup.exec-post-backup=rm -rfv /tmp/influxdb
 
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro # Allow use of the "pre/post exec" feature
       - influxdb-temp:/backup/influxdb:ro       # Mount the temp space so it gets backed up
@@ -578,7 +578,23 @@ Some cases may need secrets available in the environment, e.g. for S3 uploads to
 
 ## Releasing
 
-1. [Draft a new release on GitHub](https://github.com/danielrondongarcia/docker-volume-backup/releases/new)
-2. docker buildx prune --all --force
-3. `docker buildx build --platform linux/amd64,linux/arm64 -t danielrondongarcia/docker-volume-backup:latest --push .`
-3. `docker buildx build --platform linux/amd64,linux/arm64 -t danielrondongarcia/docker-volume-backup:x.y.z --push .`
+Two GitHub Actions workflows handle releases automatically:
+
+### 1. Create a Release (manual dispatch)
+
+Go to **Actions → Create Release → Run workflow** and enter the version number (e.g. `1.0.0`). This will:
+
+- Create and push a Git tag
+- Generate a changelog from the previous tag
+- Create a GitHub Release with the changelog
+
+### 2. Build & Push Docker Image (automatic)
+
+Triggered automatically when a GitHub Release is published. It will:
+
+- Build multi-arch images (`linux/amd64`, `linux/arm64`)
+- Push to `ghcr.io/danielrondongarcia/docker-volume-backup` with tags:
+  - `latest`
+  - `{version}` (e.g. `1.2.3`)
+  - `{major}.{minor}` (e.g. `1.2`)
+  - `{major}` (e.g. `1`)
