@@ -7,6 +7,8 @@ set -a
 source /root/env.sh
 set +a
 
-# Run the python application
+# Run the python application.
+# Cron uses a minimal PATH and may not include /usr/local/bin, where the
+# python base image installs python3.
 cd /app
-python3 -m src.app.main
+/usr/local/bin/python3 -m src.app.main
