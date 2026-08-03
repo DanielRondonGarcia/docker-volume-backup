@@ -44,6 +44,81 @@ def _sqlite_warnings(target_path: str) -> list[str]:
                 )
     return warnings
 
+def _should_use_backup_dir_layout(config: RestoreConfig) -> bool:
+    layout = (config.layout or "auto").lower()
+    if layout == "backup-dir":
+        return True
+    if layout == "auto":
+        return os.path.normpath(config.target_path) == "/backup"
+    return False
+
+def _replace_path(source: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+
+    if source.is_symlink():
+        os.symlink(os.readlink(source), destination, target_is_directory=source.is_dir())
+    elif source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+    else:
+        shutil.copy2(source, destination, follow_symlinks=False)
+
+def _copy_directory_contents(source_dir: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for item in source_dir.iterdir():
+        _replace_path(item, target_dir / item.name)
+
+def _resolve_backup_root(restore_root: str) -> Path:
+    root = Path(restore_root)
+    backup_root = root / "backup"
+    if backup_root.is_dir():
+        return backup_root
+    return root
+
+def _restore_backup_dir_layout(restore_root: str, config: RestoreConfig, actions: list[str]) -> None:
+    target_root = Path(config.target_path)
+    target_root.mkdir(parents=True, exist_ok=True)
+    source_root = _resolve_backup_root(restore_root)
+
+    children = list(target_root.iterdir())
+    if not children:
+        raise ValueError(
+            "RESTORE_LAYOUT=backup-dir expects mounted entries inside the target path, "
+            "for example /backup/storage_data"
+        )
+
+    actions.append(f"Resolved backup source root: {source_root}")
+    restored_entries = []
+    missing_entries = []
+
+    for child in children:
+        target_entry = target_root / child.name
+        if target_entry.is_dir() and not target_entry.is_symlink():
+            _clear_target_contents(str(target_entry))
+        elif target_entry.exists() or target_entry.is_symlink():
+            target_entry.unlink()
+
+        source_entry = source_root / child.name
+        if not source_entry.exists():
+            missing_entries.append(child.name)
+            continue
+
+        if source_entry.is_dir() and not source_entry.is_symlink():
+            _copy_directory_contents(source_entry, target_entry)
+        else:
+            _replace_path(source_entry, target_entry)
+        restored_entries.append(child.name)
+
+    if restored_entries:
+        actions.append(f"Restore matching entries under {config.target_path}: {', '.join(sorted(restored_entries))}")
+    if missing_entries:
+        actions.append(
+            f"Mounted entries without matching backup content were left empty: {', '.join(sorted(missing_entries))}"
+        )
+
 class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
     def perform_backup(self, config: BackupConfig) -> BackupResult:
         timestamp = datetime.now()
@@ -91,8 +166,6 @@ class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
         archive_path = source_path
         temp_dir = None
         try:
-            _clear_target_contents(config.target_path)
-
             if source_path.endswith(".gpg"):
                 passphrase = config.gpg_passphrase or os.environ.get("GPG_PASSPHRASE")
                 if not passphrase:
@@ -105,8 +178,18 @@ class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
                 ], check=True)
                 actions.append("Decrypt encrypted tarball before extraction")
 
-            subprocess.run(["tar", "-xzpf", archive_path, "-C", config.target_path], check=True)
-            actions.append("Extract tarball into target path")
+            if _should_use_backup_dir_layout(config):
+                if not temp_dir:
+                    temp_dir = tempfile.mkdtemp(prefix="restore-tar-")
+                extract_dir = os.path.join(temp_dir, "extract")
+                os.makedirs(extract_dir, exist_ok=True)
+                subprocess.run(["tar", "-xzpf", archive_path, "-C", extract_dir], check=True)
+                actions.append("Extract tarball into temporary workspace for backup-dir restore")
+                _restore_backup_dir_layout(extract_dir, config, actions)
+            else:
+                _clear_target_contents(config.target_path)
+                subprocess.run(["tar", "-xzpf", archive_path, "-C", config.target_path], check=True)
+                actions.append("Extract tarball into target path")
 
             if config.chown:
                 _apply_chown(config.target_path, config.chown)
@@ -239,6 +322,7 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
         timestamp = datetime.now()
         actions = ["Replace target contents before restic restore"]
         env = os.environ.copy()
+        temp_dir = None
         repository = config.restic_repository or os.environ.get("RESTIC_REPOSITORY")
         password = config.restic_password or os.environ.get("RESTIC_PASSWORD")
         if repository:
@@ -247,10 +331,16 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
             env["RESTIC_PASSWORD"] = password
 
         try:
-            _clear_target_contents(config.target_path)
             snapshot = source_path or config.source or "latest"
-            subprocess.run(["restic", "restore", snapshot, "--target", config.target_path], env=env, check=True)
-            actions.append(f"Restore restic snapshot: {snapshot}")
+            if _should_use_backup_dir_layout(config):
+                temp_dir = tempfile.mkdtemp(prefix="restore-restic-")
+                subprocess.run(["restic", "restore", snapshot, "--target", temp_dir], env=env, check=True)
+                actions.append(f"Restore restic snapshot into temporary workspace: {snapshot}")
+                _restore_backup_dir_layout(temp_dir, config, actions)
+            else:
+                _clear_target_contents(config.target_path)
+                subprocess.run(["restic", "restore", snapshot, "--target", config.target_path], env=env, check=True)
+                actions.append(f"Restore restic snapshot: {snapshot}")
 
             if config.chown:
                 _apply_chown(config.target_path, config.chown)
@@ -282,3 +372,6 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
                 planned_actions=actions,
                 error=str(e)
             )
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)

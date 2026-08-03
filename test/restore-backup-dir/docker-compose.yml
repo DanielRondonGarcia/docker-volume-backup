@@ -1,0 +1,73 @@
+version: "3"
+
+# Manual verification for the smart /backup restore layout.
+# Suggested flow:
+#   docker compose --profile setup up seed-restic-repo seed-target
+#   docker compose --profile restore up restore-smart
+#   docker compose --profile restore up verify-smart
+
+services:
+
+  seed-restic-repo:
+    build: ../..
+    profiles: ["setup"]
+    entrypoint: /bin/sh
+    command: >
+      -c "rm -rf /restic-repo/* /backup/* &&
+          mkdir -p /backup/storage_data /backup/redis_data &&
+          printf 'chatwoot data\n' > /backup/storage_data/restored.txt &&
+          printf 'redis dump\n' > /backup/redis_data/dump.rdb &&
+          restic init || true &&
+          restic backup /backup"
+    environment:
+      RESTIC_REPOSITORY: /restic-repo
+      RESTIC_PASSWORD: restic-test-password
+    volumes:
+      - restic-repo:/restic-repo
+      - source-root:/backup
+
+  seed-target:
+    image: alpine:3.20
+    profiles: ["setup"]
+    command: >
+      sh -c "mkdir -p /backup/storage_data /backup/redis_data &&
+             printf 'stale storage\n' > /backup/storage_data/stale.txt &&
+             printf 'stale redis\n' > /backup/redis_data/stale.txt"
+    volumes:
+      - restore-root:/backup
+
+  restore-smart:
+    build: ../..
+    profiles: ["restore"]
+    environment:
+      RESTORE_MODE: "true"
+      RESTORE_BACKUP_STRATEGY: restic
+      RESTORE_TARGET_PATH: /backup
+      RESTORE_DRY_RUN: "false"
+      RESTORE_FORCE_OVERWRITE: "true"
+      RESTIC_REPOSITORY: /restic-repo
+      RESTIC_PASSWORD: restic-test-password
+    volumes:
+      - restore-root:/backup
+      - restic-repo:/restic-repo
+
+  verify-smart:
+    image: alpine:3.20
+    profiles: ["restore"]
+    depends_on:
+      restore-smart:
+        condition: service_completed_successfully
+    command: >
+      sh -c "test -f /backup/storage_data/restored.txt &&
+             grep -q 'chatwoot data' /backup/storage_data/restored.txt &&
+             test -f /backup/redis_data/dump.rdb &&
+             grep -q 'redis dump' /backup/redis_data/dump.rdb &&
+             test ! -e /backup/storage_data/stale.txt &&
+             test ! -e /backup/redis_data/stale.txt"
+    volumes:
+      - restore-root:/backup:ro
+
+volumes:
+  restic-repo:
+  source-root:
+  restore-root:

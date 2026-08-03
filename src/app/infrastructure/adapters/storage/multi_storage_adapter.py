@@ -33,6 +33,11 @@ class MultiStorageAdapter(StoragePort):
 
     def list_restore_candidates(self, config: RestoreConfig) -> list[RestoreCandidate]:
         candidates = []
+        if config.backup_strategy == "restic":
+            repository = config.restic_repository or os.environ.get("RESTIC_REPOSITORY")
+            if repository:
+                candidates.extend(self._list_restic_candidates(config, repository))
+
         local_archive_path = config.local_archive_path or os.environ.get("BACKUP_ARCHIVE")
         if local_archive_path:
             candidates.extend(self._list_local_candidates(local_archive_path, config.backup_strategy))
@@ -92,6 +97,37 @@ class MultiStorageAdapter(StoragePort):
                     size=item.stat().st_size
                 ))
         return candidates
+
+    def _list_restic_candidates(self, config: RestoreConfig, repository: str) -> list[RestoreCandidate]:
+        env = os.environ.copy()
+        env["RESTIC_REPOSITORY"] = repository
+        if config.restic_password or os.environ.get("RESTIC_PASSWORD"):
+            env["RESTIC_PASSWORD"] = config.restic_password or os.environ.get("RESTIC_PASSWORD")
+
+        try:
+            result = subprocess.run(
+                ["restic", "snapshots", "--json"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env,
+            )
+            snapshots = __import__("json").loads(result.stdout or "[]")
+            candidates = []
+            for snapshot in snapshots:
+                snapshot_id = snapshot.get("short_id") or snapshot.get("id")
+                if not snapshot_id:
+                    continue
+                created_at = snapshot.get("time")
+                candidates.append(RestoreCandidate(
+                    source=snapshot_id,
+                    strategy="restic",
+                    created_at=datetime.fromisoformat(created_at.replace("Z", "+00:00")) if created_at else None,
+                ))
+            return candidates
+        except Exception as e:
+            logger.error(f"Restic restore listing failed: {e}")
+            return []
 
     def _list_s3_candidates(self, bucket: str, strategy: str) -> list[RestoreCandidate]:
         try:

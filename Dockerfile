@@ -40,9 +40,11 @@ ENV PYTHONPATH=/app
 # So let's symlink or copy them to /root
 RUN cp /app/src/entrypoint.sh /root/entrypoint.sh \
     && cp /app/src/backup.sh /root/backup.sh \
+    && cp /app/src/restore.sh /root/restore.sh \
     && sed -i 's/\r$//' /root/entrypoint.sh \
     && sed -i 's/\r$//' /root/backup.sh \
-    && chmod +x /root/entrypoint.sh /root/backup.sh
+    && sed -i 's/\r$//' /root/restore.sh \
+    && chmod +x /root/entrypoint.sh /root/backup.sh /root/restore.sh
 
 WORKDIR /root
 CMD ["/root/entrypoint.sh"]

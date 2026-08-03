@@ -75,6 +75,14 @@ This configuration will back up to AWS S3 instead. See below for additional tips
 
 Run restore as a one-shot container: start with a dry-run, verify the source and target, then run the destructive restore only with `RESTORE_FORCE_OVERWRITE=true`.
 
+If you already have the long-running `backup` service running, you can also restore from that same container with the new helper script:
+
+```bash
+docker compose exec backup /root/restore.sh
+```
+
+By default, `/root/restore.sh` assumes the centralized `/backup` layout and activates a smart restore flow that matches each mounted entry under `/backup` with the corresponding entry stored in the backup source.
+
 **Important:** an actual restore replaces the contents of `RESTORE_TARGET_PATH`. It does not merge files. Keep `RESTORE_DRY_RUN=true` until you're ready to overwrite the target.
 
 #### Quick path
@@ -133,6 +141,7 @@ Common optional restore variables:
 | `RESTORE_DRY_RUN` | `true` | When true, reports the plan without downloading, replacing, extracting, stopping containers, or changing files. |
 | `RESTORE_FORCE_OVERWRITE` | `false` | Must be `true` for actual restore. Without it, restore fails before modifying the target. |
 | `RESTORE_BACKUP_STRATEGY` | `BACKUP_STRATEGY` or `tar` | Use `tar` for tarballs/encrypted tarballs or `restic` for Restic snapshots. |
+| `RESTORE_LAYOUT` | `auto` | `auto` switches to smart `/backup` matching when `RESTORE_TARGET_PATH=/backup`; `direct` keeps the previous extract/restore behavior; `backup-dir` forces name-based matching of entries under `/backup`. |
 | `RESTORE_STOP_CONTAINERS` | `false` | Stops and starts containers using the target volume when Docker socket access is mounted. |
 | `RESTORE_CHOWN` | Archive ownership | Numeric `uid:gid` applied recursively after target replacement and extraction/restore. Preferred for non-root application containers. |
 
@@ -159,6 +168,20 @@ RESTORE_MODE=true \
 RESTORE_TARGET_PATH=/restore-target \
 BACKUP_ARCHIVE=/archive \
 docker compose run --rm restore
+```
+
+Restore from the running `backup` container using the centralized `/backup` layout:
+
+```bash
+docker compose exec backup /root/restore.sh
+```
+
+Force restore from the running `backup` container after validating the dry-run:
+
+```bash
+RESTORE_DRY_RUN=false \
+RESTORE_FORCE_OVERWRITE=true \
+docker compose exec backup /root/restore.sh
 ```
 
 Local force restore with explicit ownership for a non-root app:
@@ -228,7 +251,7 @@ docker compose run --rm --user 1000:1000 sftpgo \
   sh -c 'test -w /srv/sftpgo && test -w /srv/sftpgo/sftpgo.db'
 ```
 
-Manual restore scenarios live under [`test/restore-local`](test/restore-local/), [`test/restore-permissions`](test/restore-permissions/), [`test/restore-sftpgo-sqlite`](test/restore-sftpgo-sqlite/), [`test/restore-s3`](test/restore-s3/), and [`test/restore-restic`](test/restore-restic/).
+Manual restore scenarios live under [`test/restore-local`](test/restore-local/), [`test/restore-backup-dir`](test/restore-backup-dir/), [`test/restore-permissions`](test/restore-permissions/), [`test/restore-sftpgo-sqlite`](test/restore-sftpgo-sqlite/), [`test/restore-s3`](test/restore-s3/), and [`test/restore-restic`](test/restore-restic/).
 
 ### Backing up to remote host by means of SCP
 

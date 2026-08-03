@@ -61,13 +61,22 @@ class RestoreService:
             return "RESTORE_CHOWN must be numeric uid:gid, for example 1000:1000"
         return None
 
+    def _validate_layout(self) -> Optional[str]:
+        layout = (self.restore_config.layout or "auto").lower()
+        if layout not in ("auto", "direct", "backup-dir"):
+            return "RESTORE_LAYOUT must be one of: auto, direct, backup-dir"
+        return None
+
     def _planned_actions(self, candidate: RestoreCandidate, affected_containers: List[str]) -> List[str]:
         actions = [
             f"Select restore source: {candidate.source}",
             f"Target path: {self.restore_config.target_path}",
+            f"Restore layout: {self.restore_config.layout}",
             "Replace target contents before restore (no merge)",
             f"Restore strategy: {candidate.strategy}",
         ]
+        if (self.restore_config.layout or "auto") in ("auto", "backup-dir"):
+            actions.append("When target points to /backup, match backup subdirectories by name and restore them in place")
         if affected_containers:
             actions.append(f"Affected containers: {', '.join(affected_containers)}")
         else:
@@ -87,6 +96,9 @@ class RestoreService:
         chown_error = self._validate_chown()
         if chown_error:
             return self._failure(chown_error)
+        layout_error = self._validate_layout()
+        if layout_error:
+            return self._failure(layout_error)
 
         try:
             candidate = self._select_candidate()

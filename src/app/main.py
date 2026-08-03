@@ -64,6 +64,7 @@ def main():
             stop_containers=_env_bool("RESTORE_STOP_CONTAINERS"),
             chown=os.environ.get("RESTORE_CHOWN") or None,
             backup_strategy=restore_strategy_name,
+            layout=os.environ.get("RESTORE_LAYOUT", "auto").lower(),
             gpg_passphrase=gpg_passphrase,
             restic_repository=restic_repo,
             restic_password=restic_pass,

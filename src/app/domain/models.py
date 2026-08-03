@@ -49,6 +49,7 @@ class RestoreConfig:
     stop_containers: bool = False
     chown: Optional[str] = None
     backup_strategy: str = "tar"
+    layout: str = "auto"
     gpg_passphrase: Optional[str] = None
     restic_repository: Optional[str] = None
     restic_password: Optional[str] = None
