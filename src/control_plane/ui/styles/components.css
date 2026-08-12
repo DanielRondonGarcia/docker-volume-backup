@@ -344,7 +344,7 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .switch:hover .slider { filter: brightness(0.95); }
 
 .cron-preview { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: var(--accent); border: 1px solid var(--border); font-size: 13px; line-height: 1.5; }
-.cron-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; background: var(--success, #059669); color: white; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.cron-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; background: #d1fae5; color: #065f46; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .cron-next { color: var(--foreground); font-size: 12px; }
 .cron-next strong { color: var(--primary, #2563eb); }
 .cron-manual { color: var(--muted-foreground); font-style: italic; font-size: 12px; }
