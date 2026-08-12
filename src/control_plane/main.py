@@ -679,6 +679,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     stop_containers=body.get("stop_containers"),
                     chown=body.get("chown"),
                     layout=body.get("layout"),
+                    snapshot_id=body.get("snapshot_id"),
                 )
                 return self._write_json(202, _to_jsonable(job))
 

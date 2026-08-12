@@ -464,8 +464,11 @@ class ControlPlaneService:
         stop_containers: Optional[bool] = None,
         chown: Optional[str] = None,
         layout: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
     ) -> JobRecord:
         target = self._require_target(target_id)
+        if snapshot_id:
+            restore_source = snapshot_id
         payload = self._build_restore_payload(
             target=target,
             restore_source=restore_source,

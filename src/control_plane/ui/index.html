@@ -813,7 +813,10 @@ docker compose up -d
                   <td class="mono">${escapeHtml(s.snapshot_id || "—")}</td>
                   <td>${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : "—")}</td>
                   <td class="mono" style="font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((s.paths || []).join(", ") || "—")}</td>
-                  <td><button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button></td>
+                  <td class="action-cell">
+                    <button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button>
+                    <button class="btn ghost xs danger" data-restore-snap="${escapeHtml(s.snapshot_id)}" data-restore-date="${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : '')}">Restaurar</button>
+                  </td>
                 </tr>
               `).join("")}
             </tbody>
@@ -841,9 +844,73 @@ docker compose up -d
         content.querySelectorAll("[data-snap]").forEach(btn => {
           btn.addEventListener("click", () => browseSnapshot(btn.dataset.snap, ""));
         });
+        content.querySelectorAll("[data-restore-snap]").forEach(btn => {
+          btn.addEventListener("click", () => openRestoreFromSnapshotModal(btn.dataset.restoreSnap, btn.dataset.restoreDate));
+        });
       };
 
       renderTable();
+    }
+
+    function openRestoreFromSnapshotModal(snapshotId, dateStr) {
+      const target = snapshotBrowserState.target;
+      if (!target) return;
+      const overlay = document.getElementById("modalOverlay");
+      const prevHtml = overlay.innerHTML;
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:520px;">
+          <div class="modal-header"><h3>Restaurar desde snapshot</h3><button class="close" id="rsClose">&times;</button></div>
+          <div class="modal-body">
+            <div class="restore-snap-info">
+              <div class="field-row">
+                <div class="field"><label>Target</label><div class="info-value">${escapeHtml(target.name)}</div></div>
+                <div class="field"><label>Snapshot</label><div class="info-value mono">${escapeHtml(snapshotId)}</div></div>
+              </div>
+              ${dateStr ? `<div class="field"><label>Fecha del snapshot</label><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}
+            </div>
+            <div class="field">
+              <label for="rsDryRun">Modo</label>
+              <select id="rsDryRun">
+                <option value="true">Dry-run (simular, no escribir)</option>
+                <option value="false">Restaurar (sobrescribir archivos)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="rsOverwrite">Sobrescribir existentes</label>
+              <select id="rsOverwrite">
+                <option value="false">No sobrescribir archivos existentes</option>
+                <option value="true">Sobrescribir archivos existentes</option>
+              </select>
+            </div>
+            <div class="restore-warning">
+              <strong>Atencion:</strong> La restauracion reemplazara los datos del volumen con el contenido del snapshot.
+              Asegurate de entender el impacto antes de continuar.
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn" id="rsCancel">Cancelar</button>
+            <button class="btn primary" id="rsConfirm">Restaurar</button>
+          </div>
+        </div>
+      `;
+      function close() { overlay.classList.remove("open"); overlay.innerHTML = ""; }
+      function backToSnapshots() { overlay.innerHTML = prevHtml; }
+      document.getElementById("rsClose").addEventListener("click", backToSnapshots);
+      document.getElementById("rsCancel").addEventListener("click", backToSnapshots);
+      document.getElementById("rsConfirm").addEventListener("click", async () => {
+        const dryRun = document.getElementById("rsDryRun").value === "true";
+        const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
+        const modeLabel = dryRun ? "dry-run" : "run";
+        try {
+          const job = await apiPost(`/api/v1/targets/${target.id}/restore/${modeLabel}`, {
+            requested_by: "ui",
+            snapshot_id: snapshotId,
+            force_overwrite: forceOverwrite,
+          });
+          close();
+          openLogPanel(job.id, target.id);
+        } catch (error) { alert(`Error restaurando: ${error.message}`); }
+      });
     }
 
     async function browseSnapshot(snapshotId, path) {
