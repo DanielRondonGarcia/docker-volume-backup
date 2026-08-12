@@ -169,6 +169,10 @@ class InMemorySecretRepository(SecretRepository):
     def list(self) -> List[SecretRecord]:
         return sorted(self._items.values(), key=lambda item: item.created_at)
 
+    def delete(self, secret_id: str) -> None:
+        with self._lock:
+            self._items.pop(secret_id, None)
+
 
 class InMemorySnapshotRepository(SnapshotRepository):
     def __init__(self):

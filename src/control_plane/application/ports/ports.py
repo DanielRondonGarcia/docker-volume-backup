@@ -125,6 +125,10 @@ class SecretRepository(ABC):
     def list(self) -> List[SecretRecord]:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete(self, secret_id: str) -> None:
+        raise NotImplementedError
+
 
 class SnapshotRepository(ABC):
     @abstractmethod

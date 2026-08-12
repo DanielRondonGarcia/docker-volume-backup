@@ -728,6 +728,16 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     global_cron_expression=body.get("global_cron_expression"),
                 )
                 return self._write_json(200, _to_jsonable(settings))
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:
+                secret = self._control_plane_service().update_secret(
+                    secret_id=parts[3],
+                    plaintext=body.get("plaintext"),
+                    name=body.get("name"),
+                )
+                return self._write_json(200, _secret_to_public(secret))
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "secrets"] and parts[4] == "usages":
+                usages = self._control_plane_service().find_secret_usages(parts[3])
+                return self._write_json(200, {"items": usages})
             return self._write_json(404, {"error": "not found"})
         except ValueError as exc:
             return self._write_json(400, {"error": str(exc)})
@@ -745,6 +755,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 deleted = self._control_plane_service().delete_target(parts[3])
                 if not deleted:
                     return self._write_json(404, {"error": "target not found"})
+                return self._write_json(204, {})
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:
+                self._control_plane_service().delete_secret(parts[3])
                 return self._write_json(204, {})
             return self._write_json(404, {"error": "not found"})
         except ValueError as exc:

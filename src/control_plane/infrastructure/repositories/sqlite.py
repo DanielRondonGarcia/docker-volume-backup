@@ -597,6 +597,10 @@ class SQLiteSecretRepository(SQLiteRepositoryBase, SecretRepository):
             rows = connection.execute("SELECT * FROM secrets ORDER BY created_at ASC").fetchall()
         return [self._row_to_secret(row) for row in rows]
 
+    def delete(self, secret_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM secrets WHERE id = ?", (secret_id,))
+
     @staticmethod
     def _row_to_secret(row: sqlite3.Row) -> SecretRecord:
         return SecretRecord(

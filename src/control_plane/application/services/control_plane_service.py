@@ -881,6 +881,44 @@ class ControlPlaneService:
     def get_secret(self, secret_id: str) -> SecretRecord:
         return self._require_secret(secret_id)
 
+    def update_secret(self, secret_id: str, plaintext: Optional[str] = None, name: Optional[str] = None) -> SecretRecord:
+        secret = self._require_secret(secret_id)
+        if name is not None:
+            secret.name = name.strip() or secret.name
+        if plaintext is not None and plaintext != "":
+            secret.ciphertext = self.secret_codec.encrypt(plaintext)
+            secret.key_version = getattr(self.secret_codec, "key_version", "v1")
+        secret.updated_at = utcnow()
+        return self.secret_repository.save(secret)
+
+    def find_secret_usages(self, secret_id: str) -> List[Dict[str, Any]]:
+        usages: List[Dict[str, Any]] = []
+        for target in self.target_repository.list():
+            if target.restic_password_secret_id == secret_id:
+                usages.append({"type": "target", "id": target.id, "name": target.name, "field": "restic_password"})
+        for profile in self.storage_profile_repository.list():
+            for env_name, ref_id in (profile.secret_refs or {}).items():
+                if ref_id == secret_id:
+                    usages.append({"type": "storage_profile", "id": profile.id, "name": profile.name, "field": f"env:{env_name}"})
+            for container_path, ref_id in (profile.file_secret_refs or {}).items():
+                if ref_id == secret_id:
+                    usages.append({"type": "storage_profile", "id": profile.id, "name": profile.name, "field": f"file:{container_path}"})
+        settings = self.get_settings()
+        if settings:
+            if settings.restic_password_secret_id == secret_id:
+                usages.append({"type": "settings", "id": "global", "name": "Settings", "field": "restic_password"})
+            if settings.rclone_conf_secret_id == secret_id:
+                usages.append({"type": "settings", "id": "global", "name": "Settings", "field": "rclone_conf"})
+        return usages
+
+    def delete_secret(self, secret_id: str) -> None:
+        self._require_secret(secret_id)
+        usages = self.find_secret_usages(secret_id)
+        if usages:
+            refs = ", ".join(f"{u['type']}:{u['name']}({u['field']})" for u in usages)
+            raise ValueError(f"secret is in use by: {refs}")
+        self.secret_repository.delete(secret_id)
+
     def fetch_jobs_for_worker(self, worker_id: str) -> List[JobRecord]:
         self._require_worker(worker_id)
         jobs = self.job_repository.list_pending_for_worker(worker_id)

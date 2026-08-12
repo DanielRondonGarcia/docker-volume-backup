@@ -1686,12 +1686,70 @@ docker compose up -d
         </div></details>
         <div class="page-header"><div><h2>Secretos configurados</h2><div class="subtitle">Los secretos tipo rclone se usan en storage profiles con backend rclone</div></div></div>
         <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Tipo</th><th>Scope</th><th>Creado</th></tr></thead>
+          <thead><tr><th>Nombre</th><th>Tipo</th><th>Scope</th><th>Creado</th><th>Actualizado</th><th>Acciones</th></tr></thead>
           <tbody>${state.secrets.length ? state.secrets.map(s => {
             const typeLabel = s.secret_type === "file" ? "rclone" : s.secret_type;
-            return `<tr><td>${escapeHtml(s.name)}</td><td><span class="pill muted">${escapeHtml(typeLabel)}</span></td><td class="mono">${escapeHtml(s.scope || "global")}</td><td class="mono">${fmtDate(s.created_at)}</td></tr>`;
-          }).join("") : `<tr><td colspan="4" class="empty-state">Sin secretos</td></tr>`}</tbody>
+            return `<tr>
+              <td>${escapeHtml(s.name)}</td>
+              <td><span class="pill muted">${escapeHtml(typeLabel)}</span></td>
+              <td class="mono">${escapeHtml(s.scope || "global")}</td>
+              <td class="mono">${fmtDate(s.created_at)}</td>
+              <td class="mono">${fmtDate(s.updated_at)}</td>
+              <td class="action-cell">
+                <button class="btn sm" data-action="edit-secret" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" data-type="${escapeHtml(typeLabel)}">Editar</button>
+                <button class="btn sm danger" data-action="delete-secret" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}">Eliminar</button>
+              </td>
+            </tr>`;
+          }).join("") : `<tr><td colspan="6" class="empty-state">Sin secretos</td></tr>`}</tbody>
         </table></div></div>
+        <div id="secretEditModal" class="modal hidden">
+          <div class="modal-card" style="max-width:600px;">
+            <div class="modal-header"><h3 id="secretEditTitle">Editar secreto</h3><button class="modal-close" id="secretEditClose">×</button></div>
+            <div class="modal-body">
+              <div class="field full" style="margin-bottom:16px;">
+                <label for="secretEditName">Nombre</label>
+                <input id="secretEditName" />
+                <div class="helper">Nombre del secreto.</div>
+              </div>
+              <div class="field full">
+                <label>Valor actual</label>
+                <div class="secret-value-box">
+                  <span class="secret-masked">●●●●●●●●●●●●●●●●</span>
+                  <span class="secret-masked-hint">El valor esta cifrado y no se muestra</span>
+                </div>
+                <div class="helper">Por seguridad, el valor nunca se muestra. Para cambiarlo, habilita el reemplazo abajo.</div>
+              </div>
+              <div class="field full" style="margin-top:16px;">
+                <label class="switch-row">
+                  <input type="checkbox" id="secretReplaceToggle" />
+                  <span class="switch-label">Reemplazar valor</span>
+                </label>
+              </div>
+              <div class="field full hidden" id="secretReplaceField">
+                <label for="secretEditPlaintext" id="secretEditPlaintextLabel">Nuevo valor</label>
+                <textarea id="secretEditPlaintext" style="min-height:160px" placeholder="Pega aqui el nuevo valor del secreto"></textarea>
+                <div class="helper" id="secretEditHint">Ingresa el nuevo valor que reemplazara al actual.</div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn" id="secretEditCancel">Cancelar</button>
+              <button class="btn primary" id="secretEditSave">Guardar</button>
+            </div>
+          </div>
+        </div>
+        <div id="secretDeleteModal" class="modal hidden">
+          <div class="modal-card" style="max-width:500px;">
+            <div class="modal-header"><h3>Eliminar secreto</h3><button class="modal-close" id="secretDeleteClose">×</button></div>
+            <div class="modal-body">
+              <p>¿Eliminar el secreto <strong id="secretDeleteName"></strong>?</p>
+              <div id="secretDeleteUsages"></div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn" id="secretDeleteCancel">Cancelar</button>
+              <button class="btn danger" id="secretDeleteConfirm">Eliminar</button>
+            </div>
+          </div>
+        </div>
       `;
       const form = document.getElementById("createSecretForm");
       const secType = document.getElementById("secType");
@@ -1727,9 +1785,135 @@ docker compose up -d
               plaintext: document.getElementById("secPlaintext").value,
             });
             await refreshAll();
+            document.getElementById("secName").value = "";
+            document.getElementById("secPlaintext").value = "";
           } catch (error) { alert(`Error creando secreto: ${error.message}`); }
         });
       }
+
+      content.querySelectorAll("[data-action='edit-secret']").forEach(btn => {
+        btn.addEventListener("click", () => openSecretEditModal(btn.dataset.id, btn.dataset.name, btn.dataset.type));
+      });
+      content.querySelectorAll("[data-action='delete-secret']").forEach(btn => {
+        btn.addEventListener("click", () => openSecretDeleteModal(btn.dataset.id, btn.dataset.name));
+      });
+
+      const editModal = document.getElementById("secretEditModal");
+      const editClose = document.getElementById("secretEditClose");
+      const editCancel = document.getElementById("secretEditCancel");
+      const editSave = document.getElementById("secretEditSave");
+      const replaceToggle = document.getElementById("secretReplaceToggle");
+      const replaceField = document.getElementById("secretReplaceField");
+      const editPlaintextLabel = document.getElementById("secretEditPlaintextLabel");
+      const editHint = document.getElementById("secretEditHint");
+      let editingSecretId = null;
+      let editingSecretType = "generic";
+
+      function openSecretEditModal(id, name, type) {
+        editingSecretId = id;
+        editingSecretType = type;
+        document.getElementById("secretEditTitle").textContent = `Editar: ${name}`;
+        document.getElementById("secretEditName").value = name;
+        document.getElementById("secretReplaceToggle").checked = false;
+        replaceField.classList.add("hidden");
+        if (type === "rclone") {
+          editPlaintextLabel.textContent = "Nuevo rclone.conf";
+          document.getElementById("secretEditPlaintext").placeholder = "[miprod-s3]\ntype = s3\n...";
+          editHint.innerHTML = "Pega el nuevo rclone.conf que reemplazara al actual.";
+        } else if (type === "env") {
+          editPlaintextLabel.textContent = "Nueva variable de entorno";
+          document.getElementById("secretEditPlaintext").placeholder = "ACCESS_KEY_ID=...";
+          editHint.innerHTML = "Ingresa el nuevo valor de la variable de entorno.";
+        } else {
+          editPlaintextLabel.textContent = "Nuevo valor del secreto";
+          document.getElementById("secretEditPlaintext").placeholder = "Texto libre";
+          editHint.innerHTML = "Ingresa el nuevo valor del secreto.";
+        }
+        editModal.classList.remove("hidden");
+      }
+
+      function closeSecretEditModal() {
+        editModal.classList.add("hidden");
+        editingSecretId = null;
+        document.getElementById("secretEditPlaintext").value = "";
+      }
+
+      editClose.addEventListener("click", closeSecretEditModal);
+      editCancel.addEventListener("click", closeSecretEditModal);
+      editModal.addEventListener("click", (e) => { if (e.target === editModal) closeSecretEditModal(); });
+
+      replaceToggle.addEventListener("change", () => {
+        if (replaceToggle.checked) {
+          replaceField.classList.remove("hidden");
+        } else {
+          replaceField.classList.add("hidden");
+          document.getElementById("secretEditPlaintext").value = "";
+        }
+      });
+
+      editSave.addEventListener("click", async () => {
+        if (!editingSecretId) return;
+        const newName = document.getElementById("secretEditName").value.trim();
+        const patch = { name: newName };
+        if (replaceToggle.checked) {
+          const plaintext = document.getElementById("secretEditPlaintext").value;
+          if (!plaintext) { alert("Debes ingresar el nuevo valor del secreto"); return; }
+          patch.plaintext = plaintext;
+        }
+        try {
+          await apiPatch(`/api/v1/secrets/${editingSecretId}`, patch);
+          await refreshAll();
+          closeSecretEditModal();
+        } catch (error) { alert(`Error actualizando secreto: ${error.message}`); }
+      });
+
+      const deleteModal = document.getElementById("secretDeleteModal");
+      const deleteClose = document.getElementById("secretDeleteClose");
+      const deleteCancel = document.getElementById("secretDeleteCancel");
+      const deleteConfirm = document.getElementById("secretDeleteConfirm");
+      let deletingSecretId = null;
+
+      async function openSecretDeleteModal(id, name) {
+        deletingSecretId = id;
+        document.getElementById("secretDeleteName").textContent = name;
+        const usagesDiv = document.getElementById("secretDeleteUsages");
+        usagesDiv.innerHTML = '<div class="helper">Verificando uso...</div>';
+        deleteConfirm.disabled = true;
+        deleteModal.classList.remove("hidden");
+        try {
+          const resp = await apiGet(`/api/v1/secrets/${id}/usages`);
+          const usages = resp.items || [];
+          if (usages.length === 0) {
+            usagesDiv.innerHTML = '<div class="secret-safe"><span class="secret-safe-icon">✓</span> El secreto no esta en uso. Se puede eliminar.</div>';
+            deleteConfirm.disabled = false;
+          } else {
+            const usageList = usages.map(u => `<li><span class="pill muted">${escapeHtml(u.type)}</span> <strong>${escapeHtml(u.name)}</strong> — ${escapeHtml(u.field)}</li>`).join("");
+            usagesDiv.innerHTML = `<div class="secret-blocked"><span class="secret-blocked-icon">⚠</span> No se puede eliminar: el secreto esta en uso por:</div><ul class="secret-usage-list">${usageList}</ul>`;
+            deleteConfirm.disabled = true;
+          }
+        } catch (error) {
+          usagesDiv.innerHTML = `<div class="secret-blocked">Error verificando uso: ${escapeHtml(error.message)}</div>`;
+          deleteConfirm.disabled = true;
+        }
+      }
+
+      function closeSecretDeleteModal() {
+        deleteModal.classList.add("hidden");
+        deletingSecretId = null;
+      }
+
+      deleteClose.addEventListener("click", closeSecretDeleteModal);
+      deleteCancel.addEventListener("click", closeSecretDeleteModal);
+      deleteModal.addEventListener("click", (e) => { if (e.target === deleteModal) closeSecretDeleteModal(); });
+
+      deleteConfirm.addEventListener("click", async () => {
+        if (!deletingSecretId || deleteConfirm.disabled) return;
+        try {
+          await apiDelete(`/api/v1/secrets/${deletingSecretId}`);
+          await refreshAll();
+          closeSecretDeleteModal();
+        } catch (error) { alert(`Error eliminando secreto: ${error.message}`); }
+      });
     }
 
     function renderUsers(content) {
