@@ -428,6 +428,7 @@ class ControlPlaneService:
             "b64_content": result_summary.get("b64_content", ""),
             "job_id": job.id,
             "success": result.get("status") == "succeeded",
+            "error": result_summary.get("stderr", "") if result.get("status") != "succeeded" else "",
         }
 
     def dispatch_restore_for_target(
@@ -552,7 +553,7 @@ class ControlPlaneService:
             "command": "restic snapshots --json",
             "environment": environment,
             "volumes": volumes,
-            "network_mode": target.runtime_network_mode,
+            "network_mode": "bridge",
             "resolved_files": resolved_files,
             "labels": target.labels,
         }
@@ -572,7 +573,7 @@ class ControlPlaneService:
             "command": cmd,
             "environment": environment,
             "volumes": volumes,
-            "network_mode": target.runtime_network_mode,
+            "network_mode": "bridge",
             "resolved_files": resolved_files,
             "labels": target.labels,
         }
@@ -590,7 +591,7 @@ class ControlPlaneService:
             "command": cmd,
             "environment": environment,
             "volumes": volumes,
-            "network_mode": target.runtime_network_mode,
+            "network_mode": "bridge",
             "resolved_files": resolved_files,
             "labels": target.labels,
         }

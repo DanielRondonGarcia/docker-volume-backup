@@ -741,12 +741,20 @@ docker compose up -d
     }
 
     async function downloadSnapshotFile(snapshotId, filePath) {
+      const fileName = filePath.split("/").pop() || "download";
       try {
+        const btn = document.querySelector(`[data-download="${filePath.replace(/"/g, '&quot;')}"]`);
+        if (btn) { btn.disabled = true; btn.textContent = "Descargando..."; }
         const result = await apiPost(`/api/v1/targets/${snapshotBrowserState.target.id}/snapshot-dump`, {
           snapshot_id: snapshotId,
           path: filePath,
         });
-        if (!result.b64_content) { alert("No se pudo obtener el contenido del archivo."); return; }
+        if (btn) { btn.disabled = false; btn.textContent = "Descargar"; }
+        if (!result.success || !result.b64_content) {
+          const errMsg = result.error || "No se pudo obtener el contenido del archivo.";
+          alert(`Error descargando ${fileName}:\n${errMsg.substring(0, 500)}`);
+          return;
+        }
         const binary = atob(result.b64_content);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -754,13 +762,15 @@ docker compose up -d
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = filePath.split("/").pop() || "download";
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
       } catch (error) {
-        alert(`Error descargando archivo: ${error.message}`);
+        const btn = document.querySelector(`[data-download="${filePath.replace(/"/g, '&quot;')}"]`);
+        if (btn) { btn.disabled = false; btn.textContent = "Descargar"; }
+        alert(`Error descargando ${fileName}: ${error.message}`);
       }
     }
 
