@@ -1238,14 +1238,16 @@ docker compose up -d
       currentLogJobId = jobId;
       const panel = document.getElementById("targetLogPanel");
       if (!panel) return;
-      const target = state.targets.find(t => t.id === targetId);
       const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const tid = targetId || (existingJob ? existingJob.target_id : null);
+      const target = tid ? state.targets.find(t => t.id === tid) : null;
+      const targetLabel = target ? target.name : (tid || "job");
       const status = existingJob ? existingJob.status : "pending";
       panel.innerHTML = `
         <div class="log-panel">
           <div class="log-panel-header">
             <div class="log-panel-title">
-              <h3>Logs: ${escapeHtml(target ? target.name : targetId)}</h3>
+              <h3>Logs: ${escapeHtml(targetLabel)}</h3>
               <div class="job-status-bar" id="jobStatusBar">
                 <span class="job-status-pill ${status}">${status}</span>
                 <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
@@ -1580,6 +1582,7 @@ docker compose up -d
                 <th ${sortAttrs("status")}>Status${sortIcon("status")}</th>
                 <th ${sortAttrs("started_at")}>Inicio${sortIcon("started_at")}</th>
                 <th ${sortAttrs("finished_at")}>Fin${sortIcon("finished_at")}</th>
+                <th>Acciones</th>
               </tr>
               <tr class="filter-row">
                 <th><input type="text" class="dt-filter" data-col="id" placeholder="Filtrar ID..." value="${escapeHtml(jobsTableState.filters.id)}" /></th>
@@ -1588,10 +1591,13 @@ docker compose up -d
                 <th><input type="text" class="dt-filter" data-col="status" placeholder="Filtrar status..." value="${escapeHtml(jobsTableState.filters.status)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="started" placeholder="Filtrar inicio..." value="${escapeHtml(jobsTableState.filters.started)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="finished" placeholder="Filtrar fin..." value="${escapeHtml(jobsTableState.filters.finished)}" /></th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              ${pagedJobs.length === 0 ? `<tr><td colspan="6" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => `
+              ${pagedJobs.length === 0 ? `<tr><td colspan="7" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
+                const canCancel = j.status === "pending" || j.status === "in_progress";
+                return `
                 <tr>
                   <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
                   <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
@@ -1599,8 +1605,13 @@ docker compose up -d
                   <td>${fmtJobStatus(j.status)}</td>
                   <td class="mono">${fmtDate(j.started_at)}</td>
                   <td class="mono">${fmtDate(j.finished_at)}</td>
+                  <td class="action-cell">
+                    <button class="btn ghost xs" data-view-logs="${escapeHtml(j.id)}">Ver logs</button>
+                    ${canCancel ? `<button class="btn ghost xs danger" data-cancel-job="${escapeHtml(j.id)}">Cancelar</button>` : ""}
+                  </td>
                 </tr>
-              `).join("")}
+              `;
+              }).join("")}
             </tbody>
           </table></div></div>
           <div class="pagination">
@@ -1663,6 +1674,21 @@ docker compose up -d
             }
           });
         }
+        content.querySelectorAll("[data-view-logs]").forEach(btn => {
+          btn.addEventListener("click", () => openLogPanel(btn.dataset.viewLogs));
+        });
+        content.querySelectorAll("[data-cancel-job]").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const jobId = btn.dataset.cancelJob;
+            if (!confirm(`¿Cancelar el job ${jobId.slice(0,8)}?`)) return;
+            try {
+              await apiPost(`/api/v1/jobs/${jobId}/cancel`, {});
+              const jobsResp = await apiGet("/api/v1/jobs");
+              state.jobs = jobsResp.items || [];
+              renderJobs(content);
+            } catch (e) { alert(`Error cancelando job: ${e.message}`); }
+          });
+        });
       };
 
       renderTable();

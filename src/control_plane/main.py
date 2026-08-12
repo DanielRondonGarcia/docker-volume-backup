@@ -619,6 +619,15 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 )
                 return self._write_json(202, _to_jsonable(job))
 
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "jobs"] and parts[4] == "cancel":
+                if not self._require_auth(ROLE_OPERATOR, api_mode=True):
+                    return
+                try:
+                    job = self._control_plane_service().cancel_job(parts[3])
+                except ValueError as exc:
+                    return self._write_json(409, {"error": str(exc)})
+                return self._write_json(200, _to_jsonable(job))
+
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "snapshots-sync":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
                     return

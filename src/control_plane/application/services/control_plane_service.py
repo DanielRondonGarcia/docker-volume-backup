@@ -963,6 +963,18 @@ class ControlPlaneService:
     def list_jobs(self) -> List[JobRecord]:
         return self.job_repository.list()
 
+    def cancel_job(self, job_id: str) -> JobRecord:
+        job = self.job_repository.get(job_id)
+        if not job:
+            raise ValueError(f"job '{job_id}' not found")
+        if job.status not in ("pending", "in_progress"):
+            raise ValueError(f"job '{job_id}' cannot be cancelled (current status: {job.status})")
+        job.status = "cancelled"
+        if not job.finished_at:
+            job.finished_at = datetime.utcnow()
+        self.job_repository.save(job)
+        return job
+
     def list_targets(self) -> List[BackupTargetRecord]:
         return self.target_repository.list()
 
