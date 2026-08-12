@@ -679,24 +679,40 @@ docker compose up -d
     async function loadSnapshotsList(target) {
       const content = document.getElementById("snapContent");
       if (!content) return;
-      content.innerHTML = '<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Sincronizando snapshots desde el repositorio...</div>';
+      content.innerHTML = `
+        <div class="snap-loading">
+          <div class="snap-spinner"></div>
+          <div class="snap-loading-text">Sincronizando snapshots desde el repositorio restic...</div>
+          <div class="snap-loading-hint" id="snapLoadingHint">Esto puede tardar unos minutos mientras se conecta al storage remoto.</div>
+        </div>
+      `;
       try {
         const syncResp = await apiPost(`/api/v1/targets/${target.id}/snapshots-sync`, { requested_by: "ui" });
         const jobId = syncResp.id;
         if (jobId) {
           let done = false;
-          for (let i = 0; i < 30; i++) {
+          const maxAttempts = 150;
+          for (let i = 0; i < maxAttempts; i++) {
             await new Promise(r => setTimeout(r, 2000));
+            const hint = document.getElementById("snapLoadingHint");
+            if (hint) hint.textContent = `Esperando al worker... (${i + 1}/${maxAttempts})`;
             try {
               const job = await apiGet(`/api/v1/jobs/${jobId}`);
               if (job && (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled")) {
                 done = true;
+                if (job.status !== "succeeded") {
+                  const errLines = (job.log_lines || []).filter(l => l.toLowerCase().includes("error") || l.toLowerCase().includes("fail")).slice(-5);
+                  content.innerHTML = `<div class="snap-error"><strong>Error sincronizando snapshots</strong>${errLines.length ? `<pre class="snap-error-log">${escapeHtml(errLines.join("\n"))}</pre>` : ""}<button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
+                  const refreshBtn = document.getElementById("snapRefresh");
+                  if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
+                  return;
+                }
                 break;
               }
             } catch (e) {}
           }
           if (!done) {
-            content.innerHTML = `<div style="padding:20px; color:var(--warning, #f59e0b);">El sincronizado tardo demasiado. <button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
+            content.innerHTML = `<div class="snap-warning"><strong>El sincronizado esta tardando mas de lo esperado.</strong><div class="helper">El job sigue ejecutandose en background. Puedes esperar o reintentar.</div><button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
             const refreshBtn = document.getElementById("snapRefresh");
             if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
             return;
@@ -706,7 +722,7 @@ docker compose up -d
         snapshotBrowserState.snapshots = snaps.items || [];
         renderSnapshotsList(content);
       } catch (error) {
-        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error cargando snapshots: ${escapeHtml(error.message)} <button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
+        content.innerHTML = `<div class="snap-error"><strong>Error cargando snapshots:</strong> ${escapeHtml(error.message)}<button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
         const refreshBtn = document.getElementById("snapRefresh");
         if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
       }
