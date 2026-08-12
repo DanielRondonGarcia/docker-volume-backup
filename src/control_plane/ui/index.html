@@ -1453,31 +1453,14 @@ docker compose up -d
           warningEl.innerHTML = "";
           return;
         }
-        const cleanBase = base.replace(/^\/+|\/+$/g, "");
-        const hasPrefix = /^[a-z]+:/i.test(base);
-        const exampleTarget = "nginx";
-        let exampleRepo;
-        if (hasPrefix) {
-          exampleRepo = `${base.replace(/\/+$/, "")}/${exampleTarget}`;
-        } else if (rcloneSecret && rcloneRemote) {
-          exampleRepo = `rclone:${rcloneRemote}:${cleanBase}/${exampleTarget}`;
+        const startsSlash = /^\//.test(base);
+        const endsSlash = /\/$/.test(base);
+        if (startsSlash || endsSlash) {
+          previewEl.innerHTML = `<span style="color:var(--destructive); font-weight:700;">✗ La ruta no debe empezar ni terminar con /</span>`;
+          warningEl.innerHTML = `<div style="padding:6px 10px; border-radius:var(--radius); background:color-mix(in srgb, var(--destructive) 10%, var(--background)); border:1px solid color-mix(in srgb, var(--destructive) 30%, transparent); color:var(--destructive); font-size:12px; font-weight:600;">⚠ La ruta base no debe tener slash al inicio ni al final.</div>`;
         } else {
-          exampleRepo = `${cleanBase}/${exampleTarget}`;
-        }
-        if (hasPrefix) {
-          const isRclone = /^rclone:/i.test(base);
-          previewEl.innerHTML = `<span style="color:var(--muted-foreground);">Resultado para target <code>${exampleTarget}</code>:&nbsp;</span><code style="color:var(--success); font-weight:700;">${escapeHtml(exampleRepo)}</code>`;
-          if (isRclone && !rcloneSecret) {
-            warningEl.innerHTML = `<div style="padding:6px 10px; border-radius:var(--radius); background:color-mix(in srgb, var(--warning, #f59e0b) 10%, var(--background)); border:1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent); color:var(--warning, #f59e0b); font-size:12px; font-weight:600;">⚠ Usas rclone: pero no hay rclone.conf seleccionado. El backup fallara si no lo configuras.</div>`;
-          } else {
-            warningEl.innerHTML = "";
-          }
-        } else if (rcloneSecret && rcloneRemote) {
-          previewEl.innerHTML = `<span style="color:var(--muted-foreground);">Con rclone.conf [<code>${escapeHtml(rcloneRemote)}</code>], resultado para target <code>${exampleTarget}</code>:&nbsp;</span><code style="color:var(--success); font-weight:700;">${escapeHtml(exampleRepo)}</code>`;
+          previewEl.innerHTML = `<span style="color:var(--success); font-weight:700;">✓ ${escapeHtml(base)}</span>`;
           warningEl.innerHTML = "";
-        } else {
-          previewEl.innerHTML = `<span style="color:var(--destructive); font-weight:700;">✗ ${escapeHtml(exampleRepo)}</span> <span style="color:var(--muted-foreground);">(path local: el backup se perdera al terminar el contenedor)</span>`;
-          warningEl.innerHTML = `<div style="padding:6px 10px; border-radius:var(--radius); background:color-mix(in srgb, var(--destructive) 10%, var(--background)); border:1px solid color-mix(in srgb, var(--destructive) 30%, transparent); color:var(--destructive); font-size:12px; font-weight:600;">⚠ Path local sin backend. Selecciona un rclone.conf arriba para usar rclone, o usa un prefijo como rclone:, s3:, etc.</div>`;
         }
       };
       document.getElementById("settingsRepoBase").addEventListener("input", updateRepoPreview);
@@ -1493,8 +1476,8 @@ docker compose up -d
           document.getElementById("settingsRepoBase").focus();
           return;
         }
-        if (!/^[a-z]+:/.test(repoBase) && !rcloneSecret) {
-          showFeedback("La ruta base no tiene prefijo (rclone:, s3:, etc) y no hay rclone.conf seleccionado. Selecciona un rclone.conf o usa un prefijo.", "error");
+        if (/^\//.test(repoBase) || /\/$/.test(repoBase)) {
+          showFeedback("La ruta base no debe tener slash al inicio ni al final.", "error");
           document.getElementById("settingsRepoBase").focus();
           return;
         }
