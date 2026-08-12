@@ -80,23 +80,23 @@
     function fmtJobStatus(status) {
       const map = {
         succeeded: { cls: "job-success", icon: "✓", label: "Success" },
-        failed: { cls: "job-failed", icon: "✗", label: "Failed" },
-        running: { cls: "job-running", icon: "⟳", label: "Running" },
-        pending: { cls: "job-pending", icon: "⏳", label: "Pending" },
+        failed: { cls: "job-failed", icon: "✕", label: "Failed" },
+        running: { cls: "job-running", icon: "↻", label: "Running" },
+        pending: { cls: "job-pending", icon: "◔", label: "Pending" },
         canceled: { cls: "job-canceled", icon: "⊘", label: "Canceled" },
       };
-      const m = map[status] || { cls: "job-unknown", icon: "?", label: status || "—" };
+      const m = map[status] || { cls: "job-unknown", icon: "•", label: status || "—" };
       return `<span class="job-badge ${m.cls}"><span class="job-badge-icon">${m.icon}</span>${escapeHtml(m.label)}</span>`;
     }
 
     function fmtJobCommand(cmd) {
       const map = {
-        "backup.run": { cls: "cmd-backup", icon: "💾", label: "backup.run" },
-        "restore.run": { cls: "cmd-restore", icon: "↩", label: "restore.run" },
-        "snapshots.list": { cls: "cmd-list", icon: "📋", label: "snapshots.list" },
-        "snapshot.ls": { cls: "cmd-list", icon: "📋", label: "snapshot.ls" },
-        "snapshot.dump": { cls: "cmd-dump", icon: "📦", label: "snapshot.dump" },
-        "snapshot.restore": { cls: "cmd-restore", icon: "↩", label: "snapshot.restore" },
+        "backup.run": { cls: "cmd-backup", icon: "▲", label: "backup.run" },
+        "restore.run": { cls: "cmd-restore", icon: "▼", label: "restore.run" },
+        "snapshots.list": { cls: "cmd-list", icon: "≡", label: "snapshots.list" },
+        "snapshot.ls": { cls: "cmd-list", icon: "≡", label: "snapshot.ls" },
+        "snapshot.dump": { cls: "cmd-dump", icon: "◆", label: "snapshot.dump" },
+        "snapshot.restore": { cls: "cmd-restore", icon: "▼", label: "snapshot.restore" },
       };
       const m = map[cmd] || { cls: "cmd-other", icon: "•", label: cmd || "—" };
       return `<span class="cmd-badge ${m.cls}"><span class="cmd-badge-icon">${m.icon}</span>${escapeHtml(m.label)}</span>`;
