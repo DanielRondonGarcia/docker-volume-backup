@@ -396,12 +396,19 @@ class ControlPlaneService:
         )
         result = self._wait_for_job_completion(job.id, timeout_seconds=60)
         entries = []
+        logs = result.get("logs", "") or ""
         try:
-            entries = json.loads(result.get("logs", "[]") or "[]")
-            if isinstance(entries, dict):
-                entries = [entries]
+            parsed = json.loads(logs)
+            entries = parsed if isinstance(parsed, list) else [parsed]
         except json.JSONDecodeError:
-            entries = []
+            for line in logs.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
         return {"entries": entries, "job_id": job.id}
 
     def dispatch_snapshot_dump(self, target_id: str, snapshot_id: str, path: str) -> Dict[str, Any]:
@@ -969,12 +976,11 @@ class ControlPlaneService:
             if job and job.status in ("succeeded", "failed", "cancelled"):
                 return {
                     "status": job.status,
-                    "logs": job.logs or "",
-                    "exit_code": job.exit_code,
+                    "logs": "\n".join(job.log_lines or []),
                     "result_summary": job.result_summary or {},
                 }
             time.sleep(1)
-        return {"status": "timeout", "logs": "", "exit_code": None, "result_summary": {}}
+        return {"status": "timeout", "logs": "", "result_summary": {}}
 
     def _require_job(self, job_id: str) -> JobRecord:
         job = self.job_repository.get(job_id)

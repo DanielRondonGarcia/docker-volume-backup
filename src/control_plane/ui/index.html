@@ -581,15 +581,36 @@ docker compose up -d
     async function loadSnapshotsList(target) {
       const content = document.getElementById("snapContent");
       if (!content) return;
-      content.innerHTML = '<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Cargando snapshots...</div>';
+      content.innerHTML = '<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Sincronizando snapshots desde el repositorio...</div>';
       try {
-        await apiPost(`/api/v1/targets/${target.id}/snapshots-sync`, { requested_by: "ui" });
-        await new Promise(r => setTimeout(r, 3000));
+        const syncResp = await apiPost(`/api/v1/targets/${target.id}/snapshots-sync`, { requested_by: "ui" });
+        const jobId = syncResp.id;
+        if (jobId) {
+          let done = false;
+          for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const job = await apiGet(`/api/v1/jobs/${jobId}`);
+              if (job && (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled")) {
+                done = true;
+                break;
+              }
+            } catch (e) {}
+          }
+          if (!done) {
+            content.innerHTML = `<div style="padding:20px; color:var(--warning, #f59e0b);">El sincronizado tardo demasiado. <button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
+            const refreshBtn = document.getElementById("snapRefresh");
+            if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
+            return;
+          }
+        }
         const snaps = await apiGet(`/api/v1/targets/${target.id}/snapshots`);
         snapshotBrowserState.snapshots = snaps.items || [];
         renderSnapshotsList(content);
       } catch (error) {
-        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error cargando snapshots: ${escapeHtml(error.message)}</div>`;
+        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error cargando snapshots: ${escapeHtml(error.message)} <button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
+        const refreshBtn = document.getElementById("snapRefresh");
+        if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
       }
     }
 
@@ -643,19 +664,27 @@ docker compose up -d
     }
 
     function renderSnapshotBrowser(content, snapshotId, path, entries) {
-      const normalized = entries.filter(e => e && (e.type === "file" || e.type === "dir" || e.struct_type === "file" || e.struct_type === "dir" || e.path));
-      const isResticJson = entries.length > 0 && entries[0].path !== undefined;
+      const fileEntries = entries.filter(e => e && (e.struct_type === "node" || e.type === "file" || e.type === "dir"));
       const dirs = [];
       const files = [];
-      if (isResticJson) {
-        for (const e of entries) {
-          const isDir = e.type === "dir" || e.struct_type === "dir" || (e.type === "node" && e.struct_type === "dir");
-          const item = { path: e.path || "", name: (e.path || "").split("/").pop() || e.path, isDir };
-          if (isDir) dirs.push(item); else files.push(item);
-        }
+      for (const e of fileEntries) {
+        const isDir = e.type === "dir";
+        const item = { path: e.path || "", name: (e.path || "").split("/").pop() || e.path, isDir };
+        if (isDir) dirs.push(item); else files.push(item);
       }
-      dirs.sort((a, b) => a.name.localeCompare(b.name));
-      files.sort((a, b) => a.name.localeCompare(b.name));
+      const pathPrefix = path ? `/${path}` : "";
+      const visibleDirs = dirs.filter(d => {
+        const p = (d.path || "").replace(/^\//, "");
+        if (!path) return p.split("/").filter(Boolean).length === 1;
+        return p.startsWith(path + "/") && p.split("/").filter(Boolean).length === path.split("/").filter(Boolean).length + 1;
+      });
+      const visibleFiles = files.filter(f => {
+        const p = (f.path || "").replace(/^\//, "");
+        if (!path) return p.split("/").filter(Boolean).length === 1;
+        return p.startsWith(path + "/") && p.split("/").filter(Boolean).length === path.split("/").filter(Boolean).length + 1;
+      });
+      visibleDirs.sort((a, b) => a.name.localeCompare(b.name));
+      visibleFiles.sort((a, b) => a.name.localeCompare(b.name));
       const pathParts = path ? path.split("/").filter(Boolean) : [];
       const breadcrumbs = ['<a href="#" data-path="" style="color:var(--primary);">raiz</a>'];
       let acc = "";
@@ -673,12 +702,12 @@ docker compose up -d
         <div style="margin-bottom:12px; padding:8px 10px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); font-size:13px;">
           ${breadcrumbs.join(" ")}
         </div>
-        ${normalized.length === 0 ? '<div style="padding:20px; text-align:center; color:var(--muted-foreground);">Carpeta vacia o no se pudo listar.</div>' : `
+        ${(visibleDirs.length === 0 && visibleFiles.length === 0) ? '<div style="padding:20px; text-align:center; color:var(--muted-foreground);">Carpeta vacia o no se pudo listar.</div>' : `
         <table class="table" style="font-size:13px;">
           <thead><tr><th style="width:30px;"></th><th>Nombre</th><th>Tipo</th><th style="width:120px;">Acciones</th></tr></thead>
           <tbody>
-            ${dirs.map(d => {
-              const relPath = path ? `${path}/${d.name}` : d.name;
+            ${visibleDirs.map(d => {
+              const relPath = d.path.replace(/^\//, "");
               return `<tr>
                 <td>📁</td>
                 <td class="mono"><a href="#" data-dir="${escapeHtml(relPath)}" style="color:var(--primary);">${escapeHtml(d.name)}/</a></td>
@@ -686,8 +715,8 @@ docker compose up -d
                 <td><button class="btn ghost xs" data-dir-btn="${escapeHtml(relPath)}">Abrir</button></td>
               </tr>`;
             }).join("")}
-            ${files.map(f => {
-              const relPath = path ? `${path}/${f.name}` : f.name;
+            ${visibleFiles.map(f => {
+              const relPath = f.path.replace(/^\//, "");
               return `<tr>
                 <td>📄</td>
                 <td class="mono">${escapeHtml(f.name)}</td>

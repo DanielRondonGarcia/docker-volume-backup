@@ -126,6 +126,7 @@ class WorkerAgentService:
             if command == "snapshots.list":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.list_restic_snapshots(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
@@ -133,7 +134,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "snapshots": summary.get("snapshots", []),
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-50:],
+                    log_lines=combined_logs.splitlines()[-50:],
                 )
 
             if command == "snapshot.ls":

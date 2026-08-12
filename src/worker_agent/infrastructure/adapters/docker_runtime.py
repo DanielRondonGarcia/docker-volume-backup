@@ -266,7 +266,8 @@ class DockerRuntimeAdapter:
                 remove=False,
             )
             result = container.wait()
-            logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
             try:
                 container.remove(force=True)
             except Exception:
@@ -275,7 +276,8 @@ class DockerRuntimeAdapter:
             return {
                 "success": result.get("StatusCode", 1) == 0,
                 "status_code": result.get("StatusCode", 1),
-                "logs": logs,
+                "logs": stdout,
+                "stderr": stderr,
             }
         finally:
             if temp_dir:
@@ -287,7 +289,8 @@ class DockerRuntimeAdapter:
         snapshots = []
         if summary.get("success"):
             try:
-                snapshots = json.loads(logs or "[]")
+                parsed = json.loads(logs or "[]")
+                snapshots = parsed if isinstance(parsed, list) else [parsed]
             except json.JSONDecodeError:
                 summary["success"] = False
                 summary["error"] = "failed to parse restic snapshots JSON"
@@ -324,7 +327,7 @@ class DockerRuntimeAdapter:
                 local_path = os.path.join(temp_dir, filename)
                 with open(local_path, "w", encoding="utf-8") as handle:
                     handle.write(file_spec["content"])
-            volumes[temp_dir] = {"bind": "/run/secrets", "mode": "ro"}
+            volumes[temp_dir] = {"bind": "/run/secrets", "mode": "rw"}
             rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
             if rclone_spec:
                 environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
