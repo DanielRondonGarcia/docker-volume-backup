@@ -1189,14 +1189,117 @@ docker compose up -d
       refreshProjects();
     }
 
+    let jobsTableState = { sortKey: "started_at", sortDir: "desc", filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
+
     function renderJobs(content) {
-      content.innerHTML = `
-        <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore</div></div></div>
-        <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>ID</th><th>Target</th><th>Comando</th><th>Status</th><th>Inicio</th><th>Fin</th></tr></thead>
-          <tbody>${state.jobs.length ? state.jobs.map(j => `<tr><td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td><td>${escapeHtml(j.target_id || "—")}</td><td>${escapeHtml(j.command || "—")}</td><td>${fmtStatus(j.status)}</td><td class="mono">${fmtDate(j.started_at)}</td><td class="mono">${fmtDate(j.finished_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin jobs ejecutados</td></tr>`}</tbody>
-        </table></div></div>
-      `;
+      const allJobs = state.jobs || [];
+      const targetMap = {};
+      (state.targets || []).forEach(t => { targetMap[t.id] = t.name; });
+
+      const renderTable = () => {
+        let jobs = allJobs.slice();
+        jobs = jobs.filter(j => {
+          const id = String(j.id || "").toLowerCase();
+          const target = (targetMap[j.target_id] || j.target_id || "").toLowerCase();
+          const cmd = (j.command || "").toLowerCase();
+          const status = (j.status || "").toLowerCase();
+          const started = j.started_at ? new Date(j.started_at).toLocaleString().toLowerCase() : "";
+          const finished = j.finished_at ? new Date(j.finished_at).toLocaleString().toLowerCase() : "";
+          if (jobsTableState.filters.id && !id.includes(jobsTableState.filters.id.toLowerCase())) return false;
+          if (jobsTableState.filters.target && !target.includes(jobsTableState.filters.target.toLowerCase())) return false;
+          if (jobsTableState.filters.command && !cmd.includes(jobsTableState.filters.command.toLowerCase())) return false;
+          if (jobsTableState.filters.status && !status.includes(jobsTableState.filters.status.toLowerCase())) return false;
+          if (jobsTableState.filters.started && !started.includes(jobsTableState.filters.started.toLowerCase())) return false;
+          if (jobsTableState.filters.finished && !finished.includes(jobsTableState.filters.finished.toLowerCase())) return false;
+          return true;
+        });
+        const dir = jobsTableState.sortDir === "asc" ? 1 : -1;
+        jobs.sort((a, b) => {
+          let va, vb;
+          if (jobsTableState.sortKey === "started_at") {
+            va = new Date(a.started_at || 0).getTime();
+            vb = new Date(b.started_at || 0).getTime();
+          } else if (jobsTableState.sortKey === "finished_at") {
+            va = new Date(a.finished_at || 0).getTime();
+            vb = new Date(b.finished_at || 0).getTime();
+          } else if (jobsTableState.sortKey === "status") {
+            va = a.status || ""; vb = b.status || "";
+          } else if (jobsTableState.sortKey === "target") {
+            va = targetMap[a.target_id] || a.target_id || "";
+            vb = targetMap[b.target_id] || b.target_id || "";
+          } else if (jobsTableState.sortKey === "command") {
+            va = a.command || ""; vb = b.command || "";
+          } else {
+            va = String(a.id || ""); vb = String(b.id || "");
+          }
+          if (va < vb) return -1 * dir;
+          if (va > vb) return 1 * dir;
+          return 0;
+        });
+
+        const sortIcon = (key) => {
+          if (jobsTableState.sortKey !== key) return " ↕";
+          return jobsTableState.sortDir === "asc" ? " ↑" : " ↓";
+        };
+        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
+
+        content.innerHTML = `
+          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${jobs.length} de ${allJobs.length})</div></div></div>
+          <div class="table-wrap"><div class="sheet"><table class="table datatable">
+            <thead>
+              <tr>
+                <th ${sortAttrs("id")}>ID${sortIcon("id")}</th>
+                <th ${sortAttrs("target")}>Target${sortIcon("target")}</th>
+                <th ${sortAttrs("command")}>Comando${sortIcon("command")}</th>
+                <th ${sortAttrs("status")}>Status${sortIcon("status")}</th>
+                <th ${sortAttrs("started_at")}>Inicio${sortIcon("started_at")}</th>
+                <th ${sortAttrs("finished_at")}>Fin${sortIcon("finished_at")}</th>
+              </tr>
+              <tr class="filter-row">
+                <th><input type="text" class="dt-filter" data-col="id" placeholder="Filtrar ID..." value="${escapeHtml(jobsTableState.filters.id)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="target" placeholder="Filtrar target..." value="${escapeHtml(jobsTableState.filters.target)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="command" placeholder="Filtrar comando..." value="${escapeHtml(jobsTableState.filters.command)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="status" placeholder="Filtrar status..." value="${escapeHtml(jobsTableState.filters.status)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="started" placeholder="Filtrar inicio..." value="${escapeHtml(jobsTableState.filters.started)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="finished" placeholder="Filtrar fin..." value="${escapeHtml(jobsTableState.filters.finished)}" /></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${jobs.length === 0 ? `<tr><td colspan="6" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : jobs.map(j => `
+                <tr>
+                  <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
+                  <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
+                  <td>${escapeHtml(j.command || "—")}</td>
+                  <td>${fmtStatus(j.status)}</td>
+                  <td class="mono">${fmtDate(j.started_at)}</td>
+                  <td class="mono">${fmtDate(j.finished_at)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table></div></div>
+        `;
+
+        content.querySelectorAll("[data-sort]").forEach(th => {
+          th.addEventListener("click", () => {
+            const key = th.dataset.sort;
+            if (jobsTableState.sortKey === key) {
+              jobsTableState.sortDir = jobsTableState.sortDir === "asc" ? "desc" : "asc";
+            } else {
+              jobsTableState.sortKey = key;
+              jobsTableState.sortDir = "desc";
+            }
+            renderTable();
+          });
+        });
+        content.querySelectorAll(".dt-filter").forEach(input => {
+          input.addEventListener("input", () => {
+            jobsTableState.filters[input.dataset.col] = input.value;
+            renderTable();
+          });
+        });
+      };
+
+      renderTable();
     }
 
     function renderStorage(content) {
