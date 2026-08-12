@@ -81,6 +81,20 @@ class ControlPlaneService:
         worker_id: Optional[str] = None,
         certificate_fingerprint: Optional[str] = None,
     ) -> WorkerRecord:
+        existing = None
+        if worker_id:
+            existing = self.worker_repository.get(worker_id)
+        if not existing:
+            existing = self.worker_repository.find_by_name(name)
+        if existing:
+            existing.host_name = host_name
+            existing.version = version
+            existing.labels = labels or existing.labels or {}
+            existing.status = WorkerStatus.ONLINE
+            existing.certificate_fingerprint = certificate_fingerprint
+            existing.last_seen_at = utcnow()
+            existing.updated_at = utcnow()
+            return self.worker_repository.save(existing)
         worker = WorkerRecord(
             name=name,
             host_name=host_name,

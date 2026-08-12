@@ -43,6 +43,12 @@ class InMemoryWorkerRepository(WorkerRepository):
     def get(self, worker_id: str) -> Optional[WorkerRecord]:
         return self._items.get(worker_id)
 
+    def find_by_name(self, name: str) -> Optional[WorkerRecord]:
+        for worker in sorted(self._items.values(), key=lambda item: item.created_at):
+            if worker.name == name:
+                return worker
+        return None
+
     def list(self) -> List[WorkerRecord]:
         return sorted(self._items.values(), key=lambda item: item.created_at)
 

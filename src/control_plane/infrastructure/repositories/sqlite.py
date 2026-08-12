@@ -247,6 +247,11 @@ class SQLiteWorkerRepository(SQLiteRepositoryBase, WorkerRepository):
             row = connection.execute("SELECT * FROM workers WHERE id = ?", (worker_id,)).fetchone()
         return self._row_to_worker(row) if row else None
 
+    def find_by_name(self, name: str) -> Optional[WorkerRecord]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM workers WHERE name = ? ORDER BY created_at ASC LIMIT 1", (name,)).fetchone()
+        return self._row_to_worker(row) if row else None
+
     def list(self) -> List[WorkerRecord]:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM workers ORDER BY created_at ASC").fetchall()

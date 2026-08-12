@@ -29,6 +29,10 @@ class WorkerRepository(ABC):
     def list(self) -> List[WorkerRecord]:
         raise NotImplementedError
 
+    @abstractmethod
+    def find_by_name(self, name: str) -> Optional[WorkerRecord]:
+        raise NotImplementedError
+
 
 class WorkerEnrollmentRepository(ABC):
     @abstractmethod
