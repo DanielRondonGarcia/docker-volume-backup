@@ -450,6 +450,10 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .snap-warning { padding: 20px; color: #92400e; display: flex; flex-direction: column; gap: 8px; }
 .snap-warning .helper { color: var(--muted-foreground); font-size: 12px; }
 
+.snap-sync-banner { display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin-bottom: 16px; background: color-mix(in srgb, var(--accent, #e0e7ff) 15%, var(--card)); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; }
+.snap-spinner-sm { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent, var(--muted-foreground)); border-radius: 50%; animation: snap-spin 0.8s linear infinite; flex-shrink: 0; }
+.snap-sync-error { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+
 .secret-value-box { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border-radius: var(--radius); background: var(--muted); border: 1px solid var(--border); }
 .secret-masked { font-family: var(--mono-font, monospace); font-size: 14px; color: var(--muted-foreground); letter-spacing: 2px; }
 .secret-masked-hint { font-size: 11px; color: var(--muted-foreground); }
