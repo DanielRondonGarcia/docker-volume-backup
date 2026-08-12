@@ -534,12 +534,12 @@ docker compose up -d
                 <div class="dropdown">
                   <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
                   <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
-                    <button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>▶ Ejecutar backup</button>
-                    ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">📷 Snapshots</button>` : ""}
-                    ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">📋 Ver logs</button>` : ""}
-                    <button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">✎ Editar</button>
+                    <button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar backup</button>
+                    ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                    ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
+                    <button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
                     <div class="dropdown-divider"></div>
-                    <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">🗑 Eliminar</button>
+                    <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>
                   </div>
                 </div>
               </td>
@@ -576,7 +576,14 @@ docker compose up -d
           if (!menu) return;
           const isOpen = menu.classList.contains("open");
           document.querySelectorAll(".dropdown-menu.open").forEach(m => { if (m !== menu) m.classList.remove("open"); });
-          menu.classList.toggle("open");
+          if (isOpen) {
+            menu.classList.remove("open");
+            return;
+          }
+          const rect = btn.getBoundingClientRect();
+          menu.style.top = (rect.bottom + 4) + "px";
+          menu.style.right = (window.innerWidth - rect.right) + "px";
+          menu.classList.add("open");
         });
       });
       container.querySelectorAll("[data-action]").forEach(btn => {
