@@ -869,13 +869,6 @@ docker compose up -d
               ${dateStr ? `<div class="field"><label>Fecha del snapshot</label><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}
             </div>
             <div class="field">
-              <label for="rsDryRun">Modo</label>
-              <select id="rsDryRun">
-                <option value="true">Dry-run (simular, no escribir)</option>
-                <option value="false">Restaurar (sobrescribir archivos)</option>
-              </select>
-            </div>
-            <div class="field">
               <label for="rsOverwrite">Sobrescribir existentes</label>
               <select id="rsOverwrite">
                 <option value="false">No sobrescribir archivos existentes</option>
@@ -898,11 +891,9 @@ docker compose up -d
       document.getElementById("rsClose").addEventListener("click", backToSnapshots);
       document.getElementById("rsCancel").addEventListener("click", backToSnapshots);
       document.getElementById("rsConfirm").addEventListener("click", async () => {
-        const dryRun = document.getElementById("rsDryRun").value === "true";
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
-        const modeLabel = dryRun ? "dry-run" : "run";
         try {
-          const job = await apiPost(`/api/v1/targets/${target.id}/restore/${modeLabel}`, {
+          const job = await apiPost(`/api/v1/targets/${target.id}/restore/run`, {
             requested_by: "ui",
             snapshot_id: snapshotId,
             force_overwrite: forceOverwrite,
