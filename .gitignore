@@ -6,11 +6,19 @@ npm-debug.log
 .history
 .vscode
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Project
 # n/a
 /.trae
+/.atl
 /.agents
 /.control_plane.key
 /.control_plane.session.key
 /.control_plane.users.json
 /control_plane.db
+body.json
+target.json
