@@ -83,17 +83,23 @@ class SchedulerService:
 
     def _tick(self) -> None:
         now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        settings = self._service.get_settings()
+        global_cron = settings.global_cron_expression if settings else None
         targets = self._service.list_targets()
         for target in targets:
-            if not target.enabled or not target.cron_expression:
+            if not target.enabled:
+                continue
+            cron = target.cron_expression or global_cron
+            if not cron:
                 continue
             try:
-                if cron_matches(target.cron_expression, now):
+                if cron_matches(cron, now):
                     last = self._last_check.get(target.id)
                     if last and (now - last) < timedelta(minutes=1):
                         continue
                     self._last_check[target.id] = now
-                    logger.info("Dispatching scheduled backup for target %s (cron=%s)", target.id, target.cron_expression)
+                    source = "target cron" if target.cron_expression else "global cron"
+                    logger.info("Dispatching scheduled backup for target %s (%s=%s)", target.id, source, cron)
                     self._service.dispatch_backup_for_target(
                         target.id,
                         requested_by="scheduler",

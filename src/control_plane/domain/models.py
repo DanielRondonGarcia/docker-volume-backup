@@ -173,5 +173,6 @@ class SettingsRecord:
     restic_repository_base: str = ""
     restic_password_secret_id: Optional[str] = None
     rclone_conf_secret_id: Optional[str] = None
+    global_cron_expression: Optional[str] = None
     id: str = "default"
     updated_at: datetime = field(default_factory=utcnow)

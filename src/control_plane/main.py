@@ -717,6 +717,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restore_defaults=body.get("restore_defaults"),
                     labels=body.get("labels"),
                     cron_expression=body.get("cron_expression"),
+                    enabled=body.get("enabled"),
                 )
                 return self._write_json(200, _to_jsonable(target))
             if path == "/api/v1/settings":
@@ -724,6 +725,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restic_repository_base=body.get("restic_repository_base"),
                     restic_password_secret_id=body.get("restic_password_secret_id"),
                     rclone_conf_secret_id=body.get("rclone_conf_secret_id"),
+                    global_cron_expression=body.get("global_cron_expression"),
                 )
                 return self._write_json(200, _to_jsonable(settings))
             return self._write_json(404, {"error": "not found"})

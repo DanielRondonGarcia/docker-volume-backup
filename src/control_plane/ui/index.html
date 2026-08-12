@@ -498,14 +498,18 @@ docker compose up -d
               <td>${escapeHtml(retention ? retention.name : "—")}</td>
               <td>${cronLabel}</td>
               <td class="action-cell">
-                <button class="btn primary xs" data-action="run" data-id="${escapeHtml(t.id)}">Ejecutar</button>
+                <label class="switch" title="${t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target"}">
+                  <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" ${t.enabled ? "checked" : ""} />
+                  <span class="slider"></span>
+                </label>
+                <button class="btn primary xs" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar</button>
                 ${t.backup_strategy === "restic" ? `<button class="btn ghost xs" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
                 ${lastJob ? `<button class="btn ghost xs" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
                 <button class="btn ghost xs" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
                 <button class="btn ghost xs danger" data-action="delete" data-id="${escapeHtml(t.id)}">Eliminar</button>
               </td>
             </tr>`;
-          }).join("") : `<tr><td colspan="7" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
+          }).join("") : `<tr><td colspan="8" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
         </table></div></div>
         <div id="targetLogPanel"></div>
         <div id="modalOverlay"></div>
@@ -532,6 +536,7 @@ docker compose up -d
       const container = document.querySelector(".table-wrap");
       if (!container) return;
       container.querySelectorAll("[data-action]").forEach(btn => {
+        if (btn.dataset.action === "toggle") return;
         btn.addEventListener("click", async () => {
           const action = btn.dataset.action;
           const id = btn.dataset.id;
@@ -543,6 +548,19 @@ docker compose up -d
           else if (action === "logs") { openLogPanel(jobId, id); }
           else if (action === "edit") { openEditTargetModal(target); }
           else if (action === "delete") { await deleteTarget(id); }
+        });
+      });
+      container.querySelectorAll('input[type="checkbox"][data-action="toggle"]').forEach(cb => {
+        cb.addEventListener("change", async () => {
+          const id = cb.dataset.id;
+          const newEnabled = cb.checked;
+          try {
+            await apiPatch(`/api/v1/targets/${id}`, { enabled: newEnabled });
+            await refreshAll();
+          } catch (error) {
+            cb.checked = !newEnabled;
+            alert(`Error cambiando estado del target: ${error.message}`);
+          }
         });
       });
     }
@@ -1420,6 +1438,18 @@ docker compose up -d
             </div>
             <div style="height:1px; background:var(--border); margin:24px 0;"></div>
             <div style="margin-bottom: 20px;">
+              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Cron global (fallback)</h3>
+              <div class="helper" style="margin-bottom:16px;">Cron por defecto para targets que no tengan cron propio. Si un target tiene su propio cron, ese tiene prioridad. Vacio = solo backups manuales para targets sin cron.</div>
+            </div>
+            <div class="form-grid">
+              <div class="field full">
+                <label for="settingsGlobalCron">Cron global (opcional)</label>
+                <input id="settingsGlobalCron" value="${escapeHtml(settings.global_cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" />
+                <div class="helper">Expresion cron de 5 campos. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h). Los targets sin cron usaran este.</div>
+              </div>
+            </div>
+            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+            <div style="margin-bottom: 20px;">
               <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Password por defecto</h3>
               <div class="helper" style="margin-bottom:16px;">Si se configura, los targets no necesitan especificar password (queda en opciones avanzadas). Si no se configura, cada target debe elegir su propio secret de password.</div>
             </div>
@@ -1477,6 +1507,7 @@ docker compose up -d
         const repoBase = document.getElementById("settingsRepoBase").value.trim();
         const passwordSecret = emptyToNull(document.getElementById("settingsPasswordSecret").value);
         const rcloneSecret = emptyToNull(document.getElementById("settingsRcloneSecret").value);
+        const globalCron = emptyToNull(document.getElementById("settingsGlobalCron").value);
         if (!repoBase) {
           showFeedback("La ruta base del repositorio es obligatoria.", "error");
           document.getElementById("settingsRepoBase").focus();
@@ -1492,6 +1523,7 @@ docker compose up -d
             restic_repository_base: repoBase,
             restic_password_secret_id: passwordSecret,
             rclone_conf_secret_id: rcloneSecret,
+            global_cron_expression: globalCron,
           });
           await refreshAll();
           showFeedback("Guardado exitosamente.", "success");

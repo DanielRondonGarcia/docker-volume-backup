@@ -292,6 +292,7 @@ class ControlPlaneService:
         restore_defaults: Optional[Dict[str, Any]] = None,
         labels: Optional[Dict[str, str]] = None,
         cron_expression: Optional[str] = None,
+        enabled: Optional[bool] = None,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
         if worker_id is not None:
@@ -334,6 +335,8 @@ class ControlPlaneService:
             target.labels = labels
         if cron_expression is not None:
             target.cron_expression = cron_expression.strip() or None
+        if enabled is not None:
+            target.enabled = bool(enabled)
         target.updated_at = utcnow()
         return self.target_repository.save(target)
 
@@ -755,6 +758,7 @@ class ControlPlaneService:
         restic_repository_base: Optional[str] = None,
         restic_password_secret_id: Optional[str] = None,
         rclone_conf_secret_id: Optional[str] = None,
+        global_cron_expression: Optional[str] = None,
     ) -> SettingsRecord:
         if not self.settings_repository:
             raise ValueError("settings repository not configured")
@@ -771,6 +775,8 @@ class ControlPlaneService:
                 if secret.secret_type != "file":
                     raise ValueError("rclone conf secret must be of type 'file'")
                 existing.rclone_conf_secret_id = rclone_conf_secret_id or None
+        if global_cron_expression is not None:
+            existing.global_cron_expression = global_cron_expression.strip() or None
         existing.updated_at = utcnow()
         return self.settings_repository.save(existing)
 
