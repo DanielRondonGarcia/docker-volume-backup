@@ -1702,54 +1702,6 @@ docker compose up -d
             </tr>`;
           }).join("") : `<tr><td colspan="6" class="empty-state">Sin secretos</td></tr>`}</tbody>
         </table></div></div>
-        <div id="secretEditModal" class="modal hidden">
-          <div class="modal-card" style="max-width:600px;">
-            <div class="modal-header"><h3 id="secretEditTitle">Editar secreto</h3><button class="modal-close" id="secretEditClose">×</button></div>
-            <div class="modal-body">
-              <div class="field full" style="margin-bottom:16px;">
-                <label for="secretEditName">Nombre</label>
-                <input id="secretEditName" />
-                <div class="helper">Nombre del secreto.</div>
-              </div>
-              <div class="field full">
-                <label>Valor actual</label>
-                <div class="secret-value-box">
-                  <span class="secret-masked">●●●●●●●●●●●●●●●●</span>
-                  <span class="secret-masked-hint">El valor esta cifrado y no se muestra</span>
-                </div>
-                <div class="helper">Por seguridad, el valor nunca se muestra. Para cambiarlo, habilita el reemplazo abajo.</div>
-              </div>
-              <div class="field full" style="margin-top:16px;">
-                <label class="switch-row">
-                  <input type="checkbox" id="secretReplaceToggle" />
-                  <span class="switch-label">Reemplazar valor</span>
-                </label>
-              </div>
-              <div class="field full hidden" id="secretReplaceField">
-                <label for="secretEditPlaintext" id="secretEditPlaintextLabel">Nuevo valor</label>
-                <textarea id="secretEditPlaintext" style="min-height:160px" placeholder="Pega aqui el nuevo valor del secreto"></textarea>
-                <div class="helper" id="secretEditHint">Ingresa el nuevo valor que reemplazara al actual.</div>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button class="btn" id="secretEditCancel">Cancelar</button>
-              <button class="btn primary" id="secretEditSave">Guardar</button>
-            </div>
-          </div>
-        </div>
-        <div id="secretDeleteModal" class="modal hidden">
-          <div class="modal-card" style="max-width:500px;">
-            <div class="modal-header"><h3>Eliminar secreto</h3><button class="modal-close" id="secretDeleteClose">×</button></div>
-            <div class="modal-body">
-              <p>¿Eliminar el secreto <strong id="secretDeleteName"></strong>?</p>
-              <div id="secretDeleteUsages"></div>
-            </div>
-            <div class="modal-footer">
-              <button class="btn" id="secretDeleteCancel">Cancelar</button>
-              <button class="btn danger" id="secretDeleteConfirm">Eliminar</button>
-            </div>
-          </div>
-        </div>
       `;
       const form = document.getElementById("createSecretForm");
       const secType = document.getElementById("secType");
@@ -1798,88 +1750,128 @@ docker compose up -d
         btn.addEventListener("click", () => openSecretDeleteModal(btn.dataset.id, btn.dataset.name));
       });
 
-      const editModal = document.getElementById("secretEditModal");
-      const editClose = document.getElementById("secretEditClose");
-      const editCancel = document.getElementById("secretEditCancel");
-      const editSave = document.getElementById("secretEditSave");
-      const replaceToggle = document.getElementById("secretReplaceToggle");
-      const replaceField = document.getElementById("secretReplaceField");
-      const editPlaintextLabel = document.getElementById("secretEditPlaintextLabel");
-      const editHint = document.getElementById("secretEditHint");
       let editingSecretId = null;
-      let editingSecretType = "generic";
+      let deletingSecretId = null;
 
       function openSecretEditModal(id, name, type) {
         editingSecretId = id;
-        editingSecretType = type;
-        document.getElementById("secretEditTitle").textContent = `Editar: ${name}`;
-        document.getElementById("secretEditName").value = name;
-        document.getElementById("secretReplaceToggle").checked = false;
-        replaceField.classList.add("hidden");
-        if (type === "rclone") {
-          editPlaintextLabel.textContent = "Nuevo rclone.conf";
-          document.getElementById("secretEditPlaintext").placeholder = "[miprod-s3]\ntype = s3\n...";
-          editHint.innerHTML = "Pega el nuevo rclone.conf que reemplazara al actual.";
-        } else if (type === "env") {
-          editPlaintextLabel.textContent = "Nueva variable de entorno";
-          document.getElementById("secretEditPlaintext").placeholder = "ACCESS_KEY_ID=...";
-          editHint.innerHTML = "Ingresa el nuevo valor de la variable de entorno.";
-        } else {
-          editPlaintextLabel.textContent = "Nuevo valor del secreto";
-          document.getElementById("secretEditPlaintext").placeholder = "Texto libre";
-          editHint.innerHTML = "Ingresa el nuevo valor del secreto.";
+        const overlay = document.getElementById("modalOverlay");
+        const replaceHint = type === "rclone" ? "Pega el nuevo rclone.conf que reemplazara al actual."
+          : type === "env" ? "Ingresa el nuevo valor de la variable de entorno."
+          : "Ingresa el nuevo valor del secreto.";
+        const replaceLabel = type === "rclone" ? "Nuevo rclone.conf"
+          : type === "env" ? "Nueva variable de entorno"
+          : "Nuevo valor del secreto";
+        const replacePlaceholder = type === "rclone" ? "[miprod-s3]\ntype = s3\n..."
+          : type === "env" ? "ACCESS_KEY_ID=..."
+          : "Texto libre";
+        overlay.innerHTML = `
+          <div class="modal" style="max-width:600px;">
+            <div class="modal-header"><h3>Editar: ${escapeHtml(name)}</h3><button class="close" id="secEditClose">&times;</button></div>
+            <div class="modal-body">
+              <div class="field">
+                <label for="secEditName">Nombre</label>
+                <input id="secEditName" value="${escapeHtml(name)}" />
+                <div class="helper">Nombre del secreto.</div>
+              </div>
+              <div class="field">
+                <label>Valor actual</label>
+                <div class="secret-value-box">
+                  <span class="secret-masked">●●●●●●●●●●●●●●●●</span>
+                  <span class="secret-masked-hint">El valor esta cifrado y no se muestra</span>
+                </div>
+                <div class="helper">Por seguridad, el valor nunca se muestra. Para cambiarlo, habilita el reemplazo abajo.</div>
+              </div>
+              <div class="field">
+                <label class="switch-row">
+                  <input type="checkbox" id="secReplaceToggle" />
+                  <span class="switch-label">Reemplazar valor</span>
+                </label>
+              </div>
+              <div class="field hidden" id="secReplaceField">
+                <label for="secEditPlaintext">${escapeHtml(replaceLabel)}</label>
+                <textarea id="secEditPlaintext" style="min-height:160px" placeholder="${escapeHtml(replacePlaceholder)}"></textarea>
+                <div class="helper">${escapeHtml(replaceHint)}</div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn" id="secEditCancel">Cancelar</button>
+              <button class="btn primary" id="secEditSave">Guardar</button>
+            </div>
+          </div>
+        `;
+        overlay.classList.add("open");
+
+        const replaceToggle = document.getElementById("secReplaceToggle");
+        const replaceField = document.getElementById("secReplaceField");
+
+        function closeSecretEditModal() {
+          overlay.classList.remove("open");
+          overlay.innerHTML = "";
+          editingSecretId = null;
         }
-        editModal.classList.remove("hidden");
+
+        document.getElementById("secEditClose").addEventListener("click", closeSecretEditModal);
+        document.getElementById("secEditCancel").addEventListener("click", closeSecretEditModal);
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSecretEditModal(); });
+
+        replaceToggle.addEventListener("change", () => {
+          if (replaceToggle.checked) {
+            replaceField.classList.remove("hidden");
+          } else {
+            replaceField.classList.add("hidden");
+            document.getElementById("secEditPlaintext").value = "";
+          }
+        });
+
+        document.getElementById("secEditSave").addEventListener("click", async () => {
+          if (!editingSecretId) return;
+          const newName = document.getElementById("secEditName").value.trim();
+          const patch = { name: newName };
+          if (replaceToggle.checked) {
+            const plaintext = document.getElementById("secEditPlaintext").value;
+            if (!plaintext) { alert("Debes ingresar el nuevo valor del secreto"); return; }
+            patch.plaintext = plaintext;
+          }
+          try {
+            await apiPatch(`/api/v1/secrets/${editingSecretId}`, patch);
+            await refreshAll();
+            closeSecretEditModal();
+          } catch (error) { alert(`Error actualizando secreto: ${error.message}`); }
+        });
       }
-
-      function closeSecretEditModal() {
-        editModal.classList.add("hidden");
-        editingSecretId = null;
-        document.getElementById("secretEditPlaintext").value = "";
-      }
-
-      editClose.addEventListener("click", closeSecretEditModal);
-      editCancel.addEventListener("click", closeSecretEditModal);
-      editModal.addEventListener("click", (e) => { if (e.target === editModal) closeSecretEditModal(); });
-
-      replaceToggle.addEventListener("change", () => {
-        if (replaceToggle.checked) {
-          replaceField.classList.remove("hidden");
-        } else {
-          replaceField.classList.add("hidden");
-          document.getElementById("secretEditPlaintext").value = "";
-        }
-      });
-
-      editSave.addEventListener("click", async () => {
-        if (!editingSecretId) return;
-        const newName = document.getElementById("secretEditName").value.trim();
-        const patch = { name: newName };
-        if (replaceToggle.checked) {
-          const plaintext = document.getElementById("secretEditPlaintext").value;
-          if (!plaintext) { alert("Debes ingresar el nuevo valor del secreto"); return; }
-          patch.plaintext = plaintext;
-        }
-        try {
-          await apiPatch(`/api/v1/secrets/${editingSecretId}`, patch);
-          await refreshAll();
-          closeSecretEditModal();
-        } catch (error) { alert(`Error actualizando secreto: ${error.message}`); }
-      });
-
-      const deleteModal = document.getElementById("secretDeleteModal");
-      const deleteClose = document.getElementById("secretDeleteClose");
-      const deleteCancel = document.getElementById("secretDeleteCancel");
-      const deleteConfirm = document.getElementById("secretDeleteConfirm");
-      let deletingSecretId = null;
 
       async function openSecretDeleteModal(id, name) {
         deletingSecretId = id;
-        document.getElementById("secretDeleteName").textContent = name;
-        const usagesDiv = document.getElementById("secretDeleteUsages");
-        usagesDiv.innerHTML = '<div class="helper">Verificando uso...</div>';
-        deleteConfirm.disabled = true;
-        deleteModal.classList.remove("hidden");
+        const overlay = document.getElementById("modalOverlay");
+        overlay.innerHTML = `
+          <div class="modal" style="max-width:500px;">
+            <div class="modal-header"><h3>Eliminar secreto</h3><button class="close" id="secDelClose">&times;</button></div>
+            <div class="modal-body">
+              <p>¿Eliminar el secreto <strong>${escapeHtml(name)}</strong>?</p>
+              <div id="secDelUsages"><div class="helper">Verificando uso...</div></div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn" id="secDelCancel">Cancelar</button>
+              <button class="btn danger" id="secDelConfirm" disabled>Eliminar</button>
+            </div>
+          </div>
+        `;
+        overlay.classList.add("open");
+
+        const usagesDiv = document.getElementById("secDelUsages");
+        const deleteConfirm = document.getElementById("secDelConfirm");
+
+        function closeSecretDeleteModal() {
+          overlay.classList.remove("open");
+          overlay.innerHTML = "";
+          deletingSecretId = null;
+        }
+
+        document.getElementById("secDelClose").addEventListener("click", closeSecretDeleteModal);
+        document.getElementById("secDelCancel").addEventListener("click", closeSecretDeleteModal);
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSecretDeleteModal(); });
+
         try {
           const resp = await apiGet(`/api/v1/secrets/${id}/usages`);
           const usages = resp.items || [];
@@ -1895,25 +1887,16 @@ docker compose up -d
           usagesDiv.innerHTML = `<div class="secret-blocked">Error verificando uso: ${escapeHtml(error.message)}</div>`;
           deleteConfirm.disabled = true;
         }
+
+        deleteConfirm.addEventListener("click", async () => {
+          if (!deletingSecretId || deleteConfirm.disabled) return;
+          try {
+            await apiDelete(`/api/v1/secrets/${deletingSecretId}`);
+            await refreshAll();
+            closeSecretDeleteModal();
+          } catch (error) { alert(`Error eliminando secreto: ${error.message}`); }
+        });
       }
-
-      function closeSecretDeleteModal() {
-        deleteModal.classList.add("hidden");
-        deletingSecretId = null;
-      }
-
-      deleteClose.addEventListener("click", closeSecretDeleteModal);
-      deleteCancel.addEventListener("click", closeSecretDeleteModal);
-      deleteModal.addEventListener("click", (e) => { if (e.target === deleteModal) closeSecretDeleteModal(); });
-
-      deleteConfirm.addEventListener("click", async () => {
-        if (!deletingSecretId || deleteConfirm.disabled) return;
-        try {
-          await apiDelete(`/api/v1/secrets/${deletingSecretId}`);
-          await refreshAll();
-          closeSecretDeleteModal();
-        } catch (error) { alert(`Error eliminando secreto: ${error.message}`); }
-      });
     }
 
     function renderUsers(content) {
