@@ -1097,13 +1097,15 @@ docker compose up -d
       const panel = document.getElementById("targetLogPanel");
       if (!panel) return;
       const target = state.targets.find(t => t.id === targetId);
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const status = existingJob ? existingJob.status : "pending";
       panel.innerHTML = `
         <div class="log-panel">
           <div class="log-panel-header">
             <div class="log-panel-title">
               <h3>Logs: ${escapeHtml(target ? target.name : targetId)}</h3>
               <div class="job-status-bar" id="jobStatusBar">
-                <span class="job-status-pill pending">pending</span>
+                <span class="job-status-pill ${status}">${status}</span>
                 <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
               </div>
             </div>
@@ -1114,6 +1116,7 @@ docker compose up -d
       `;
       panel.classList.add("active");
       document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
+      if (existingJob) renderJobLogs(existingJob);
       pollJobLogs(jobId);
     }
 
