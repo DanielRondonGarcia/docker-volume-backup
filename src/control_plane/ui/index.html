@@ -519,7 +519,8 @@ docker compose up -d
     }
 
     function getLastJobForTarget(targetId) {
-      const targetJobs = (state.jobs || []).filter(j => j.target_id === targetId);
+      const targetJobs = (state.jobs || []).filter(j => j.target_id === targetId
+        && ["backup.run", "restore.run", "restore.dry_run", "retention.run"].includes(j.command));
       if (!targetJobs.length) return null;
       return targetJobs.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))[0];
     }
