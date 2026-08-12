@@ -46,8 +46,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp:/tmp
+    networks:
+      - default
+      - control-plane
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5
+
+networks:
+  control-plane:
+    name: docker-volume-backup-control-plane_default
+    external: true
