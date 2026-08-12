@@ -318,6 +318,14 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 
 .modal-wide { max-width: 760px; }
 .modal-wide .modal-body { max-height: 70vh; }
+.modal-snapshots {
+  width: clamp(640px, 92vw, 1080px);
+  max-width: 92vw;
+  max-height: 88vh;
+}
+@media (max-width: 768px) {
+  .modal-snapshots { width: 96vw; max-width: 96vw; }
+}
 
 .job-status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 8px 12px; background: var(--muted); border-radius: var(--radius); }
 .job-status-pill { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
