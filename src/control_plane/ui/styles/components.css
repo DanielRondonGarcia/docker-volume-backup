@@ -68,7 +68,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
-  overflow: hidden;
+  overflow: visible;
 }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: 12px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
@@ -76,6 +76,10 @@
 .table tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .table td.mono, .table td .mono { font-family: var(--font-mono); font-size: 12px; }
+.sheet .table thead tr:first-child th:first-child { border-top-left-radius: var(--radius); }
+.sheet .table thead tr:first-child th:last-child { border-top-right-radius: var(--radius); }
+.sheet .table tbody tr:last-child td:first-child { border-bottom-left-radius: var(--radius); }
+.sheet .table tbody tr:last-child td:last-child { border-bottom-right-radius: var(--radius); }
 .table.datatable .filter-row th { padding: 6px 8px; background: var(--card); border-bottom: 1px solid var(--border); }
 .table.datatable .filter-row th::before { display: none; }
 .dt-filter {

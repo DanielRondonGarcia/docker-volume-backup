@@ -547,7 +547,6 @@ docker compose up -d
           }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
         </table></div></div>
         <div id="targetLogPanel"></div>
-        <div id="modalOverlay"></div>
       `;
       bindTargetForm();
       bindTargetActions();
@@ -665,8 +664,8 @@ docker compose up -d
           <div id="snapContent" style="flex:1; overflow-y:auto; padding:20px; min-height:300px;"></div>
         </div>
       `;
-      overlay.style.display = "flex";
-      document.getElementById("snapClose").addEventListener("click", () => { overlay.style.display = "none"; overlay.innerHTML = ""; });
+      overlay.classList.add("open");
+      document.getElementById("snapClose").addEventListener("click", () => { overlay.classList.remove("open"); overlay.innerHTML = ""; });
       await loadSnapshotsList(target);
     }
 
