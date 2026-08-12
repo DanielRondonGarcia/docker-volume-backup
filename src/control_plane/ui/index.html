@@ -1638,63 +1638,79 @@ docker compose up -d
       const rcloneSecretOptions = state.secrets.filter(s => s.secret_type === "file").map(s => `<option value="${escapeHtml(s.id)}" ${s.id === settings.rclone_conf_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       content.innerHTML = `
         <div class="page-header"><div><h2>Settings</h2><div class="subtitle">Configuracion global del Control Plane para backups restic</div></div></div>
-        <div class="sheet" style="max-width:680px; padding: 24px;">
-          <form id="settingsForm">
-            <div style="margin-bottom: 20px;">
-              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Repositorio restic</h3>
-              <div class="helper" style="margin-bottom:16px;">Define la ruta base del repositorio. Para cada target se usara <code>{base}/{target_name}</code>. Si el target tiene su propio <code>RESTIC_REPOSITORY</code>, ese tiene prioridad.</div>
-            </div>
-            <div class="form-grid">
-              <div class="field full">
-                <label for="settingsRepoBase">Ruta base del repositorio restic</label>
-                <input id="settingsRepoBase" value="${escapeHtml(settings.restic_repository_base || "")}" placeholder="rclone:daniel.actsis:backup" />
-                <div class="helper">Para cada target se usara <code>{base}/{target_name}</code> como repositorio.</div>
-                <div id="repoPreview" style="margin-top:8px; padding:8px 10px; border-radius:var(--radius); background:var(--card); border:1px solid var(--border); font-size:12px;"></div>
-                <div id="repoWarning" style="margin-top:6px;"></div>
+        <form id="settingsForm" class="settings-grid">
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">📦</span>
+              <div>
+                <h3>Repositorio restic</h3>
+                <div class="settings-card-sub">Ruta base del repositorio</div>
               </div>
             </div>
-            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
-            <div style="margin-bottom: 20px;">
-              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">rclone.conf global (opcional)</h3>
-              <div class="helper" style="margin-bottom:16px;">Si el <code>RESTIC_REPOSITORY</code> usa <code>rclone:</code> como backend, monta este <code>rclone.conf</code> en el contenedor de backup. Solo se aplica si el storage profile del target no monta el suyo propio.</div>
+            <div class="helper">Define la ruta base del repositorio. Para cada target se usara <code>{base}/{target_name}</code>. Si el target tiene su propio <code>RESTIC_REPOSITORY</code>, ese tiene prioridad.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsRepoBase">Ruta base del repositorio restic</label>
+              <input id="settingsRepoBase" value="${escapeHtml(settings.restic_repository_base || "")}" placeholder="rclone:daniel.actsis:backup" />
+              <div class="helper">Para cada target se usara <code>{base}/{target_name}</code> como repositorio.</div>
+              <div id="repoPreview" class="cron-preview" style="margin-top:8px;"></div>
+              <div id="repoWarning" style="margin-top:6px;"></div>
             </div>
-            <div class="form-grid">
-              <div class="field full">
-                <label for="settingsRcloneSecret">rclone.conf (secret tipo rclone)</label>
-                <select id="settingsRcloneSecret"><option value="">-- Sin rclone.conf --</option>${rcloneSecretOptions}</select>
-                <div class="helper">${hasRcloneConf ? '<span class="pill ok" style="font-size:10px;">rclone.conf activo</span> Se montara en el contenedor y se usara automaticamente.' : '<span class="pill muted" style="font-size:10px;">Sin rclone.conf</span> Solo necesario si usas <code>rclone:</code> en el repositorio.'}</div>
+          </div>
+
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">🔗</span>
+              <div>
+                <h3>rclone.conf global</h3>
+                <div class="settings-card-sub">Backend rclone (opcional)</div>
               </div>
             </div>
-            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
-            <div style="margin-bottom: 20px;">
-              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Cron global (fallback)</h3>
-              <div class="helper" style="margin-bottom:16px;">Cron por defecto para targets que no tengan cron propio. Si un target tiene su propio cron, ese tiene prioridad. Vacio = solo backups manuales para targets sin cron.</div>
+            <div class="helper">Si el <code>RESTIC_REPOSITORY</code> usa <code>rclone:</code> como backend, monta este <code>rclone.conf</code> en el contenedor de backup. Solo se aplica si el storage profile del target no monta el suyo propio.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsRcloneSecret">rclone.conf (secret tipo rclone)</label>
+              <select id="settingsRcloneSecret"><option value="">-- Sin rclone.conf --</option>${rcloneSecretOptions}</select>
+              <div class="helper">${hasRcloneConf ? '<span class="pill ok" style="font-size:10px;">rclone.conf activo</span> Se montara en el contenedor y se usara automaticamente.' : '<span class="pill muted" style="font-size:10px;">Sin rclone.conf</span> Solo necesario si usas <code>rclone:</code> en el repositorio.'}</div>
             </div>
-            <div class="form-grid">
-              <div class="field full">
-                <label for="settingsGlobalCron">Cron global (opcional)</label>
-                <input id="settingsGlobalCron" value="${escapeHtml(settings.global_cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" />
-                <div class="helper">Expresion cron de 5 campos. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h). Los targets sin cron usaran este.</div>
+          </div>
+
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">⏰</span>
+              <div>
+                <h3>Cron global (fallback)</h3>
+                <div class="settings-card-sub">Programacion por defecto</div>
               </div>
             </div>
-            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
-            <div style="margin-bottom: 20px;">
-              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Password por defecto</h3>
-              <div class="helper" style="margin-bottom:16px;">Si se configura, los targets no necesitan especificar password (queda en opciones avanzadas). Si no se configura, cada target debe elegir su propio secret de password.</div>
+            <div class="helper">Cron por defecto para targets que no tengan cron propio. Si un target tiene su propio cron, ese tiene prioridad. Vacio = solo backups manuales para targets sin cron.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsGlobalCron">Cron global (opcional)</label>
+              <input id="settingsGlobalCron" value="${escapeHtml(settings.global_cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" />
+              <div class="helper">Expresion cron de 5 campos. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h). Los targets sin cron usaran este.</div>
+              <div id="settingsGlobalCronPreview" class="cron-preview"></div>
             </div>
-            <div class="form-grid">
-              <div class="field full">
-                <label for="settingsPasswordSecret">Password restic por defecto (secret)</label>
-                <select id="settingsPasswordSecret"><option value="">-- Sin default --</option>${passwordSecretOptions}</select>
-                <div class="helper">${hasDefaultPassword ? '<span class="pill ok" style="font-size:10px;">Default activo</span> Los targets usaran este password por defecto.' : '<span class="pill muted" style="font-size:10px;">Sin default</span> Cada target debe especificar su propio password.'}</div>
+          </div>
+
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">🔑</span>
+              <div>
+                <h3>Password por defecto</h3>
+                <div class="settings-card-sub">Password restic global</div>
               </div>
             </div>
-            <div class="btn-row" style="margin-top:24px; justify-content:flex-end;">
-              <button type="submit" class="btn primary">Guardar configuracion</button>
+            <div class="helper">Si se configura, los targets no necesitan especificar password (queda en opciones avanzadas). Si no se configura, cada target debe elegir su propio secret de password.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsPasswordSecret">Password restic por defecto (secret)</label>
+              <select id="settingsPasswordSecret"><option value="">-- Sin default --</option>${passwordSecretOptions}</select>
+              <div class="helper">${hasDefaultPassword ? '<span class="pill ok" style="font-size:10px;">Default activo</span> Los targets usaran este password por defecto.' : '<span class="pill muted" style="font-size:10px;">Sin default</span> Cada target debe especificar su propio password.'}</div>
             </div>
-            <div id="settingsFeedback" style="margin-top:16px;"></div>
-          </form>
-        </div>
+          </div>
+
+          <div class="settings-actions">
+            <button type="submit" class="btn primary">Guardar configuracion</button>
+            <div id="settingsFeedback"></div>
+          </div>
+        </form>
       `;
       const feedbackEl = () => document.getElementById("settingsFeedback");
       const showFeedback = (msg, type) => {
@@ -1731,6 +1747,11 @@ docker compose up -d
       document.getElementById("settingsRepoBase").addEventListener("input", updateRepoPreview);
       document.getElementById("settingsRcloneSecret").addEventListener("change", updateRepoPreview);
       updateRepoPreview();
+      const globalCronInput = document.getElementById("settingsGlobalCron");
+      if (globalCronInput) {
+        globalCronInput.addEventListener("input", () => updateCronPreview("settingsGlobalCron", "settingsGlobalCronPreview"));
+        updateCronPreview("settingsGlobalCron", "settingsGlobalCronPreview");
+      }
       document.getElementById("settingsForm").addEventListener("submit", async (e) => {
         e.preventDefault();
         const repoBase = document.getElementById("settingsRepoBase").value.trim();
