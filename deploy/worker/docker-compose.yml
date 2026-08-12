@@ -16,8 +16,10 @@ services:
   demo-app:
     image: nginx:alpine
     restart: unless-stopped
+    ports:
+      - "8080:80"
     volumes:
-      - demo_app_data:/usr/share/nginx/html
+      - ./demo-app-data:/usr/share/nginx/html
 
   # ------------------------------------------------------------------
   # Worker Agent: se registra contra el Control Plane y reporta el
@@ -49,6 +51,3 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-
-volumes:
-  demo_app_data:
