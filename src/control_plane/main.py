@@ -16,6 +16,7 @@ except ImportError:
 
 from src.control_plane.auth import AuthService, ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 from src.control_plane.application.services.control_plane_service import ControlPlaneService
+from src.control_plane.application.services.scheduler_service import SchedulerService
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
     InMemoryJobRepository,
@@ -137,6 +138,7 @@ class ControlPlaneApplication:
     control_plane_service: ControlPlaneService
     tls_manager: TLSMaterialManager | None = None
     worker_mtls_required: bool = False
+    scheduler: "SchedulerService | None" = None
 
 
 class ControlPlaneHTTPServer(ThreadingHTTPServer):
@@ -460,6 +462,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restic_password_secret_id=body.get("restic_password_secret_id"),
                     restore_defaults=body.get("restore_defaults") or {},
                     labels=body.get("labels") or {},
+                    cron_expression=body.get("cron_expression"),
                 )
                 return self._write_json(201, _to_jsonable(target))
 
@@ -713,6 +716,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restic_password_secret_id=body.get("restic_password_secret_id"),
                     restore_defaults=body.get("restore_defaults"),
                     labels=body.get("labels"),
+                    cron_expression=body.get("cron_expression"),
                 )
                 return self._write_json(200, _to_jsonable(target))
             if path == "/api/v1/settings":
@@ -874,18 +878,24 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
 
 def build_application() -> ControlPlaneApplication:
     control_plane_service = _build_service()
-    return ControlPlaneApplication(
+    scheduler_interval = int(os.environ.get("SCHEDULER_INTERVAL_SECONDS", "60"))
+    scheduler = SchedulerService(control_plane_service, interval_seconds=scheduler_interval)
+    app = ControlPlaneApplication(
         auth_service=AuthService.from_runtime(),
         control_plane_service=control_plane_service,
         tls_manager=control_plane_service.tls_manager,
         worker_mtls_required=_env_flag("CONTROL_PLANE_WORKER_MTLS_REQUIRED", default=False),
+        scheduler=scheduler,
     )
+    return app
 
 
 def main():
     host = os.environ.get("CONTROL_PLANE_HOST", "0.0.0.0")
     port = int(os.environ.get("CONTROL_PLANE_PORT", "8080"))
     application = build_application()
+    if application.scheduler is not None:
+        application.scheduler.start()
     if application.tls_manager is not None:
         server = ControlPlaneHTTPSServer(
             (host, port),

@@ -78,6 +78,7 @@ class BackupTargetRecord:
     restore_defaults: Dict[str, Any] = field(default_factory=dict)
     labels: Dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    cron_expression: Optional[str] = None
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)

@@ -213,6 +213,7 @@ class ControlPlaneService:
         restic_password_secret_id: Optional[str] = None,
         restore_defaults: Optional[Dict[str, Any]] = None,
         labels: Optional[Dict[str, str]] = None,
+        cron_expression: Optional[str] = None,
     ) -> BackupTargetRecord:
         self._require_worker(worker_id)
         if storage_profile_id:
@@ -258,6 +259,7 @@ class ControlPlaneService:
             restic_password_secret_id=restic_password_secret_id,
             restore_defaults=restore_defaults or {},
             labels=labels or {},
+            cron_expression=(cron_expression.strip() if cron_expression else None),
         )
         return self.target_repository.save(target)
 
@@ -289,6 +291,7 @@ class ControlPlaneService:
         restic_password_secret_id: Optional[str] = None,
         restore_defaults: Optional[Dict[str, Any]] = None,
         labels: Optional[Dict[str, str]] = None,
+        cron_expression: Optional[str] = None,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
         if worker_id is not None:
@@ -329,6 +332,8 @@ class ControlPlaneService:
             target.restore_defaults = restore_defaults
         if labels is not None:
             target.labels = labels
+        if cron_expression is not None:
+            target.cron_expression = cron_expression.strip() or None
         target.updated_at = utcnow()
         return self.target_repository.save(target)
 
@@ -359,7 +364,7 @@ class ControlPlaneService:
         )
         return self.job_repository.save(job)
 
-    def dispatch_backup_for_target(self, target_id: str, requested_by: str = "system") -> JobRecord:
+    def dispatch_backup_for_target(self, target_id: str, requested_by: str = "system", trigger: str = "manual") -> JobRecord:
         target = self._require_target(target_id)
         payload = self._build_backup_payload(target)
         return self.dispatch_job(
@@ -368,7 +373,7 @@ class ControlPlaneService:
             payload=payload,
             requested_by=requested_by,
             target_id=target.id,
-            trigger="manual",
+            trigger=trigger,
         )
 
     def dispatch_snapshot_sync_for_target(self, target_id: str, requested_by: str = "system") -> JobRecord:

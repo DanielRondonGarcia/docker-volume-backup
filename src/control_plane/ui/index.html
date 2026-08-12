@@ -460,6 +460,7 @@ docker compose up -d
               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
               <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
+              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div></div>
               ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
             </div>
             <div class="field full">
@@ -482,11 +483,12 @@ docker compose up -d
         </div></details>
         <div class="page-header"><div><h2>Targets configurados</h2></div></div>
         <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Acciones</th></tr></thead>
+          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Cron</th><th>Acciones</th></tr></thead>
           <tbody>${state.targets.length ? state.targets.map(t => {
             const worker = state.workers.find(w => w.id === t.worker_id);
             const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
             const lastJob = getLastJobForTarget(t.id);
+            const cronLabel = t.cron_expression ? `<code class="mono" style="font-size:11px;">${escapeHtml(t.cron_expression)}</code>` : '<span style="color:var(--muted-foreground);">manual</span>';
             return `<tr>
               <td>${escapeHtml(t.name)}</td>
               <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
@@ -494,6 +496,7 @@ docker compose up -d
               <td>${escapeHtml(t.backup_mode)}</td>
               <td class="mono">${escapeHtml((t.volume_targets || []).join(", ") || "—")}</td>
               <td>${escapeHtml(retention ? retention.name : "—")}</td>
+              <td>${cronLabel}</td>
               <td class="action-cell">
                 <button class="btn primary xs" data-action="run" data-id="${escapeHtml(t.id)}">Ejecutar</button>
                 ${t.backup_strategy === "restic" ? `<button class="btn ghost xs" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
@@ -870,6 +873,7 @@ docker compose up -d
                 <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
                 <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
                 <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
+                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual.</div></div>
                 <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
               </div>
               <details class="sub-section">
@@ -905,6 +909,7 @@ docker compose up -d
             retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
             restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
             restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
+            cron_expression: emptyToNull(document.getElementById("etCronExpression").value),
           });
           closeTargetModal();
           await refreshAll();
@@ -1124,6 +1129,7 @@ docker compose up -d
             retention_policy_id: emptyToNull(document.getElementById("targetRetentionPolicyId").value),
             restic_password_secret_id: resticPasswordSecret,
             restore_defaults: parseJsonField("targetRestoreDefaults", "restore defaults del target"),
+            cron_expression: emptyToNull(document.getElementById("targetCronExpression").value),
           });
           await refreshAll();
         } catch (error) { alert(`Error creando target: ${error.message}`); }

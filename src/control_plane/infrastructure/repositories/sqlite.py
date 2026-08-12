@@ -112,6 +112,7 @@ class SQLiteRepositoryBase:
                     restore_defaults_json TEXT NOT NULL,
                     labels_json TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
+                    cron_expression TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -205,6 +206,7 @@ class SQLiteRepositoryBase:
             )
             self._ensure_column(connection, "workers", "certificate_fingerprint", "TEXT")
             self._ensure_column(connection, "settings", "rclone_conf_secret_id", "TEXT")
+            self._ensure_column(connection, "targets", "cron_expression", "TEXT")
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
@@ -360,8 +362,8 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                     id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
                     runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
                     storage_profile_id, retention_policy_id, execution_policy_id, restic_password_secret_id, restore_defaults_json, labels_json,
-                    enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, cron_expression, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target.id,
@@ -383,6 +385,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                     json.dumps(target.restore_defaults),
                     json.dumps(target.labels),
                     1 if target.enabled else 0,
+                    target.cron_expression,
                     target.created_at.isoformat(),
                     target.updated_at.isoformat(),
                 ),
@@ -426,6 +429,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
             restore_defaults=_json_load(row["restore_defaults_json"], {}),
             labels=_json_load(row["labels_json"], {}),
             enabled=bool(row["enabled"]),
+            cron_expression=row["cron_expression"] if "cron_expression" in row.keys() else None,
             created_at=_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
         )
