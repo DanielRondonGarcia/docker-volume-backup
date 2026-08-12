@@ -10,7 +10,7 @@ class DockerAdapter(ContainerPort):
         try:
             self.client = docker.from_env()
         except Exception as e:
-            logger.error(f"Failed to connect to Docker: {e}")
+            logger.warning(f"Docker socket not available (container stop/start disabled): {e}")
             self.client = None
 
     def stop_containers(self, container_ids: List[str]) -> List[str]:
