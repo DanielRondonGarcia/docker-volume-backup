@@ -76,6 +76,15 @@
 .table tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .table td.mono, .table td .mono { font-family: var(--font-mono); font-size: 12px; }
+.table.datatable .filter-row th { padding: 6px 8px; background: var(--card); border-bottom: 1px solid var(--border); }
+.table.datatable .filter-row th::before { display: none; }
+.dt-filter {
+  width: 100%; padding: 4px 8px; font-size: 12px; text-transform: none; letter-spacing: normal;
+  background: var(--background); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--foreground); font-family: inherit;
+}
+.dt-filter:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 20%, transparent); }
+.dt-filter::placeholder { color: var(--muted-foreground); }
 
 .field {
   display: flex;

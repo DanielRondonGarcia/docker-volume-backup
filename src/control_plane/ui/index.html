@@ -615,9 +615,11 @@ docker compose up -d
       }
     }
 
+    let snapTableState = { sortKey: "created_at", sortDir: "desc", filters: { snapshot_id: "", created_at: "", paths: "" } };
+
     function renderSnapshotsList(content) {
-      const snaps = snapshotBrowserState.snapshots;
-      if (!snaps || snaps.length === 0) {
+      const allSnaps = snapshotBrowserState.snapshots;
+      if (!allSnaps || allSnaps.length === 0) {
         content.innerHTML = `
           <div style="text-align:center; padding:40px;">
             <div style="color:var(--muted-foreground); margin-bottom:16px;">No hay snapshots disponibles para este target.</div>
@@ -627,23 +629,96 @@ docker compose up -d
         if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(snapshotBrowserState.target));
         return;
       }
-      content.innerHTML = `
-        <div style="margin-bottom:16px; font-size:13px; color:var(--muted-foreground);">Selecciona un snapshot para explorar su contenido:</div>
-        <table class="table" style="font-size:14px;">
-          <thead><tr><th>ID</th><th>Fecha</th><th>Paths</th><th style="width:120px;">Acciones</th></tr></thead>
-          <tbody>${snaps.map(s => `
-            <tr>
-              <td class="mono">${escapeHtml(s.snapshot_id || "—")}</td>
-              <td>${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : "—")}</td>
-              <td class="mono" style="font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((s.paths || []).join(", ") || "—")}</td>
-              <td><button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button></td>
-            </tr>
-          `).join("")}</tbody>
-        </table>
-      `;
-      content.querySelectorAll("[data-snap]").forEach(btn => {
-        btn.addEventListener("click", () => browseSnapshot(btn.dataset.snap, ""));
-      });
+
+      const renderTable = () => {
+        let snaps = allSnaps.slice();
+        snaps = snaps.filter(s => {
+          const id = (s.snapshot_id || "").toLowerCase();
+          const date = s.created_at ? new Date(s.created_at).toLocaleString().toLowerCase() : "";
+          const paths = (s.paths || []).join(", ").toLowerCase();
+          if (snapTableState.filters.snapshot_id && !id.includes(snapTableState.filters.snapshot_id.toLowerCase())) return false;
+          if (snapTableState.filters.created_at && !date.includes(snapTableState.filters.created_at.toLowerCase())) return false;
+          if (snapTableState.filters.paths && !paths.includes(snapTableState.filters.paths.toLowerCase())) return false;
+          return true;
+        });
+        const dir = snapTableState.sortDir === "asc" ? 1 : -1;
+        snaps.sort((a, b) => {
+          let va, vb;
+          if (snapTableState.sortKey === "created_at") {
+            va = new Date(a.created_at || 0).getTime();
+            vb = new Date(b.created_at || 0).getTime();
+          } else if (snapTableState.sortKey === "snapshot_id") {
+            va = a.snapshot_id || "";
+            vb = b.snapshot_id || "";
+          } else if (snapTableState.sortKey === "paths") {
+            va = (a.paths || []).join(", ");
+            vb = (b.paths || []).join(", ");
+          }
+          if (va < vb) return -1 * dir;
+          if (va > vb) return 1 * dir;
+          return 0;
+        });
+
+        const sortIcon = (key) => {
+          if (snapTableState.sortKey !== key) return " ↕";
+          return snapTableState.sortDir === "asc" ? " ↑" : " ↓";
+        };
+        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
+
+        content.innerHTML = `
+          <div style="margin-bottom:16px; font-size:13px; color:var(--muted-foreground);">Selecciona un snapshot para explorar su contenido (${snaps.length} de ${allSnaps.length}):</div>
+          <table class="table datatable" style="font-size:14px;">
+            <thead>
+              <tr>
+                <th ${sortAttrs("snapshot_id")}>ID${sortIcon("snapshot_id")}</th>
+                <th ${sortAttrs("created_at")}>Fecha${sortIcon("created_at")}</th>
+                <th ${sortAttrs("paths")}>Paths${sortIcon("paths")}</th>
+                <th style="width:120px;">Acciones</th>
+              </tr>
+              <tr class="filter-row">
+                <th><input type="text" class="dt-filter" data-col="snapshot_id" placeholder="Filtrar ID..." value="${escapeHtml(snapTableState.filters.snapshot_id)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="created_at" placeholder="Filtrar fecha..." value="${escapeHtml(snapTableState.filters.created_at)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="paths" placeholder="Filtrar paths..." value="${escapeHtml(snapTableState.filters.paths)}" /></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${snaps.length === 0 ? `<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--muted-foreground);">Sin resultados para los filtros aplicados.</td></tr>` : snaps.map(s => `
+                <tr>
+                  <td class="mono">${escapeHtml(s.snapshot_id || "—")}</td>
+                  <td>${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : "—")}</td>
+                  <td class="mono" style="font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((s.paths || []).join(", ") || "—")}</td>
+                  <td><button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+
+        content.querySelectorAll("[data-sort]").forEach(th => {
+          th.addEventListener("click", () => {
+            const key = th.dataset.sort;
+            if (snapTableState.sortKey === key) {
+              snapTableState.sortDir = snapTableState.sortDir === "asc" ? "desc" : "asc";
+            } else {
+              snapTableState.sortKey = key;
+              snapTableState.sortDir = "desc";
+            }
+            renderTable();
+          });
+        });
+        content.querySelectorAll(".dt-filter").forEach(input => {
+          input.addEventListener("input", () => {
+            snapTableState.filters[input.dataset.col] = input.value;
+            renderTable();
+          });
+        });
+        content.querySelectorAll("[data-snap]").forEach(btn => {
+          btn.addEventListener("click", () => browseSnapshot(btn.dataset.snap, ""));
+        });
+      };
+
+      renderTable();
     }
 
     async function browseSnapshot(snapshotId, path) {
