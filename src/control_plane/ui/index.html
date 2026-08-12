@@ -483,7 +483,7 @@ docker compose up -d
         </div></details>
         <div class="page-header"><div><h2>Targets configurados</h2></div></div>
         <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Cron</th><th>Acciones</th></tr></thead>
+          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Cron</th><th>Activo</th><th>Acciones</th></tr></thead>
           <tbody>${state.targets.length ? state.targets.map(t => {
             const worker = state.workers.find(w => w.id === t.worker_id);
             const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
@@ -497,11 +497,14 @@ docker compose up -d
               <td class="mono">${escapeHtml((t.volume_targets || []).join(", ") || "—")}</td>
               <td>${escapeHtml(retention ? retention.name : "—")}</td>
               <td>${cronLabel}</td>
-              <td class="action-cell">
+              <td class="toggle-cell">
                 <label class="switch" title="${t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target"}">
                   <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" ${t.enabled ? "checked" : ""} />
                   <span class="slider"></span>
                 </label>
+                <span class="toggle-label ${t.enabled ? "on" : ""}">${t.enabled ? "Si" : "No"}</span>
+              </td>
+              <td class="action-cell">
                 <button class="btn primary xs" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar</button>
                 ${t.backup_strategy === "restic" ? `<button class="btn ghost xs" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
                 ${lastJob ? `<button class="btn ghost xs" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
@@ -509,7 +512,7 @@ docker compose up -d
                 <button class="btn ghost xs danger" data-action="delete" data-id="${escapeHtml(t.id)}">Eliminar</button>
               </td>
             </tr>`;
-          }).join("") : `<tr><td colspan="8" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
+          }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
         </table></div></div>
         <div id="targetLogPanel"></div>
         <div id="modalOverlay"></div>
