@@ -350,6 +350,14 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .jobs-autorefresh { display: flex; align-items: center; gap: 8px; }
 .autorefresh-label { font-size: 12px; color: var(--muted-foreground); font-weight: 600; white-space: nowrap; }
 
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
+.pagination-info { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.pagination-controls { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pagination-controls .btn.sm { min-width: 32px; padding: 4px 8px; font-size: 12px; }
+.pagination-controls .btn.sm:disabled { opacity: .4; cursor: not-allowed; }
+.pagination-size { font-size: 12px; color: var(--muted-foreground); }
+.pagination-size select { margin-left: 4px; padding: 4px 8px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--card); font-size: 12px; }
+
 .cron-preview { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: var(--accent); border: 1px solid var(--border); font-size: 13px; line-height: 1.5; }
 .cron-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; background: #d1fae5; color: #065f46; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .cron-next { color: var(--foreground); font-size: 12px; }

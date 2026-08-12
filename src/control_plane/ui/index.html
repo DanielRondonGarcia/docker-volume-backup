@@ -1338,7 +1338,7 @@ docker compose up -d
       refreshProjects();
     }
 
-    let jobsTableState = { sortKey: "started_at", sortDir: "desc", filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
+    let jobsTableState = { sortKey: "started_at", sortDir: "desc", page: 1, pageSize: 25, filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
     let jobsPollTimer = null;
     let jobsPolling = false;
 
@@ -1394,8 +1394,33 @@ docker compose up -d
         };
         const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
 
+        const pageSize = jobsTableState.pageSize;
+        const totalFiltered = jobs.length;
+        const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
+        if (jobsTableState.page > totalPages) jobsTableState.page = totalPages;
+        if (jobsTableState.page < 1) jobsTableState.page = 1;
+        const startIdx = (jobsTableState.page - 1) * pageSize;
+        const pagedJobs = jobs.slice(startIdx, startIdx + pageSize);
+        const showingFrom = totalFiltered === 0 ? 0 : startIdx + 1;
+        const showingTo = Math.min(startIdx + pageSize, totalFiltered);
+
+        const pageBtn = (label, page, disabled, active) => `<button class="btn sm ${active ? "primary" : ""}" data-page="${page}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
+        const pageButtons = [];
+        const cur = jobsTableState.page;
+        pageButtons.push(pageBtn("«", 1, cur <= 1, false));
+        pageButtons.push(pageBtn("‹", cur - 1, cur <= 1, false));
+        const maxPageBtns = 7;
+        let pageStart = Math.max(1, cur - 3);
+        let pageEnd = Math.min(totalPages, pageStart + maxPageBtns - 1);
+        pageStart = Math.max(1, pageEnd - maxPageBtns + 1);
+        for (let p = pageStart; p <= pageEnd; p++) {
+          pageButtons.push(pageBtn(String(p), p, false, p === cur));
+        }
+        pageButtons.push(pageBtn("›", cur + 1, cur >= totalPages, false));
+        pageButtons.push(pageBtn("»", totalPages, cur >= totalPages, false));
+
         content.innerHTML = `
-          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${jobs.length} de ${allJobs.length})</div></div>
+          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${totalFiltered} de ${allJobs.length})</div></div>
             <div class="jobs-autorefresh">
               <label class="switch sm"><input type="checkbox" id="jobsAutoRefresh" ${jobsPolling ? "checked" : ""} /><span class="slider"></span></label>
               <span class="autorefresh-label" id="jobsAutoRefreshLabel">${jobsPolling ? "Auto-refresh ON" : "Auto-refresh"}</span>
@@ -1421,7 +1446,7 @@ docker compose up -d
               </tr>
             </thead>
             <tbody>
-              ${jobs.length === 0 ? `<tr><td colspan="6" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : jobs.map(j => `
+              ${pagedJobs.length === 0 ? `<tr><td colspan="6" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => `
                 <tr>
                   <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
                   <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
@@ -1433,6 +1458,20 @@ docker compose up -d
               `).join("")}
             </tbody>
           </table></div></div>
+          <div class="pagination">
+            <div class="pagination-info">Mostrando ${showingFrom}-${showingTo} de ${totalFiltered} jobs</div>
+            <div class="pagination-controls">${pageButtons.join("")}</div>
+            <div class="pagination-size">
+              <label>Por pagina:
+                <select id="jobsPageSize">
+                  <option value="10" ${pageSize === 10 ? "selected" : ""}>10</option>
+                  <option value="25" ${pageSize === 25 ? "selected" : ""}>25</option>
+                  <option value="50" ${pageSize === 50 ? "selected" : ""}>50</option>
+                  <option value="100" ${pageSize === 100 ? "selected" : ""}>100</option>
+                </select>
+              </label>
+            </div>
+          </div>
         `;
 
         content.querySelectorAll("[data-sort]").forEach(th => {
@@ -1450,9 +1489,25 @@ docker compose up -d
         content.querySelectorAll(".dt-filter").forEach(input => {
           input.addEventListener("input", () => {
             jobsTableState.filters[input.dataset.col] = input.value;
+            jobsTableState.page = 1;
             renderTable();
           });
         });
+        content.querySelectorAll("[data-page]").forEach(btn => {
+          btn.addEventListener("click", () => {
+            if (btn.disabled) return;
+            jobsTableState.page = parseInt(btn.dataset.page, 10);
+            renderTable();
+          });
+        });
+        const pageSizeSelect = document.getElementById("jobsPageSize");
+        if (pageSizeSelect) {
+          pageSizeSelect.addEventListener("change", () => {
+            jobsTableState.pageSize = parseInt(pageSizeSelect.value, 10);
+            jobsTableState.page = 1;
+            renderTable();
+          });
+        }
         const autoRefreshToggle = document.getElementById("jobsAutoRefresh");
         if (autoRefreshToggle) {
           autoRefreshToggle.addEventListener("change", () => {
