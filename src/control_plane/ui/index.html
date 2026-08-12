@@ -1619,7 +1619,8 @@ docker compose up -d
               </label>
             </div>
           </div>
-        `;
+        <div id="targetLogPanel"></div>
+      `;
 
         content.querySelectorAll("[data-sort]").forEach(th => {
           th.addEventListener("click", () => {
