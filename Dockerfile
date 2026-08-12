@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm AS app-base
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,4 +47,16 @@ RUN cp /app/src/entrypoint.sh /root/entrypoint.sh \
     && chmod +x /root/entrypoint.sh /root/backup.sh /root/restore.sh
 
 WORKDIR /root
+
+FROM app-base AS backup-runtime
 CMD ["/root/entrypoint.sh"]
+
+FROM app-base AS control-plane
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 CMD python -c "import os, sys, urllib.request; port=os.environ.get('CONTROL_PLANE_PORT', '8080'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4); sys.exit(0)"
+CMD ["python", "-m", "src.control_plane.main"]
+
+FROM app-base AS worker
+EXPOSE 8081
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 CMD python -c "import os, sys, urllib.request; port=os.environ.get('WORKER_HEALTH_PORT', '8081'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4); sys.exit(0)"
+CMD ["python", "-m", "src.worker_agent.main"]

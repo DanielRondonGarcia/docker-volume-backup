@@ -14,6 +14,116 @@ Docker image for performing simple backups of Docker volumes. Main features:
 - **New**: Supports [Restic](https://restic.net/) for efficient, deduplicated backups.
 - **New**: Supports [Rclone](https://rclone.org/) for uploading to various cloud providers.
 
+## Control Plane Status
+
+This repository now also includes an early `Control Plane` and `Worker Agent` implementation under `src/control_plane` and `src/worker_agent`.
+
+Current capabilities include:
+
+- Centralized metadata for workers, targets, jobs, snapshots, stats, retention policies, storage profiles, and encrypted secrets
+- Local UI and HTTP API for operating backups, snapshot sync, stats sync, retention runs, and restore dry-runs
+- Bootstrap authentication with a local `admin / changeme` user when no external user list is provided
+- Mandatory password change on first login for the bootstrap user
+- Local user administration for file-backed users from the dashboard and API
+- Dedicated container targets for `backup-runtime`, `control-plane`, and `worker`
+- Worker health endpoint reporting process liveness and latest CP connectivity
+
+Local auth behavior:
+
+- If `CONTROL_PLANE_USERS_JSON` is set, users are loaded from the environment and are not editable from the UI
+- Otherwise, the Control Plane creates `.control_plane.users.json` and bootstraps `admin / changeme`
+- The bootstrap user is forced to change the password before accessing the dashboard
+
+Useful local docs:
+
+- [Control Plane quickstart](doc/control-plane-quickstart.md)
+- [Control Plane technical spec](doc/control-plane-spec.md)
+- [Control Plane Docker deployment](deploy/control-plane/README.md)
+- [Worker + servicios a backupear](deploy/worker/README.md)
+
+## Control Plane Docker Deployment
+
+The Control Plane and the Worker Agent are deployed as two separate Compose
+stacks. The Worker lives alongside the services you want to back up, so it can
+auto-discover the compose project, its volumes, and Docker daemon access.
+
+### 1. Start the Control Plane
+
+```bash
+$env:CONTROL_PLANE_PUBLISHED_PORT="18080"
+docker compose -f deploy/control-plane/docker-compose.yml up -d --build
+```
+
+What this stack does:
+
+- Runs `control-plane` with persisted SQLite DB, bootstrap users file, session key and master key under a named Docker volume
+- Publishes the Control Plane UI/API on `${CONTROL_PLANE_PUBLISHED_PORT}` and keeps `8080` internal inside the Compose network
+
+### 2. Start the Worker + services to back up
+
+Edit `deploy/worker/docker-compose.yml` to add your services with their
+volumes (a `demo-app` example is included), then:
+
+```bash
+$env:CONTROL_PLANE_URL="http://host.docker.internal:18080"
+docker compose -f deploy/worker/docker-compose.yml up -d --build
+```
+
+What this stack does:
+
+- Runs `worker` alongside the services you want to back up, so the worker auto-discovers the compose project and its volumes
+- Mounts `/var/run/docker.sock` into the worker so it can inventory Docker and execute runtime containers
+- Exposes a worker-local `GET /healthz` endpoint on port `8081` with connectivity status toward the Control Plane
+
+The worker reports the compose project name, its volumes, and Docker daemon
+availability to the Control Plane. When creating a target in the UI, you only
+need to select the worker and the compose project; `volume_targets` and
+`runtime_volumes` are derived automatically from the worker inventory. No
+`network_mode` is required because backups are file-based.
+
+Optional secure mode:
+
+- The Control Plane can generate a local self-signed CA by setting `CONTROL_PLANE_TLS_ENABLED=true`
+- Admins can create one-time worker enrollment tokens with `POST /api/v1/admin/worker-enrollments`
+- The worker can bootstrap trust with `WORKER_ENROLLMENT_CA_PEM`, submit a CSR with `WORKER_ENROLLMENT_TOKEN`, and then continue using its signed client certificate for mTLS
+- If you also set `CONTROL_PLANE_WORKER_MTLS_REQUIRED=true`, worker operational routes only accept the enrolled client certificate fingerprint tied to that `worker_id`
+
+First login after a clean deployment:
+
+- Username: `admin`
+- Password: `changeme`
+- Mandatory action: change password on first login
+
+### 3. Consume GHCR images instead of building locally
+
+Control Plane:
+
+```bash
+$env:CONTROL_PLANE_PUBLISHED_PORT="18080"
+docker compose -f deploy/control-plane/docker-compose.ghcr.yml up -d
+```
+
+Worker + services:
+
+```bash
+$env:CONTROL_PLANE_URL="http://host.docker.internal:18080"
+docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
+```
+
+### 4. Bring the stacks down
+
+Control Plane:
+
+```bash
+docker compose -f deploy/control-plane/docker-compose.yml down
+```
+
+Worker + services:
+
+```bash
+docker compose -f deploy/worker/docker-compose.yml down
+```
+
 ## Examples
 
 ### Backing up locally
@@ -601,23 +711,33 @@ Some cases may need secrets available in the environment, e.g. for S3 uploads to
 
 ## Releasing
 
-Two GitHub Actions workflows handle releases automatically:
+The `Create Release` GitHub Actions workflow handles release tagging and image publication.
 
-### 1. Create a Release (manual dispatch)
-
-Go to **Actions → Create Release → Run workflow** and enter the version number (e.g. `1.0.0`). This will:
+Go to **Actions → Create Release → Run workflow** and choose the bump type. This workflow will:
 
 - Create and push a Git tag
 - Generate a changelog from the previous tag
 - Create a GitHub Release with the changelog
-
-### 2. Build & Push Docker Image (automatic)
-
-Triggered automatically when a GitHub Release is published. It will:
-
 - Build multi-arch images (`linux/amd64`, `linux/arm64`)
-- Push to `ghcr.io/danielrondongarcia/docker-volume-backup` with tags:
-  - `latest`
-  - `{version}` (e.g. `1.2.3`)
-  - `{major}.{minor}` (e.g. `1.2`)
-  - `{major}` (e.g. `1`)
+- Push the legacy backup runtime image to `ghcr.io/danielrondongarcia/docker-volume-backup`
+- Push the dedicated Control Plane image to `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
+- Push the dedicated Worker image to `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
+
+Each published image receives the tags:
+
+- `latest`
+- `{version}` (e.g. `1.2.3`)
+- `{major}.{minor}` (e.g. `1.2`)
+- `{major}` (e.g. `1`)
+
+Legacy backup runtime image:
+
+- `ghcr.io/danielrondongarcia/docker-volume-backup`
+
+Dedicated Control Plane image:
+
+- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
+
+Dedicated Worker image:
+
+- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`

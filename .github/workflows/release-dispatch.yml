@@ -125,8 +125,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
+      - name: Extract metadata for backup runtime image
+        id: meta_runtime
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
@@ -136,13 +136,60 @@ jobs:
             type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
             type=raw,value=latest
 
-      - name: Build and push Docker image
+      - name: Extract metadata for Control Plane image
+        id: meta_control_plane
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}-control-plane
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
+            type=raw,value=latest
+
+      - name: Extract metadata for Worker image
+        id: meta_worker
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}-worker
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
+            type=raw,value=latest
+
+      - name: Build and push backup runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: backup-runtime
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta_runtime.outputs.tags }}
+          labels: ${{ steps.meta_runtime.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Control Plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: control-plane
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta_control_plane.outputs.tags }}
+          labels: ${{ steps.meta_control_plane.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta_worker.outputs.tags }}
+          labels: ${{ steps.meta_worker.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

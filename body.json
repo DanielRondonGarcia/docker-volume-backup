@@ -1,0 +1,1 @@
+{"name":"test-target","worker_id":"f9d512fb-4986-42fd-8706-6a9162e1c04e","compose_project":"docker-volume-backup-control-plane","backup_mode":"hot","backup_strategy":"restic"}

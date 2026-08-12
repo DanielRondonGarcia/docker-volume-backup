@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Iniciar Sesion | Docker Volume Backup</title>
+  <link rel="stylesheet" href="/styles/tokens.css" />
+  <link rel="stylesheet" href="/styles/components.css" />
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .login-wrap {
+      width: 100%;
+      max-width: 380px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: center;
+    }
+    .brand .logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font: 700 13px/1 var(--font-sans);
+    }
+    .brand .name {
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .login-card {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .login-card h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .login-card .subtitle {
+      color: var(--muted-foreground);
+      font-size: 13px;
+    }
+    .alert {
+      font-size: 12px;
+      color: var(--destructive);
+      min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="brand"><span class="logo">DV</span><span class="name">Docker Volume Backup</span></div>
+    <div class="card login-card">
+      <div>
+        <h1>Iniciar sesion</h1>
+        <div class="subtitle">Control Plane</div>
+      </div>
+      <form id="loginForm">
+        <div class="field">
+          <label for="username">Usuario</label>
+          <input id="username" name="username" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Contrasenia</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="btn primary full">Entrar</button>
+        <div class="alert" id="errorBox"></div>
+      </form>
+      <div class="helper">Usuario inicial: <strong>admin</strong> / <strong>changeme</strong></div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("loginForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const errorBox = document.getElementById("errorBox");
+      errorBox.textContent = "";
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+      try {
+        const resp = await fetch("/api/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        if (resp.status === 403) {
+          const payload = await resp.json().catch(() => ({}));
+          if (payload.password_change_required) {
+            window.location.href = "/change-password";
+            return;
+          }
+          errorBox.textContent = payload.error || "Acceso denegado";
+          return;
+        }
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => ({}));
+          errorBox.textContent = payload.error || "Credenciales invalidas";
+          return;
+        }
+        window.location.href = "/";
+      } catch (error) {
+        errorBox.textContent = error.message;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+name: docker-volume-backup-worker
+
+# Este compose agrupa el Worker Agent junto con los servicios que se quieren
+# backupear. El worker detecta automaticamente los compose projects visibles
+# desde el daemon de Docker y reporta sus volumenes al Control Plane.
+#
+# Anade aqui los servicios de tu aplicacion con sus volumenes. El worker los
+# descubrira y los expondra en la UI del Control Plane como compose projects
+# seleccionables al crear un target.
+
+services:
+  # ------------------------------------------------------------------
+  # Servicio de ejemplo: reemplaza/renombra por los servicios reales
+  # de tu stack. Sus volumenes seran detectados por el worker.
+  # ------------------------------------------------------------------
+  demo-app:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - demo_app_data:/usr/share/nginx/html
+
+  # ------------------------------------------------------------------
+  # Worker Agent: se registra contra el Control Plane y reporta el
+  # inventario de compose projects (incluido este mismo stack).
+  # ------------------------------------------------------------------
+  worker:
+    image: docker-volume-backup-worker-local:dev
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      # URL del Control Plane. Ajusta al host:puerto donde expongas el CP.
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
+      WORKER_NAME: ${WORKER_NAME:-worker-docker}
+      WORKER_HOST_NAME: ${WORKER_HOST_NAME:-worker-docker}
+      WORKER_VERSION: docker
+      WORKER_RUN_ONCE: "false"
+      WORKER_POLL_INTERVAL_SECONDS: "15"
+      WORKER_HEALTH_PORT: "8081"
+      # Imagen usada para ejecutar los jobs de backup/restore.
+      BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-docker-volume-backup-runtime-local:dev}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp:/tmp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  demo_app_data:

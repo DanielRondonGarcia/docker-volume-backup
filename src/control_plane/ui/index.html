@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Docker Volume Backup | Control Plane</title>
+  <link rel="stylesheet" href="/styles/tokens.css" />
+  <link rel="stylesheet" href="/styles/components.css" />
+  <link rel="stylesheet" href="/styles/app.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main">
+      <header class="topbar" id="topbar"></header>
+      <main class="content" id="content"></main>
+    </div>
+  </div>
+  <div class="modal-overlay" id="modalOverlay"></div>
+
+  <script>
+    const ICONS = {
+      dashboard: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>',
+      workers: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6h12M6 3v10"/></svg>',
+      targets: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="3"/><circle cx="8" cy="8" r="0.5" fill="currentColor"/></svg>',
+      jobs: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v4l3 2"/><circle cx="8" cy="8" r="6"/></svg>',
+      storage: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v8c0 1 2 2 5 2s5-1 5-2V4M3 8c0 1 2 2 5 2s5-1 5-2"/></svg>',
+      retention: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v6l4 2"/><circle cx="8" cy="8" r="6"/><path d="M5 1.5 3 3M11 1.5 13 3"/></svg>',
+      secrets: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>',
+      users: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3 3-5 6-5s6 2 6 5"/></svg>',
+      logout: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2H3v12h3M10 5l3 3-3 3M6 8h7"/></svg>',
+    };
+
+    const NAV_ITEMS = [
+      { id: "dashboard", label: "Dashboard", icon: "dashboard", roles: ["admin", "operator", "viewer"] },
+      { id: "workers", label: "Workers", icon: "workers", roles: ["admin", "operator", "viewer"] },
+      { id: "targets", label: "Targets", icon: "targets", roles: ["admin", "operator", "viewer"] },
+      { id: "jobs", label: "Jobs", icon: "jobs", roles: ["admin", "operator", "viewer"] },
+      { id: "storage", label: "Storage", icon: "storage", roles: ["admin", "operator"] },
+      { id: "retention", label: "Retention", icon: "retention", roles: ["admin", "operator"] },
+      { id: "secrets", label: "Secretos", icon: "secrets", roles: ["admin"] },
+      { id: "users", label: "Usuarios", icon: "users", roles: ["admin"] },
+      { id: "settings", label: "Settings", icon: "settings", roles: ["admin"] },
+    ];
+
+    const state = {
+      workers: [],
+      targets: [],
+      jobs: [],
+      storageProfiles: [],
+      retentionPolicies: [],
+      secrets: [],
+      localUsers: [],
+      userManagement: null,
+      currentUser: null,
+      currentRole: null,
+      workerInventories: {},
+      currentView: "dashboard",
+    };
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return "";
+      return String(str).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function emptyToNull(v) { return v && v.trim() ? v.trim() : null; }
+    function parseJsonField(id, label) {
+      const raw = document.getElementById(id).value.trim();
+      if (!raw) return {};
+      try { return JSON.parse(raw); } catch (e) { throw new Error(`JSON invalido en ${label}: ${e.message}`); }
+    }
+    function fmtDate(ts) {
+      if (!ts) return "—";
+      try { return new Date(ts).toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return ts; }
+    }
+    function fmtStatus(status) {
+      const cls = status === "online" ? "ok" : status === "offline" ? "warn" : "muted";
+      return `<span class="pill ${cls}">${escapeHtml(status || "—")}</span>`;
+    }
+
+    async function apiGet(path) {
+      const resp = await fetch(path);
+      if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+      return resp.json();
+    }
+    async function apiPost(path, body) {
+      const resp = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+      }
+      return resp.json();
+    }
+    async function apiPatch(path, body) {
+      const resp = await fetch(path, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+      }
+      return resp.json();
+    }
+    async function apiDelete(path) {
+      const resp = await fetch(path, { method: "DELETE" });
+      if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
+      if (resp.status === 204) return null;
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+      }
+      return resp.json();
+    }
+
+    async function fetchWorkerInventory(workerId) {
+      if (!workerId) return null;
+      if (state.workerInventories[workerId]) return state.workerInventories[workerId];
+      try {
+        const snapshot = await apiGet(`/api/v1/workers/${encodeURIComponent(workerId)}/inventory`);
+        state.workerInventories[workerId] = snapshot;
+        return snapshot;
+      } catch (e) { return null; }
+    }
+    function getWorkerComposeProjects(workerId) {
+      const snapshot = state.workerInventories[workerId];
+      if (!snapshot || !snapshot.inventory) return [];
+      return snapshot.inventory.compose_project_details || [];
+    }
+
+    function renderSidebar() {
+      const sidebar = document.getElementById("sidebar");
+      const items = NAV_ITEMS.filter(item => !state.currentRole || item.roles.includes(state.currentRole));
+      sidebar.innerHTML = `
+        <div class="workspace"><span class="logo">DV</span><span>Docker Volume Backup</span></div>
+        <div class="section-label">Operacion</div>
+        <nav class="section">
+          ${items.map(item => `
+            <a class="item ${state.currentView === item.id ? "active" : ""}" href="#/${item.id}" data-view="${item.id}">
+              ${ICONS[item.icon] || ""}<span>${escapeHtml(item.label)}</span>
+            </a>
+          `).join("")}
+        </nav>
+        <div class="footer">
+          <div class="section-label">Sesion</div>
+          <nav class="section">
+            <a class="item" href="#" id="logoutBtn">${ICONS.logout}<span>Cerrar sesion</span></a>
+          </nav>
+        </div>
+      `;
+      sidebar.querySelector("#logoutBtn").addEventListener("click", async (e) => {
+        e.preventDefault();
+        try { await fetch("/api/v1/auth/logout", { method: "POST" }); } catch (err) {}
+        window.location.href = "/login";
+      });
+    }
+
+    function renderTopbar() {
+      const topbar = document.getElementById("topbar");
+      const titles = {
+        dashboard: "Dashboard", workers: "Workers", targets: "Targets", jobs: "Jobs",
+        storage: "Storage Profiles", retention: "Retention Policies", secrets: "Secretos", users: "Usuarios", settings: "Settings",
+      };
+      topbar.innerHTML = `
+        <div class="page-title">${escapeHtml(titles[state.currentView] || "")}</div>
+        <div class="spacer"></div>
+        <div class="user-chip">
+          <span class="name">${escapeHtml(state.currentUser || "")}</span>
+          <span class="pill muted">${escapeHtml(state.currentRole || "")}</span>
+        </div>
+      `;
+    }
+
+    function setView(view) {
+      state.currentView = view;
+      renderSidebar();
+      renderTopbar();
+      const content = document.getElementById("content");
+      content.innerHTML = "";
+      const viewRenderers = {
+        dashboard: renderDashboard, workers: renderWorkers, targets: renderTargets, jobs: renderJobs,
+        storage: renderStorage, retention: renderRetention, secrets: renderSecrets, users: renderUsers, settings: renderSettings,
+      };
+      const renderer = viewRenderers[view];
+      if (renderer) renderer(content);
+    }
+
+    function route() {
+      const hash = window.location.hash.replace(/^#\/?/, "") || "dashboard";
+      const view = NAV_ITEMS.some(i => i.id === hash) ? hash : "dashboard";
+      setView(view);
+    }
+    window.addEventListener("hashchange", route);
+
+    function statCard(eyebrow, title, value, meta) {
+      return `<article class="card compact"><span class="eyebrow">${escapeHtml(eyebrow)}</span><div class="title">${escapeHtml(title)}</div><div class="value">${escapeHtml(String(value))}</div><div class="meta">${escapeHtml(meta || "")}</div></article>`;
+    }
+
+    function renderDashboard(content) {
+      const onlineWorkers = state.workers.filter(w => w.status === "online").length;
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Resumen</h2><div class="subtitle">Estado general del Control Plane</div></div></div>
+        <div class="stat-grid">
+          ${statCard("Workers", "Online", onlineWorkers, `${state.workers.length} total`)}
+          ${statCard("Targets", "Configurados", state.targets.length, "targets de backup")}
+          ${statCard("Jobs", "Total", state.jobs.length, "historico de jobs")}
+          ${statCard("Storage", "Profiles", state.storageProfiles.length, "profiles configurados")}
+        </div>
+        <div class="page-header"><div><h2>Workers recientes</h2><div class="subtitle">Estado de los agentes registrados</div></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Ult. seen</th></tr></thead>
+          <tbody>${state.workers.length ? state.workers.slice(0, 5).map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td class="mono">${escapeHtml(w.version || "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+        </table></div></div>
+        <div class="page-header"><div><h2>Jobs recientes</h2><div class="subtitle">Ultimos jobs ejecutados</div></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>ID</th><th>Target</th><th>Status</th><th>Inicio</th><th>Fin</th></tr></thead>
+          <tbody>${state.jobs.length ? state.jobs.slice(0, 5).map(j => `<tr><td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td><td>${escapeHtml(j.target_id || "—")}</td><td>${fmtStatus(j.status)}</td><td class="mono">${fmtDate(j.started_at)}</td><td class="mono">${fmtDate(j.finished_at)}</td></tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin jobs ejecutados</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+    }
+
+    function renderWorkers(content) {
+      const canEnroll = state.currentRole === "admin";
+      content.innerHTML = `
+        <div class="page-header">
+          <div><h2>Workers</h2><div class="subtitle">Agentes registrados en el Control Plane</div></div>
+          ${canEnroll ? `<button class="btn primary sm" id="addWorkerBtn">+ Agregar worker</button>` : ""}
+        </div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th></tr></thead>
+          <tbody>${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td class="mono">${escapeHtml(w.version || "—")}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+      const addBtn = document.getElementById("addWorkerBtn");
+      if (addBtn) addBtn.addEventListener("click", openAddWorkerModal);
+    }
+
+    let addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
+
+    async function openAddWorkerModal() {
+      addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
+      renderAddWorkerModal();
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) overlay.classList.add("open");
+    }
+
+    function closeAddWorkerModal() {
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) overlay.classList.remove("open");
+    }
+
+    function renderAddWorkerModal() {
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      if (addWorkerState.step === "form") {
+        overlay.innerHTML = `
+          <div class="modal">
+            <div class="modal-header"><h3>Agregar worker</h3><button class="close" id="modalClose">&times;</button></div>
+            <div class="modal-body">
+              <div class="helper">Genera un token de enrolamiento para registrar un nuevo worker. El token se usa una sola vez y expira automaticamente.</div>
+              <div class="field-row">
+                <div class="field"><label for="awName">Nombre del worker</label><input id="awName" placeholder="worker-prod-01" value="worker" /></div>
+                <div class="field"><label for="awHost">Host</label><input id="awHost" placeholder="srv-prod-01" value="unknown-host" /></div>
+                <div class="field"><label for="awTtl">TTL (minutos)</label><input id="awTtl" type="number" value="60" /></div>
+              </div>
+              <div class="btn-row">
+                <button class="btn primary sm" id="awGenerate">Generar token</button>
+                <button class="btn ghost sm" id="awCancel">Cancelar</button>
+              </div>
+              <div class="alert" id="awError"></div>
+            </div>
+          </div>
+        `;
+        document.getElementById("modalClose").addEventListener("click", closeAddWorkerModal);
+        document.getElementById("awCancel").addEventListener("click", closeAddWorkerModal);
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAddWorkerModal(); });
+        document.getElementById("awGenerate").addEventListener("click", generateEnrollment);
+      } else if (addWorkerState.step === "commands") {
+        renderAddWorkerCommands();
+      }
+    }
+
+    async function generateEnrollment() {
+      const errorBox = document.getElementById("awError");
+      errorBox.textContent = "";
+      const name = document.getElementById("awName").value.trim() || "worker";
+      const host_name = document.getElementById("awHost").value.trim() || "unknown-host";
+      const ttl_minutes = parseInt(document.getElementById("awTtl").value) || 60;
+      try {
+        const enrollment = await apiPost("/api/v1/admin/worker-enrollments", { name, host_name, ttl_minutes });
+        addWorkerState.enrollment = enrollment;
+        addWorkerState.tlsEnabled = true;
+        addWorkerState.step = "commands";
+        renderAddWorkerModal();
+      } catch (error) {
+        if (error.message.includes("TLS manager")) {
+          addWorkerState.enrollment = { name, host_name, worker_id: "—", token: null, expires_at: null, ca_certificate_pem: null };
+          addWorkerState.tlsEnabled = false;
+          addWorkerState.step = "commands";
+          renderAddWorkerModal();
+        } else {
+          errorBox.textContent = `Error generando token: ${error.message}`;
+        }
+      }
+    }
+
+    function renderAddWorkerCommands() {
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      const e = addWorkerState.enrollment;
+      if (!e) return;
+      const tlsEnabled = addWorkerState.tlsEnabled !== false;
+      const cpHost = window.location.hostname || "localhost";
+      const cpPort = window.location.port || "8080";
+      const cpUrl = `http://${cpHost}:${cpPort}`;
+      const token = e.token || "";
+      const workerId = e.worker_id || "";
+      const caPem = (e.ca_certificate_pem || "").replace(/\n/g, "\\n");
+      const wName = e.name || "worker";
+      const wHost = e.host_name || "unknown-host";
+
+      const enrollEnv = tlsEnabled ? `
+      WORKER_ENROLLMENT_TOKEN: ${token}
+      WORKER_ENROLLMENT_CA_PEM: "${caPem}"
+      WORKER_TLS_DIR: /data/tls
+      WORKER_TLS_CA_FILE: /data/tls/ca.pem
+      WORKER_TLS_CERT_FILE: /data/tls/cert.pem
+      WORKER_TLS_KEY_FILE: /data/tls/key.pem` : "";
+
+      const enrollRunEnv = tlsEnabled ? ` \\
+  -e WORKER_ENROLLMENT_TOKEN="${token}" \\
+  -e WORKER_ENROLLMENT_CA_PEM="${caPem}" \\
+  -e WORKER_TLS_DIR="/data/tls" \\
+  -e WORKER_TLS_CA_FILE="/data/tls/ca.pem" \\
+  -e WORKER_TLS_CERT_FILE="/data/tls/cert.pem" \\
+  -e WORKER_TLS_KEY_FILE="/data/tls/key.pem"` : "";
+
+      const enrollVol = tlsEnabled ? `
+      - worker_tls:/data/tls` : "";
+      const enrollVolRun = tlsEnabled ? ` -v ${wName}-tls:/data/tls` : "";
+      const enrollVolName = tlsEnabled ? `
+volumes:
+  worker_tls:` : "";
+
+      const composeYml = `services:
+  worker:
+    image: ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_URL: ${cpUrl}
+      WORKER_NAME: ${wName}
+      WORKER_HOST_NAME: ${wHost}
+      WORKER_VERSION: ghcr
+      WORKER_RUN_ONCE: "false"
+      WORKER_POLL_INTERVAL_SECONDS: "15"
+      WORKER_HEALTH_PORT: "8081"${enrollEnv}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock${enrollVol}
+    healthcheck:
+      test: ["CMD","curl","-fsS","http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5${enrollVolName}`;
+
+      const dockerRun = `docker run -d --name ${wName} \\
+  --restart unless-stopped \\
+  -v /var/run/docker.sock:/var/run/docker.sock${enrollVolRun} \\
+  -e CONTROL_PLANE_URL="${cpUrl}" \\
+  -e WORKER_NAME="${wName}" \\
+  -e WORKER_HOST_NAME="${wHost}" \\
+  -e WORKER_VERSION="ghcr" \\
+  -e WORKER_RUN_ONCE="false" \\
+  -e WORKER_POLL_INTERVAL_SECONDS="15" \\
+  -e WORKER_HEALTH_PORT="8081"${enrollRunEnv} \\
+  ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest`;
+
+      const composeCmd = `# Guarda este archivo como docker-compose.yml y ejecuta:
+docker compose up -d
+
+# El worker se auto-enrolara con el token embebido.`;
+
+      const tlsNote = tlsEnabled
+        ? `<div class="card compact"><div class="eyebrow">Worker ID</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(workerId)}</div><div class="meta">Token expira: ${escapeHtml(fmtDate(e.expires_at))}</div></div>`
+        : `<div class="card compact"><div class="eyebrow">Modo</div><div class="title">Sin TLS</div><div class="support">El Control Plane no tiene TLS habilitado. El worker se registrara automaticamente al arrancar usando el flujo <strong>register</strong>. No se requiere token ni CA.</div></div>`;
+
+      overlay.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <h3>Comandos para desplegar el worker</h3>
+            <button class="close" id="modalClose">&times;</button>
+          </div>
+          <div class="modal-body">
+            ${tlsNote}
+            <div class="tabs">
+              <button class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
+              <button class="tab ${addWorkerState.activeTab === "run" ? "active" : ""}" data-tab="run">docker run</button>
+              <button class="tab ${addWorkerState.activeTab === "ghcr" ? "active" : ""}" data-tab="ghcr">GHCR compose</button>
+            </div>
+            <div id="tabContent"></div>
+            <div class="btn-row">
+              <button class="btn primary sm" id="awDone">Listo</button>
+              <button class="btn ghost sm" id="awBack">Volver</button>
+            </div>
+            <div class="helper">${tlsEnabled ? "El token se usa una sola vez al arrancar el worker. Si necesitas re-enrolar, genera uno nuevo." : "El worker se registrara automaticamente. Para produccion, habilita TLS en el Control Plane."}</div>
+          </div>
+        </div>
+      `;
+      document.getElementById("modalClose").addEventListener("click", closeAddWorkerModal);
+      document.getElementById("awDone").addEventListener("click", async () => { closeAddWorkerModal(); await refreshAll(); });
+      document.getElementById("awBack").addEventListener("click", () => { addWorkerState.step = "form"; renderAddWorkerModal(); });
+      overlay.addEventListener("click", (e2) => { if (e2.target === overlay) closeAddWorkerModal(); });
+
+      const tabs = overlay.querySelectorAll(".tab");
+      tabs.forEach(tab => tab.addEventListener("click", () => {
+        addWorkerState.activeTab = tab.dataset.tab;
+        renderAddWorkerCommands();
+      }));
+
+      const tabContent = document.getElementById("tabContent");
+      let code = "";
+      let label = "";
+      if (addWorkerState.activeTab === "compose") { code = composeYml; label = "docker-compose.yml"; }
+      else if (addWorkerState.activeTab === "run") { code = dockerRun; label = "docker run"; }
+      else if (addWorkerState.activeTab === "ghcr") { code = composeCmd + "\\n\\n# --- docker-compose.yml ---\\n" + composeYml; label = "GHCR"; }
+      tabContent.innerHTML = `
+        <div class="helper">${escapeHtml(label)}</div>
+        <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>
+      `;
+      const copyBtn = tabContent.querySelector(".copy-btn");
+      if (copyBtn) {
+        copyBtn.addEventListener("click", () => {
+          const codeEl = document.getElementById("modalCode");
+          if (!codeEl) return;
+          navigator.clipboard.writeText(codeEl.textContent).then(() => {
+            copyBtn.textContent = "Copiado";
+            copyBtn.classList.add("copied");
+            setTimeout(() => { copyBtn.textContent = "Copiar"; copyBtn.classList.remove("copied"); }, 1500);
+          }).catch(() => {});
+        });
+      }
+    }
+
+    let targetModalState = { mode: "create", target: null, volumeProject: null, isEditing: false };
+
+    function renderTargets(content) {
+      const workerOptions = state.workers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+      const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)}</option>`).join("");
+      const settings = state.settings || {};
+      const hasDefaultPassword = !!(settings.restic_password_secret_id);
+      const passwordSecretOptions = state.secrets.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Targets</h2><div class="subtitle">Configura que se va a backupear por worker y compose project</div></div></div>
+        <details class="form-section"><summary>Crear target</summary><div class="form-body">
+          <form id="createTargetForm">
+            <div class="form-grid">
+              <div class="field"><label for="targetName">Nombre</label><input id="targetName" required /></div>
+              <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${state.workers.length ? "" : "disabled"}>${workerOptions}</select></div>
+              <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${state.workers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
+              <div class="field"><label for="targetBackupMode">Modo</label><select id="targetBackupMode"><option value="hot">hot</option><option value="cold">cold</option></select></div>
+              <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
+              <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
+              <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
+              ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
+            </div>
+            <div class="field full">
+              <label>Volumenes a backupear</label>
+              <div id="targetVolumeList" class="volume-list"><div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div></div>
+            </div>
+            <div id="targetProjectSummary" class="helper">Selecciona un worker para ver sus compose projects y volumenes detectados.</div>
+            <details class="sub-section">
+              <summary>Opciones avanzadas</summary>
+              <div class="form-grid" style="margin-top:8px">
+                ${hasDefaultPassword ? `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) — opcional</label><select id="targetResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${passwordSecretOptions}</select><div class="helper">Si lo dejas vacio, se usara el password default del Control Plane.</div></div>` : ""}
+                <div class="field"><label for="targetRuntimeCommand">Comando de backup (opcional)</label><input id="targetRuntimeCommand" placeholder="Por defecto: /root/backup.sh" /></div>
+                <div class="field full"><label for="targetRuntimeEnvironment">Runtime environment JSON (opcional)</label><textarea id="targetRuntimeEnvironment" placeholder="{}">{}</textarea></div>
+                <div class="field full"><label for="targetRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="targetRestoreDefaults" placeholder="{}">{"layout":"auto"}</textarea></div>
+              </div>
+            </details>
+            <div class="btn-row"><button type="submit" class="btn primary sm" ${state.workers.length ? "" : "disabled"}>Crear target</button></div>
+            <div class="helper">${state.workers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "Primero registra al menos un worker."}</div>
+          </form>
+        </div></details>
+        <div class="page-header"><div><h2>Targets configurados</h2></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Acciones</th></tr></thead>
+          <tbody>${state.targets.length ? state.targets.map(t => {
+            const worker = state.workers.find(w => w.id === t.worker_id);
+            const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
+            const lastJob = getLastJobForTarget(t.id);
+            return `<tr>
+              <td>${escapeHtml(t.name)}</td>
+              <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
+              <td class="mono">${escapeHtml(t.compose_project || "—")}</td>
+              <td>${escapeHtml(t.backup_mode)}</td>
+              <td class="mono">${escapeHtml((t.volume_targets || []).join(", ") || "—")}</td>
+              <td>${escapeHtml(retention ? retention.name : "—")}</td>
+              <td class="action-cell">
+                <button class="btn primary xs" data-action="run" data-id="${escapeHtml(t.id)}">Ejecutar</button>
+                ${t.backup_strategy === "restic" ? `<button class="btn ghost xs" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                ${lastJob ? `<button class="btn ghost xs" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
+                <button class="btn ghost xs" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
+                <button class="btn ghost xs danger" data-action="delete" data-id="${escapeHtml(t.id)}">Eliminar</button>
+              </td>
+            </tr>`;
+          }).join("") : `<tr><td colspan="7" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
+        </table></div></div>
+        <div id="targetLogPanel"></div>
+        <div id="modalOverlay"></div>
+      `;
+      bindTargetForm();
+      bindTargetActions();
+      if (currentLogJobId) {
+        const target = state.targets.find(t => {
+          const jobs = (state.jobs || []).filter(j => j.id === currentLogJobId);
+          return jobs.length ? t.id === jobs[0].target_id : false;
+        });
+        reopenLogPanel(currentLogJobId, target ? target.id : null);
+      }
+    }
+
+    function getLastJobForTarget(targetId) {
+      const targetJobs = (state.jobs || []).filter(j => j.target_id === targetId);
+      if (!targetJobs.length) return null;
+      return targetJobs.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))[0];
+    }
+
+    function bindTargetActions() {
+      const container = document.querySelector(".table-wrap");
+      if (!container) return;
+      container.querySelectorAll("[data-action]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const action = btn.dataset.action;
+          const id = btn.dataset.id;
+          const jobId = btn.dataset.job;
+          const target = state.targets.find(t => t.id === id);
+          if (!target) return;
+          if (action === "run") { await runBackupNow(id); }
+          else if (action === "snapshots") { openSnapshotsModal(target); }
+          else if (action === "logs") { openLogPanel(jobId, id); }
+          else if (action === "edit") { openEditTargetModal(target); }
+          else if (action === "delete") { await deleteTarget(id); }
+        });
+      });
+    }
+
+    async function runBackupNow(targetId) {
+      try {
+        const job = await apiPost(`/api/v1/targets/${targetId}/backup`, { requested_by: "ui" });
+        openLogPanel(job.id, targetId);
+      } catch (error) { alert(`Error ejecutando backup: ${error.message}`); }
+    }
+
+    async function deleteTarget(targetId) {
+      if (!confirm("¿Eliminar este target? Esta accion no se puede deshacer.")) return;
+      try {
+        await apiDelete(`/api/v1/targets/${targetId}`);
+        await refreshAll();
+      } catch (error) { alert(`Error eliminando target: ${error.message}`); }
+    }
+
+    let snapshotBrowserState = null;
+
+    async function openSnapshotsModal(target) {
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      snapshotBrowserState = { target, snapshots: [], currentSnapshot: null, currentPath: "", entries: [], loading: false };
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:900px; max-height:85vh; display:flex; flex-direction:column;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div><h3 style="margin:0;">Snapshots de ${escapeHtml(target.name)}</h3><div class="subtitle">Explora y descarga contenido de snapshots restic</div></div>
+            <button class="btn ghost xs" id="snapClose">Cerrar</button>
+          </div>
+          <div id="snapContent" style="flex:1; overflow-y:auto; min-height:300px;"></div>
+        </div>
+      `;
+      overlay.style.display = "flex";
+      document.getElementById("snapClose").addEventListener("click", () => { overlay.style.display = "none"; overlay.innerHTML = ""; });
+      await loadSnapshotsList(target);
+    }
+
+    async function loadSnapshotsList(target) {
+      const content = document.getElementById("snapContent");
+      if (!content) return;
+      content.innerHTML = '<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Cargando snapshots...</div>';
+      try {
+        await apiPost(`/api/v1/targets/${target.id}/snapshots-sync`, { requested_by: "ui" });
+        await new Promise(r => setTimeout(r, 3000));
+        const snaps = await apiGet(`/api/v1/targets/${target.id}/snapshots`);
+        snapshotBrowserState.snapshots = snaps.items || [];
+        renderSnapshotsList(content);
+      } catch (error) {
+        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error cargando snapshots: ${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderSnapshotsList(content) {
+      const snaps = snapshotBrowserState.snapshots;
+      if (!snaps || snaps.length === 0) {
+        content.innerHTML = `
+          <div style="text-align:center; padding:40px;">
+            <div style="color:var(--muted-foreground); margin-bottom:16px;">No hay snapshots disponibles para este target.</div>
+            <button class="btn ghost xs" id="snapRefresh">Refrescar</button>
+          </div>`;
+        const refreshBtn = document.getElementById("snapRefresh");
+        if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(snapshotBrowserState.target));
+        return;
+      }
+      content.innerHTML = `
+        <div style="margin-bottom:8px; font-size:13px; color:var(--muted-foreground);">Selecciona un snapshot para explorar su contenido:</div>
+        <table class="table" style="font-size:13px;">
+          <thead><tr><th>ID</th><th>Fecha</th><th>Paths</th><th>Acciones</th></tr></thead>
+          <tbody>${snaps.map(s => `
+            <tr>
+              <td class="mono">${escapeHtml(s.snapshot_id || "—")}</td>
+              <td>${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : "—")}</td>
+              <td class="mono" style="font-size:11px; max-width:300px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((s.paths || []).join(", ") || "—")}</td>
+              <td><button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button></td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      `;
+      content.querySelectorAll("[data-snap]").forEach(btn => {
+        btn.addEventListener("click", () => browseSnapshot(btn.dataset.snap, ""));
+      });
+    }
+
+    async function browseSnapshot(snapshotId, path) {
+      const content = document.getElementById("snapContent");
+      if (!content) return;
+      snapshotBrowserState.currentSnapshot = snapshotId;
+      snapshotBrowserState.currentPath = path;
+      content.innerHTML = `<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Listando contenido de ${escapeHtml(path || "/")}...</div>`;
+      try {
+        const result = await apiPost(`/api/v1/targets/${snapshotBrowserState.target.id}/snapshot-ls`, {
+          snapshot_id: snapshotId,
+          path: path,
+        });
+        snapshotBrowserState.entries = result.entries || [];
+        renderSnapshotBrowser(content, snapshotId, path, result.entries || []);
+      } catch (error) {
+        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error listando contenido: ${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderSnapshotBrowser(content, snapshotId, path, entries) {
+      const normalized = entries.filter(e => e && (e.type === "file" || e.type === "dir" || e.struct_type === "file" || e.struct_type === "dir" || e.path));
+      const isResticJson = entries.length > 0 && entries[0].path !== undefined;
+      const dirs = [];
+      const files = [];
+      if (isResticJson) {
+        for (const e of entries) {
+          const isDir = e.type === "dir" || e.struct_type === "dir" || (e.type === "node" && e.struct_type === "dir");
+          const item = { path: e.path || "", name: (e.path || "").split("/").pop() || e.path, isDir };
+          if (isDir) dirs.push(item); else files.push(item);
+        }
+      }
+      dirs.sort((a, b) => a.name.localeCompare(b.name));
+      files.sort((a, b) => a.name.localeCompare(b.name));
+      const pathParts = path ? path.split("/").filter(Boolean) : [];
+      const breadcrumbs = ['<a href="#" data-path="" style="color:var(--primary);">raiz</a>'];
+      let acc = "";
+      for (const p of pathParts) {
+        acc = acc ? `${acc}/${p}` : p;
+        breadcrumbs.push(`<span style="color:var(--muted-foreground);">/</span><a href="#" data-path="${escapeHtml(acc)}" style="color:var(--primary);">${escapeHtml(p)}</a>`);
+      }
+      content.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <div>
+            <button class="btn ghost xs" id="snapBackToList">← Lista de snapshots</button>
+          </div>
+          <div style="font-size:12px; color:var(--muted-foreground);">Snapshot: <code>${escapeHtml(snapshotId)}</code></div>
+        </div>
+        <div style="margin-bottom:12px; padding:8px 10px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); font-size:13px;">
+          ${breadcrumbs.join(" ")}
+        </div>
+        ${normalized.length === 0 ? '<div style="padding:20px; text-align:center; color:var(--muted-foreground);">Carpeta vacia o no se pudo listar.</div>' : `
+        <table class="table" style="font-size:13px;">
+          <thead><tr><th style="width:30px;"></th><th>Nombre</th><th>Tipo</th><th style="width:120px;">Acciones</th></tr></thead>
+          <tbody>
+            ${dirs.map(d => {
+              const relPath = path ? `${path}/${d.name}` : d.name;
+              return `<tr>
+                <td>📁</td>
+                <td class="mono"><a href="#" data-dir="${escapeHtml(relPath)}" style="color:var(--primary);">${escapeHtml(d.name)}/</a></td>
+                <td>directorio</td>
+                <td><button class="btn ghost xs" data-dir-btn="${escapeHtml(relPath)}">Abrir</button></td>
+              </tr>`;
+            }).join("")}
+            ${files.map(f => {
+              const relPath = path ? `${path}/${f.name}` : f.name;
+              return `<tr>
+                <td>📄</td>
+                <td class="mono">${escapeHtml(f.name)}</td>
+                <td>archivo</td>
+                <td><button class="btn primary xs" data-download="${escapeHtml(relPath)}">Descargar</button></td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>`}
+      `;
+      const backBtn = document.getElementById("snapBackToList");
+      if (backBtn) backBtn.addEventListener("click", () => renderSnapshotsList(content));
+      content.querySelectorAll("[data-dir]").forEach(a => {
+        a.addEventListener("click", (e) => { e.preventDefault(); browseSnapshot(snapshotId, a.dataset.dir); });
+      });
+      content.querySelectorAll("[data-dir-btn]").forEach(btn => {
+        btn.addEventListener("click", () => browseSnapshot(snapshotId, btn.dataset.dirBtn));
+      });
+      content.querySelectorAll("[data-download]").forEach(btn => {
+        btn.addEventListener("click", () => downloadSnapshotFile(snapshotId, btn.dataset.download));
+      });
+    }
+
+    async function downloadSnapshotFile(snapshotId, filePath) {
+      try {
+        const result = await apiPost(`/api/v1/targets/${snapshotBrowserState.target.id}/snapshot-dump`, {
+          snapshot_id: snapshotId,
+          path: filePath,
+        });
+        if (!result.b64_content) { alert("No se pudo obtener el contenido del archivo."); return; }
+        const binary = atob(result.b64_content);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filePath.split("/").pop() || "download";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert(`Error descargando archivo: ${error.message}`);
+      }
+    }
+
+    function openEditTargetModal(target) {
+      targetModalState = { mode: "edit", target, isEditing: true };
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.storage_profile_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
+      const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}" ${r.id === target.retention_policy_id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
+      overlay.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <h3>Editar target</h3>
+            <button class="close" id="modalClose">&times;</button>
+          </div>
+          <div class="modal-body">
+            <form id="editTargetForm">
+              <div class="form-grid">
+                <div class="field"><label for="etName">Nombre</label><input id="etName" value="${escapeHtml(target.name)}" required /></div>
+                <div class="field"><label for="etBackupMode">Modo</label><select id="etBackupMode"><option value="hot" ${target.backup_mode === "hot" ? "selected" : ""}>hot</option><option value="cold" ${target.backup_mode === "cold" ? "selected" : ""}>cold</option></select></div>
+                <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
+                <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
+                <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
+                <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
+              </div>
+              <details class="sub-section">
+                <summary>Opciones avanzadas</summary>
+                <div class="form-grid" style="margin-top:8px">
+                  <div class="field"><label for="etRuntimeCommand">Comando de backup (opcional)</label><input id="etRuntimeCommand" value="${escapeHtml(target.runtime_command || "")}" placeholder="Por defecto: /root/backup.sh" /></div>
+                  <div class="field full"><label for="etRuntimeEnvironment">Runtime environment JSON (opcional)</label><textarea id="etRuntimeEnvironment">${escapeHtml(JSON.stringify(target.runtime_environment || {}, null, 2))}</textarea></div>
+                  <div class="field full"><label for="etRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="etRestoreDefaults">${escapeHtml(JSON.stringify(target.restore_defaults || {}, null, 2))}</textarea></div>
+                </div>
+              </details>
+              <div class="btn-row">
+                <button type="submit" class="btn primary sm">Guardar cambios</button>
+                <button type="button" class="btn ghost sm" id="etCancel">Cancelar</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+      overlay.classList.add("active");
+      document.getElementById("modalClose").addEventListener("click", closeTargetModal);
+      document.getElementById("etCancel").addEventListener("click", closeTargetModal);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) closeTargetModal(); });
+      document.getElementById("editTargetForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+          await apiPatch(`/api/v1/targets/${target.id}`, {
+            name: document.getElementById("etName").value.trim(),
+            backup_mode: document.getElementById("etBackupMode").value,
+            backup_strategy: document.getElementById("etBackupStrategy").value,
+            runtime_command: emptyToNull(document.getElementById("etRuntimeCommand").value),
+            runtime_environment: parseJsonField("etRuntimeEnvironment", "runtime environment"),
+            storage_profile_id: emptyToNull(document.getElementById("etStorageProfileId").value),
+            retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
+            restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
+            restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
+          });
+          closeTargetModal();
+          await refreshAll();
+        } catch (error) { alert(`Error actualizando target: ${error.message}`); }
+      });
+    }
+
+    function closeTargetModal() {
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) { overlay.innerHTML = ""; overlay.classList.remove("active"); }
+      targetModalState = { mode: "create", target: null, volumeProject: null, isEditing: false };
+    }
+
+    let jobPollTimer = null;
+    let currentLogJobId = null;
+
+    function openLogPanel(jobId, targetId) {
+      if (jobPollTimer) clearInterval(jobPollTimer);
+      currentLogJobId = jobId;
+      const panel = document.getElementById("targetLogPanel");
+      if (!panel) return;
+      const target = state.targets.find(t => t.id === targetId);
+      panel.innerHTML = `
+        <div class="log-panel">
+          <div class="log-panel-header">
+            <div class="log-panel-title">
+              <h3>Logs: ${escapeHtml(target ? target.name : targetId)}</h3>
+              <div class="job-status-bar" id="jobStatusBar">
+                <span class="job-status-pill pending">pending</span>
+                <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
+              </div>
+            </div>
+            <button class="btn ghost xs" id="logPanelClose">Cerrar</button>
+          </div>
+          <div class="log-container" id="logContainer"><div class="log-line info">Cargando logs...</div></div>
+        </div>
+      `;
+      panel.classList.add("active");
+      document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
+      pollJobLogs(jobId);
+    }
+
+    function closeLogPanel() {
+      if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+      currentLogJobId = null;
+      const panel = document.getElementById("targetLogPanel");
+      if (panel) { panel.innerHTML = ""; panel.classList.remove("active"); }
+    }
+
+    function reopenLogPanel(jobId, targetId) {
+      const panel = document.getElementById("targetLogPanel");
+      if (!panel) return;
+      const target = state.targets.find(t => t.id === targetId);
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const status = existingJob ? existingJob.status : "pending";
+      panel.innerHTML = `
+        <div class="log-panel">
+          <div class="log-panel-header">
+            <div class="log-panel-title">
+              <h3>Logs: ${escapeHtml(target ? target.name : targetId || "—")}</h3>
+              <div class="job-status-bar" id="jobStatusBar">
+                <span class="job-status-pill ${status}">${status}</span>
+                <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
+              </div>
+            </div>
+            <button class="btn ghost xs" id="logPanelClose">Cerrar</button>
+          </div>
+          <div class="log-container" id="logContainer"><div class="log-line info">Cargando logs...</div></div>
+        </div>
+      `;
+      panel.classList.add("active");
+      document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
+      if (existingJob) renderJobLogs(existingJob);
+    }
+
+    function renderJobLogs(job) {
+      const statusEl = document.getElementById("jobStatusBar");
+      if (statusEl) {
+        statusEl.innerHTML = `<span class="job-status-pill ${job.status}">${job.status}</span><span class="job-meta">Job: ${escapeHtml(job.id)}</span>`;
+      }
+      const container = document.getElementById("logContainer");
+      if (!container) return;
+      const lines = job.log_lines || [];
+      if (!lines.length) { container.innerHTML = `<div class="log-line info">Esperando logs del worker...</div>`; return; }
+      container.innerHTML = lines.map(line => {
+        const lower = line.toLowerCase();
+        let cls = "info";
+        if (lower.includes("error") || lower.includes("err:") || lower.includes("failed") || lower.includes("traceback") || lower.includes("exception")) cls = "error";
+        else if (lower.includes("warn") || lower.includes("warning")) cls = "warning";
+        else if (lower.includes("info") || lower.includes("status") || lower.includes("starting") || lower.includes("success") || lower.includes("snapshot") || lower.includes("backup")) cls = "info";
+        return `<div class="log-line ${cls}">${escapeHtml(line)}</div>`;
+      }).join("");
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function pollJobLogs(jobId) {
+      if (jobPollTimer) clearInterval(jobPollTimer);
+      const fetchJob = async () => {
+        try {
+          const job = await apiGet(`/api/v1/jobs/${jobId}`);
+          renderJobLogs(job);
+          if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+            if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+            await refreshAll();
+          }
+        } catch (error) { }
+      };
+      fetchJob();
+      jobPollTimer = setInterval(fetchJob, 2000);
+    }
+
+    let volumeSelectionState = { stacks: {}, expanded: {} };
+
+    function renderVolumeCheckboxes(project) {
+      const container = document.getElementById("targetVolumeList");
+      if (!container) return;
+      if (!project) {
+        container.innerHTML = `<div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div>`;
+        return;
+      }
+      const volumes = project.volume_targets || [];
+      const runtimeVols = project.runtime_volumes || {};
+      if (!volumes.length) {
+        container.innerHTML = `<div class="helper">Este proyecto no tiene volumenes de datos detectados.</div>`;
+        return;
+      }
+      const stackKey = project.name;
+      if (!volumeSelectionState.stacks[stackKey]) {
+        volumeSelectionState.stacks[stackKey] = {};
+        volumes.forEach(v => { volumeSelectionState.stacks[stackKey][v] = true; });
+      }
+      if (volumeSelectionState.expanded[stackKey] === undefined) {
+        volumeSelectionState.expanded[stackKey] = true;
+      }
+      const isExpanded = volumeSelectionState.expanded[stackKey];
+      const selectedCount = Object.values(volumeSelectionState.stacks[stackKey]).filter(Boolean).length;
+      const totalCount = volumes.length;
+      const allSelected = selectedCount === totalCount;
+      container.innerHTML = `
+        <div class="volume-group" data-stack="${escapeHtml(stackKey)}">
+          <div class="volume-group-header" data-stack-toggle="${escapeHtml(stackKey)}">
+            <div>
+              <div class="stack-name">${escapeHtml(stackKey)}</div>
+              <div class="stack-meta">${selectedCount}/${totalCount} volumenes seleccionados</div>
+            </div>
+            <div class="stack-toggle">${isExpanded ? "▾" : "▸"}</div>
+          </div>
+          <div class="volume-group-body" style="${isExpanded ? "" : "display:none"}">
+            ${volumes.map(v => {
+              const volName = Object.keys(runtimeVols).find(k => runtimeVols[k].bind === v) || "";
+              const isSelected = volumeSelectionState.stacks[stackKey][v];
+              return `<div class="volume-card ${isSelected ? "selected" : ""}" data-volume="${escapeHtml(v)}" data-stack="${escapeHtml(stackKey)}">
+                <div class="vol-icon">📦</div>
+                <div class="vol-info">
+                  <div class="vol-path">${escapeHtml(v)}</div>
+                  ${volName ? `<div class="vol-name">${escapeHtml(volName)}</div>` : ""}
+                </div>
+                <div class="vol-check"></div>
+              </div>`;
+            }).join("")}
+          </div>
+        </div>
+      `;
+      const group = container.querySelector(".volume-group");
+      if (group) {
+        const header = group.querySelector(".volume-group-header");
+        if (header) {
+          header.addEventListener("click", () => {
+            volumeSelectionState.expanded[stackKey] = !volumeSelectionState.expanded[stackKey];
+            renderVolumeCheckboxes(project);
+          });
+        }
+        group.querySelectorAll(".volume-card").forEach(card => {
+          card.addEventListener("click", () => {
+            const vol = card.dataset.volume;
+            volumeSelectionState.stacks[stackKey][vol] = !volumeSelectionState.stacks[stackKey][vol];
+            renderVolumeCheckboxes(project);
+          });
+        });
+      }
+    }
+
+    function getSelectedVolumes() {
+      const container = document.getElementById("targetVolumeList");
+      if (!container) return [];
+      const stackKey = container.querySelector(".volume-group")?.dataset.stack;
+      if (!stackKey || !volumeSelectionState.stacks[stackKey]) return [];
+      return Object.entries(volumeSelectionState.stacks[stackKey])
+        .filter(([_, selected]) => selected)
+        .map(([vol]) => vol);
+    }
+
+    function bindTargetForm() {
+      const form = document.getElementById("createTargetForm");
+      if (!form) return;
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+          const selectedVols = getSelectedVolumes();
+          const backupStrategy = document.getElementById("targetBackupStrategy").value;
+          const resticPasswordSecret = emptyToNull(document.getElementById("targetResticPasswordSecret")?.value || "");
+          const hasDefault = !!(state.settings && state.settings.restic_password_secret_id);
+          if (backupStrategy === "restic" && !hasDefault && !resticPasswordSecret) {
+            alert("Debes seleccionar un secret de password restic, o configurar un default en Settings.");
+            return;
+          }
+          await apiPost("/api/v1/targets", {
+            name: document.getElementById("targetName").value.trim(),
+            worker_id: document.getElementById("targetWorkerId").value,
+            compose_project: emptyToNull(document.getElementById("targetComposeProject").value),
+            volume_targets: selectedVols.length ? selectedVols : null,
+            backup_mode: document.getElementById("targetBackupMode").value,
+            backup_strategy: backupStrategy,
+            runtime_command: emptyToNull(document.getElementById("targetRuntimeCommand").value),
+            runtime_environment: parseJsonField("targetRuntimeEnvironment", "runtime environment del target"),
+            storage_profile_id: emptyToNull(document.getElementById("targetStorageProfileId").value),
+            retention_policy_id: emptyToNull(document.getElementById("targetRetentionPolicyId").value),
+            restic_password_secret_id: resticPasswordSecret,
+            restore_defaults: parseJsonField("targetRestoreDefaults", "restore defaults del target"),
+          });
+          await refreshAll();
+        } catch (error) { alert(`Error creando target: ${error.message}`); }
+      });
+      const workerSelect = document.getElementById("targetWorkerId");
+      const projectSelect = document.getElementById("targetComposeProject");
+      const summary = document.getElementById("targetProjectSummary");
+      async function refreshProjects() {
+        const workerId = workerSelect.value;
+        projectSelect.innerHTML = `<option value="">-- Seleccionar compose project --</option>`;
+        renderVolumeCheckboxes(null);
+        if (!workerId) { summary.textContent = "Selecciona un worker para ver sus compose projects y volumenes detectados."; return; }
+        const snapshot = await fetchWorkerInventory(workerId);
+        if (!snapshot || !snapshot.inventory) { summary.textContent = "Sin inventario reportado por el worker todavia."; return; }
+        if (!snapshot.inventory.docker_available) { summary.textContent = "El worker reporta que no tiene acceso al daemon de Docker."; return; }
+        const projects = snapshot.inventory.compose_project_details || [];
+        if (!projects.length) { summary.textContent = "Docker disponible, pero no se detectaron compose projects en este worker."; return; }
+        projectSelect.innerHTML = projects.map(p => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`).join("");
+        projectSelect.value = projects[0].name;
+        renderProjectSummary(projects[0]);
+        renderVolumeCheckboxes(projects[0]);
+      }
+      function renderProjectSummary(project) {
+        if (!project) { summary.textContent = "Selecciona un compose project."; return; }
+        const vols = (project.volume_targets || []).join(", ") || "sin volumenes";
+        const containers = (project.containers || []).map(c => escapeHtml(c.name)).join(", ") || "sin contenedores";
+        summary.innerHTML = `Proyecto <strong>${escapeHtml(project.name)}</strong> | Volumenes: ${escapeHtml(vols)} | Contenedores: ${containers}`;
+      }
+      workerSelect.addEventListener("change", refreshProjects);
+      projectSelect.addEventListener("change", () => {
+        const projects = getWorkerComposeProjects(workerSelect.value);
+        const selected = projects.find(p => p.name === projectSelect.value);
+        renderProjectSummary(selected);
+        renderVolumeCheckboxes(selected);
+      });
+      refreshProjects();
+    }
+
+    function renderJobs(content) {
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore</div></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>ID</th><th>Target</th><th>Comando</th><th>Status</th><th>Inicio</th><th>Fin</th></tr></thead>
+          <tbody>${state.jobs.length ? state.jobs.map(j => `<tr><td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td><td>${escapeHtml(j.target_id || "—")}</td><td>${escapeHtml(j.command || "—")}</td><td>${fmtStatus(j.status)}</td><td class="mono">${fmtDate(j.started_at)}</td><td class="mono">${fmtDate(j.finished_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin jobs ejecutados</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+    }
+
+    function renderStorage(content) {
+      const fileSecrets = state.secrets.filter(s => s.secret_type === "file");
+      const fileSecretOptions = fileSecrets.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Storage Profiles</h2><div class="subtitle">Perfiles de almacenamiento para los backups</div></div></div>
+        <details class="form-section"><summary>Crear storage profile</summary><div class="form-body">
+          <form id="createStorageForm">
+            <div class="form-grid">
+              <div class="field"><label for="spName">Nombre</label><input id="spName" placeholder="s3-prod" required /></div>
+              <div class="field"><label for="spBackendType">Backend</label><select id="spBackendType"><option value="rclone">rclone</option><option value="local">local</option></select></div>
+            </div>
+            <div class="field full" id="spRcloneConfRow">
+              <label for="spRcloneSecretId">Secreto rclone.conf</label>
+              <select id="spRcloneSecretId"><option value="">-- Seleccionar secreto rclone --</option>${fileSecretOptions}</select>
+              <div class="hint">Primero crea el secreto con tipo <strong>rclone</strong> en "Secretos", luego seleccionalo aqui. Se montara en <code>/root/.config/rclone/rclone.conf</code>.</div>
+            </div>
+            <div class="field full">
+              <label for="spEnvironment">Environment JSON</label>
+              <textarea id="spEnvironment">{}</textarea>
+              <div class="hint">Vars de entorno inyectadas en el runtime. Para rclone, puedes poner <code>RCLONE_REMOTE</code> aqui si tu script lo usa.</div>
+            </div>
+            <div class="btn-row"><button type="submit" class="btn primary sm">Crear storage profile</button></div>
+          </form>
+        </div></details>
+        <div class="page-header"><div><h2>Profiles configurados</h2></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Backend</th><th>Environment</th><th>File secrets</th></tr></thead>
+          <tbody>${state.storageProfiles.length ? state.storageProfiles.map(s => `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.backend_type)}</td><td class="mono">${escapeHtml(JSON.stringify(s.environment || {}))}</td><td class="mono">${escapeHtml(JSON.stringify(s.file_secret_refs || {}))}</td></tr>`).join("") : `<tr><td colspan="4" class="empty-state">Sin storage profiles</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+      const form = document.getElementById("createStorageForm");
+      const backendType = document.getElementById("spBackendType");
+      const rcloneRow = document.getElementById("spRcloneConfRow");
+      function toggleRcloneRow() {
+        rcloneRow.style.display = backendType.value === "rclone" ? "" : "none";
+      }
+      backendType.addEventListener("change", toggleRcloneRow);
+      toggleRcloneRow();
+      if (form) {
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          try {
+            const bt = backendType.value;
+            const envJson = parseJsonField("spEnvironment", "environment del storage profile");
+            const fileSecretRefs = {};
+            if (bt === "rclone") {
+              const secretId = document.getElementById("spRcloneSecretId").value;
+              if (!secretId) { alert("Selecciona un secreto rclone.conf"); return; }
+              fileSecretRefs["/root/.config/rclone/rclone.conf"] = secretId;
+            }
+            await apiPost("/api/v1/storage-profiles", {
+              name: document.getElementById("spName").value.trim(),
+              backend_type: bt,
+              environment: envJson,
+              secret_refs: {},
+              file_secret_refs: fileSecretRefs,
+            });
+            await refreshAll();
+          } catch (error) { alert(`Error creando storage profile: ${error.message}`); }
+        });
+      }
+    }
+
+    function renderRetention(content) {
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Retention Policies</h2><div class="subtitle">Politicas de retencion de backups</div></div></div>
+        <details class="form-section"><summary>Crear politica de retencion</summary><div class="form-body">
+          <form id="createRetentionForm">
+            <div class="form-grid">
+              <div class="field"><label for="rpName">Nombre</label><input id="rpName" required /></div>
+              <div class="field"><label for="rpKeepLast">Keep last</label><input id="rpKeepLast" type="number" value="7" /></div>
+              <div class="field"><label for="rpKeepDaily">Keep daily</label><input id="rpKeepDaily" type="number" value="7" /></div>
+              <div class="field"><label for="rpKeepWeekly">Keep weekly</label><input id="rpKeepWeekly" type="number" value="4" /></div>
+              <div class="field"><label for="rpKeepMonthly">Keep monthly</label><input id="rpKeepMonthly" type="number" value="6" /></div>
+            </div>
+            <div class="btn-row"><button type="submit" class="btn primary sm">Crear politica</button></div>
+          </form>
+        </div></details>
+        <div class="page-header"><div><h2>Politicas configuradas</h2></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Keep last</th><th>Keep daily</th><th>Keep weekly</th><th>Keep monthly</th></tr></thead>
+          <tbody>${state.retentionPolicies.length ? state.retentionPolicies.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="mono">${escapeHtml(String(r.keep_last ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_daily ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_weekly ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_monthly ?? "—"))}</td></tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin politicas de retencion</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+      const form = document.getElementById("createRetentionForm");
+      if (form) {
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          try {
+            await apiPost("/api/v1/retention-policies", {
+              name: document.getElementById("rpName").value.trim(),
+              keep_last: parseInt(document.getElementById("rpKeepLast").value) || 0,
+              keep_daily: parseInt(document.getElementById("rpKeepDaily").value) || 0,
+              keep_weekly: parseInt(document.getElementById("rpKeepWeekly").value) || 0,
+              keep_monthly: parseInt(document.getElementById("rpKeepMonthly").value) || 0,
+            });
+            await refreshAll();
+          } catch (error) { alert(`Error creando politica: ${error.message}`); }
+        });
+      }
+    }
+
+    function renderSecrets(content) {
+      const fileSecrets = state.secrets.filter(s => s.secret_type === "file");
+      const fileSecretOptions = fileSecrets.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Secretos</h2><div class="subtitle">Secretos reutilizables para storage profiles y runtimes</div></div></div>
+        <details class="form-section"><summary>Crear secreto</summary><div class="form-body">
+          <form id="createSecretForm">
+            <div class="form-grid">
+              <div class="field"><label for="secName">Nombre</label><input id="secName" placeholder="rclone-s3-prod" required /></div>
+              <div class="field"><label for="secType">Tipo</label><select id="secType"><option value="rclone">rclone (.conf)</option><option value="env">env (var de entorno)</option><option value="generic">generic (texto libre)</option></select></div>
+            </div>
+            <div class="field full">
+              <label for="secPlaintext" id="secPlaintextLabel">Pega aqui el rclone.conf</label>
+              <textarea id="secPlaintext" style="min-height:200px" placeholder="[miprod-s3]&#10;type = s3&#10;provider = Minio&#10;env_auth = false&#10;access_key_id = ...&#10;secret_access_key = ...&#10;endpoint = https://s3.example.com&#10;region = us-east-1"></textarea>
+              <div class="hint" id="secHint">El contenido debe tener exactamente una seccion <strong>[profile]</strong> y un campo <strong>type = ...</strong>.</div>
+            </div>
+            <div class="btn-row"><button type="submit" class="btn primary sm">Crear secreto</button></div>
+          </form>
+        </div></details>
+        <div class="page-header"><div><h2>Secretos configurados</h2><div class="subtitle">Los secretos tipo rclone se usan en storage profiles con backend rclone</div></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Nombre</th><th>Tipo</th><th>Scope</th><th>Creado</th></tr></thead>
+          <tbody>${state.secrets.length ? state.secrets.map(s => {
+            const typeLabel = s.secret_type === "file" ? "rclone" : s.secret_type;
+            return `<tr><td>${escapeHtml(s.name)}</td><td><span class="pill muted">${escapeHtml(typeLabel)}</span></td><td class="mono">${escapeHtml(s.scope || "global")}</td><td class="mono">${fmtDate(s.created_at)}</td></tr>`;
+          }).join("") : `<tr><td colspan="4" class="empty-state">Sin secretos</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+      const form = document.getElementById("createSecretForm");
+      const secType = document.getElementById("secType");
+      const secPlaintextLabel = document.getElementById("secPlaintextLabel");
+      const secPlaintext = document.getElementById("secPlaintext");
+      const secHint = document.getElementById("secHint");
+      function updateSecPlaceholder() {
+        if (secType.value === "rclone") {
+          secPlaintextLabel.textContent = "Pega aqui el rclone.conf";
+          secPlaintext.placeholder = "[miprod-s3]\ntype = s3\nprovider = Minio\nenv_auth = false\naccess_key_id = ...\nsecret_access_key = ...\nendpoint = https://s3.example.com\nregion = us-east-1";
+          secHint.innerHTML = "El contenido debe tener exactamente una seccion <strong>[profile]</strong> y un campo <strong>type = ...</strong>. Se guardara como tipo <strong>file</strong> internamente.";
+        } else if (secType.value === "env") {
+          secPlaintextLabel.textContent = "Valor de la variable de entorno";
+          secPlaintext.placeholder = "ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+          secHint.innerHTML = "El contenido se inyectara como var de entorno en el runtime del job.";
+        } else {
+          secPlaintextLabel.textContent = "Contenido del secreto";
+          secPlaintext.placeholder = "Texto libre";
+          secHint.innerHTML = "Secreto generico de texto libre.";
+        }
+      }
+      secType.addEventListener("change", updateSecPlaceholder);
+      updateSecPlaceholder();
+      if (form) {
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          try {
+            const uiType = document.getElementById("secType").value;
+            const backendType = uiType === "rclone" ? "file" : uiType;
+            await apiPost("/api/v1/secrets", {
+              name: document.getElementById("secName").value.trim(),
+              secret_type: backendType,
+              plaintext: document.getElementById("secPlaintext").value,
+            });
+            await refreshAll();
+          } catch (error) { alert(`Error creando secreto: ${error.message}`); }
+        });
+      }
+    }
+
+    function renderUsers(content) {
+      const canManage = state.currentRole === "admin";
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Usuarios</h2><div class="subtitle">Usuarios locales del Control Plane</div></div></div>
+        ${canManage ? `<details class="form-section"><summary>Crear usuario</summary><div class="form-body">
+          <form id="createUserForm">
+            <div class="form-grid">
+              <div class="field"><label for="usrName">Usuario</label><input id="usrName" required /></div>
+              <div class="field"><label for="usrPassword">Contrasenia</label><input id="usrPassword" type="password" required /></div>
+              <div class="field"><label for="usrRole">Rol</label><select id="usrRole"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></div>
+            </div>
+            <div class="btn-row"><button type="submit" class="btn primary sm">Crear usuario</button></div>
+          </form>
+        </div></details>` : ""}
+        <div class="page-header"><div><h2>Usuarios configurados</h2></div></div>
+        <div class="table-wrap"><div class="sheet"><table class="table">
+          <thead><tr><th>Usuario</th><th>Rol</th><th>Cambio obligatorio</th><th>Creado</th></tr></thead>
+          <tbody>${state.localUsers.length ? state.localUsers.map(u => `<tr><td>${escapeHtml(u.username)}</td><td><span class="pill muted">${escapeHtml(u.role)}</span></td><td>${u.must_change_password ? '<span class="pill warn">si</span>' : '<span class="pill ok">no</span>'}</td><td class="mono">${fmtDate(u.created_at)}</td></tr>`).join("") : `<tr><td colspan="4" class="empty-state">Sin usuarios</td></tr>`}</tbody>
+        </table></div></div>
+      `;
+      const form = document.getElementById("createUserForm");
+      if (form) {
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          try {
+            await apiPost("/api/v1/admin/users", {
+              username: document.getElementById("usrName").value.trim(),
+              password: document.getElementById("usrPassword").value,
+              role: document.getElementById("usrRole").value,
+            });
+            await refreshAll();
+          } catch (error) { alert(`Error creando usuario: ${error.message}`); }
+        });
+      }
+    }
+
+    function renderSettings(content) {
+      const settings = state.settings || {};
+      const hasDefaultPassword = !!(settings.restic_password_secret_id);
+      const hasRcloneConf = !!(settings.rclone_conf_secret_id);
+      const passwordSecretOptions = state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === settings.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
+      const rcloneSecretOptions = state.secrets.filter(s => s.secret_type === "file").map(s => `<option value="${escapeHtml(s.id)}" ${s.id === settings.rclone_conf_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
+      content.innerHTML = `
+        <div class="page-header"><div><h2>Settings</h2><div class="subtitle">Configuracion global del Control Plane para backups restic</div></div></div>
+        <div class="sheet" style="max-width:680px; padding: 24px;">
+          <form id="settingsForm">
+            <div style="margin-bottom: 20px;">
+              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Repositorio restic</h3>
+              <div class="helper" style="margin-bottom:16px;">Define la ruta base del repositorio. Para cada target se usara <code>{base}/{target_name}</code>. Si el target tiene su propio <code>RESTIC_REPOSITORY</code>, ese tiene prioridad.</div>
+            </div>
+            <div class="form-grid">
+              <div class="field full">
+                <label for="settingsRepoBase">Ruta base del repositorio restic</label>
+                <input id="settingsRepoBase" value="${escapeHtml(settings.restic_repository_base || "")}" placeholder="rclone:daniel.actsis:backup" />
+                <div class="helper">Para cada target se usara <code>{base}/{target_name}</code> como repositorio.</div>
+                <div id="repoPreview" style="margin-top:8px; padding:8px 10px; border-radius:var(--radius); background:var(--card); border:1px solid var(--border); font-size:12px;"></div>
+                <div id="repoWarning" style="margin-top:6px;"></div>
+              </div>
+            </div>
+            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+            <div style="margin-bottom: 20px;">
+              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">rclone.conf global (opcional)</h3>
+              <div class="helper" style="margin-bottom:16px;">Si el <code>RESTIC_REPOSITORY</code> usa <code>rclone:</code> como backend, monta este <code>rclone.conf</code> en el contenedor de backup. Solo se aplica si el storage profile del target no monta el suyo propio.</div>
+            </div>
+            <div class="form-grid">
+              <div class="field full">
+                <label for="settingsRcloneSecret">rclone.conf (secret tipo rclone)</label>
+                <select id="settingsRcloneSecret"><option value="">-- Sin rclone.conf --</option>${rcloneSecretOptions}</select>
+                <div class="helper">${hasRcloneConf ? '<span class="pill ok" style="font-size:10px;">rclone.conf activo</span> Se montara en el contenedor y se usara automaticamente.' : '<span class="pill muted" style="font-size:10px;">Sin rclone.conf</span> Solo necesario si usas <code>rclone:</code> en el repositorio.'}</div>
+              </div>
+            </div>
+            <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+            <div style="margin-bottom: 20px;">
+              <h3 style="margin:0 0 4px; font-size:15px; font-weight:700;">Password por defecto</h3>
+              <div class="helper" style="margin-bottom:16px;">Si se configura, los targets no necesitan especificar password (queda en opciones avanzadas). Si no se configura, cada target debe elegir su propio secret de password.</div>
+            </div>
+            <div class="form-grid">
+              <div class="field full">
+                <label for="settingsPasswordSecret">Password restic por defecto (secret)</label>
+                <select id="settingsPasswordSecret"><option value="">-- Sin default --</option>${passwordSecretOptions}</select>
+                <div class="helper">${hasDefaultPassword ? '<span class="pill ok" style="font-size:10px;">Default activo</span> Los targets usaran este password por defecto.' : '<span class="pill muted" style="font-size:10px;">Sin default</span> Cada target debe especificar su propio password.'}</div>
+              </div>
+            </div>
+            <div class="btn-row" style="margin-top:24px; justify-content:flex-end;">
+              <button type="submit" class="btn primary">Guardar configuracion</button>
+            </div>
+            <div id="settingsFeedback" style="margin-top:16px;"></div>
+          </form>
+        </div>
+      `;
+      const feedbackEl = () => document.getElementById("settingsFeedback");
+      const showFeedback = (msg, type) => {
+        const el = feedbackEl();
+        if (!el) return;
+        const color = type === "error" ? "var(--destructive)" : type === "success" ? "var(--success)" : "var(--muted-foreground)";
+        el.innerHTML = `<div style="padding:10px 12px; border-radius:var(--radius); background:color-mix(in srgb, ${color} 10%, var(--background)); border:1px solid color-mix(in srgb, ${color} 30%, transparent); color:${color}; font-size:13px; font-weight:600;">${escapeHtml(msg)}</div>`;
+        if (type === "success") setTimeout(() => { if (el) el.innerHTML = ""; }, 4000);
+      };
+      const updateRepoPreview = () => {
+        const base = document.getElementById("settingsRepoBase").value.trim();
+        const previewEl = document.getElementById("repoPreview");
+        const warningEl = document.getElementById("repoWarning");
+        if (!previewEl || !warningEl) return;
+        const rcloneSecret = document.getElementById("settingsRcloneSecret").value;
+        const rcloneRemote = state.rcloneRemote || "";
+        if (!base) {
+          let hint = 'Ejemplo: <code>backup</code>';
+          if (rcloneSecret && rcloneRemote) hint = `Con rclone.conf seleccionado solo pon la ruta. Ej: <code>backup</code> → <code>rclone:${escapeHtml(rcloneRemote)}:backup/nginx</code>`;
+          previewEl.innerHTML = `<span style="color:var(--muted-foreground);">${hint}</span>`;
+          warningEl.innerHTML = "";
+          return;
+        }
+        const cleanBase = base.replace(/^\/+|\/+$/g, "");
+        const hasPrefix = /^[a-z]+:/i.test(base);
+        const exampleTarget = "nginx";
+        let exampleRepo;
+        if (hasPrefix) {
+          exampleRepo = `${base.replace(/\/+$/, "")}/${exampleTarget}`;
+        } else if (rcloneSecret && rcloneRemote) {
+          exampleRepo = `rclone:${rcloneRemote}:${cleanBase}/${exampleTarget}`;
+        } else {
+          exampleRepo = `${cleanBase}/${exampleTarget}`;
+        }
+        if (hasPrefix) {
+          const isRclone = /^rclone:/i.test(base);
+          previewEl.innerHTML = `<span style="color:var(--muted-foreground);">Resultado para target <code>${exampleTarget}</code>:&nbsp;</span><code style="color:var(--success); font-weight:700;">${escapeHtml(exampleRepo)}</code>`;
+          if (isRclone && !rcloneSecret) {
+            warningEl.innerHTML = `<div style="padding:6px 10px; border-radius:var(--radius); background:color-mix(in srgb, var(--warning, #f59e0b) 10%, var(--background)); border:1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent); color:var(--warning, #f59e0b); font-size:12px; font-weight:600;">⚠ Usas rclone: pero no hay rclone.conf seleccionado. El backup fallara si no lo configuras.</div>`;
+          } else {
+            warningEl.innerHTML = "";
+          }
+        } else if (rcloneSecret && rcloneRemote) {
+          previewEl.innerHTML = `<span style="color:var(--muted-foreground);">Con rclone.conf [<code>${escapeHtml(rcloneRemote)}</code>], resultado para target <code>${exampleTarget}</code>:&nbsp;</span><code style="color:var(--success); font-weight:700;">${escapeHtml(exampleRepo)}</code>`;
+          warningEl.innerHTML = "";
+        } else {
+          previewEl.innerHTML = `<span style="color:var(--destructive); font-weight:700;">✗ ${escapeHtml(exampleRepo)}</span> <span style="color:var(--muted-foreground);">(path local: el backup se perdera al terminar el contenedor)</span>`;
+          warningEl.innerHTML = `<div style="padding:6px 10px; border-radius:var(--radius); background:color-mix(in srgb, var(--destructive) 10%, var(--background)); border:1px solid color-mix(in srgb, var(--destructive) 30%, transparent); color:var(--destructive); font-size:12px; font-weight:600;">⚠ Path local sin backend. Selecciona un rclone.conf arriba para usar rclone, o usa un prefijo como rclone:, s3:, etc.</div>`;
+        }
+      };
+      document.getElementById("settingsRepoBase").addEventListener("input", updateRepoPreview);
+      document.getElementById("settingsRcloneSecret").addEventListener("change", updateRepoPreview);
+      updateRepoPreview();
+      document.getElementById("settingsForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const repoBase = document.getElementById("settingsRepoBase").value.trim();
+        const passwordSecret = emptyToNull(document.getElementById("settingsPasswordSecret").value);
+        const rcloneSecret = emptyToNull(document.getElementById("settingsRcloneSecret").value);
+        if (!repoBase) {
+          showFeedback("La ruta base del repositorio es obligatoria.", "error");
+          document.getElementById("settingsRepoBase").focus();
+          return;
+        }
+        if (!/^[a-z]+:/.test(repoBase) && !rcloneSecret) {
+          showFeedback("La ruta base no tiene prefijo (rclone:, s3:, etc) y no hay rclone.conf seleccionado. Selecciona un rclone.conf o usa un prefijo.", "error");
+          document.getElementById("settingsRepoBase").focus();
+          return;
+        }
+        try {
+          await apiPatch("/api/v1/settings", {
+            restic_repository_base: repoBase,
+            restic_password_secret_id: passwordSecret,
+            rclone_conf_secret_id: rcloneSecret,
+          });
+          await refreshAll();
+          showFeedback("Guardado exitosamente.", "success");
+        } catch (error) {
+          showFeedback(`Error guardando configuracion: ${error.message}`, "error");
+        }
+      });
+    }
+
+    async function refreshAll() {
+      try {
+        const me = await apiGet("/api/v1/auth/me");
+        state.currentUser = me.username;
+        state.currentRole = me.role;
+        const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings] = await Promise.all([
+          apiGet("/api/v1/workers"),
+          apiGet("/api/v1/targets"),
+          apiGet("/api/v1/jobs"),
+          apiGet("/api/v1/storage-profiles"),
+          apiGet("/api/v1/retention-policies"),
+          apiGet("/api/v1/secrets").catch(() => ({ items: [] })),
+          apiGet("/api/v1/admin/users").catch(() => ({ items: [] })),
+          apiGet("/api/v1/settings").catch(() => ({})),
+        ]);
+        state.workers = workers.items || [];
+        state.targets = targets.items || [];
+        state.jobs = jobs.items || [];
+        state.storageProfiles = storageProfiles.items || [];
+        state.retentionPolicies = retentionPolicies.items || [];
+        state.secrets = secrets.items || [];
+        state.localUsers = users.items || [];
+        state.settings = settings || {};
+        let rcloneRemote = null;
+        try {
+          const rr = await apiGet("/api/v1/settings/rclone-remote");
+          rcloneRemote = rr.remote_name || null;
+        } catch (e) {}
+        state.rcloneRemote = rcloneRemote;
+        state.workerInventories = {};
+        route();
+      } catch (error) {
+        if (error.message !== "auth") console.error(error);
+      }
+    }
+
+    (async function init() {
+      try {
+        const me = await apiGet("/api/v1/auth/me");
+        state.currentUser = me.username;
+        state.currentRole = me.role;
+        if (me.must_change_password) { window.location.href = "/change-password"; return; }
+        await refreshAll();
+      } catch (error) {
+        if (error.message !== "auth") console.error(error);
+      }
+    })();
+  </script>
+</body>
+</html>

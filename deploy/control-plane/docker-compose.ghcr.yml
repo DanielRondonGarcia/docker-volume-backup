@@ -1,0 +1,21 @@
+name: docker-volume-backup-control-plane-ghcr
+
+services:
+  control-plane:
+    image: ${CONTROL_PLANE_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-control-plane:latest}
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_HOST: 0.0.0.0
+      CONTROL_PLANE_PORT: 8080
+      CONTROL_PLANE_REPOSITORY: sqlite
+      CONTROL_PLANE_DB_PATH: /data/control_plane.db
+      CONTROL_PLANE_KEY_FILE: /data/.control_plane.key
+      CONTROL_PLANE_SESSION_KEY_FILE: /data/.control_plane.session.key
+      CONTROL_PLANE_USERS_FILE: /data/.control_plane.users.json
+    ports:
+      - "${CONTROL_PLANE_PUBLISHED_PORT:-8080}:8080"
+    volumes:
+      - control_plane_state:/data
+
+volumes:
+  control_plane_state:

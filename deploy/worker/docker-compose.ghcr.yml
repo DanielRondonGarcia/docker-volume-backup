@@ -1,0 +1,37 @@
+name: docker-volume-backup-worker-ghcr
+
+# Variante del stack del Worker usando imagenes publicadas en GHCR.
+# Anade aqui los servicios de tu aplicacion con sus volumenes; el worker
+# los descubrira y los reportara al Control Plane.
+
+services:
+  # ------------------------------------------------------------------
+  # Servicio de ejemplo: reemplaza/renombra por los servicios reales
+  # de tu stack. Sus volumenes seran detectados por el worker.
+  # ------------------------------------------------------------------
+  demo-app:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - demo_app_data:/usr/share/nginx/html
+
+  # ------------------------------------------------------------------
+  # Worker Agent: consume la imagen publicada en GHCR.
+  # ------------------------------------------------------------------
+  worker:
+    image: ${WORKER_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
+      WORKER_NAME: ${WORKER_NAME:-worker-ghcr}
+      WORKER_HOST_NAME: ${WORKER_HOST_NAME:-worker-ghcr}
+      WORKER_VERSION: ghcr
+      WORKER_RUN_ONCE: "false"
+      WORKER_POLL_INTERVAL_SECONDS: "15"
+      WORKER_HEALTH_PORT: "8081"
+      BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  demo_app_data:

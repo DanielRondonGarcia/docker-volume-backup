@@ -1,0 +1,176 @@
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+
+def utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+class WorkerStatus:
+    PENDING = "pending"
+    ONLINE = "online"
+    OFFLINE = "offline"
+    DISABLED = "disabled"
+
+
+class JobStatus:
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
+@dataclass
+class WorkerRecord:
+    name: str
+    host_name: str
+    version: str = "dev"
+    labels: Dict[str, str] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: str = WorkerStatus.PENDING
+    certificate_fingerprint: Optional[str] = None
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+    last_seen_at: Optional[datetime] = None
+
+
+@dataclass
+class WorkerEnrollmentRecord:
+    worker_id: str
+    token_hash: str
+    name: str
+    host_name: str
+    labels: Dict[str, str] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utcnow)
+    expires_at: datetime = field(default_factory=utcnow)
+    used_at: Optional[datetime] = None
+
+
+@dataclass
+class InventorySnapshot:
+    worker_id: str
+    inventory: Dict[str, Any]
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class BackupTargetRecord:
+    name: str
+    worker_id: str
+    compose_project: Optional[str] = None
+    volume_targets: List[str] = field(default_factory=list)
+    backup_mode: str = "hot"
+    backup_strategy: str = "restic"
+    runtime_image: Optional[str] = None
+    runtime_command: Optional[str] = None
+    runtime_environment: Dict[str, str] = field(default_factory=dict)
+    runtime_volumes: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    runtime_network_mode: Optional[str] = None
+    storage_profile_id: Optional[str] = None
+    retention_policy_id: Optional[str] = None
+    execution_policy_id: Optional[str] = None
+    restic_password_secret_id: Optional[str] = None
+    restore_defaults: Dict[str, Any] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class StorageProfileRecord:
+    name: str
+    backend_type: str
+    environment: Dict[str, str] = field(default_factory=dict)
+    secret_refs: Dict[str, str] = field(default_factory=dict)
+    file_secret_refs: Dict[str, str] = field(default_factory=dict)
+    runtime_volumes: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class RetentionPolicyRecord:
+    name: str
+    keep_last: Optional[int] = None
+    keep_hourly: Optional[int] = None
+    keep_daily: Optional[int] = None
+    keep_weekly: Optional[int] = None
+    keep_monthly: Optional[int] = None
+    keep_yearly: Optional[int] = None
+    prune: bool = True
+    labels: Dict[str, str] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SecretRecord:
+    name: str
+    scope: str
+    secret_type: str
+    ciphertext: str
+    key_version: str = "v1"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SnapshotRecord:
+    target_id: str
+    worker_id: str
+    snapshot_id: str
+    created_at: datetime
+    hostname: Optional[str] = None
+    paths: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    summary: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class TargetStatsRecord:
+    target_id: str
+    worker_id: str
+    stats: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class JobRecord:
+    worker_id: str
+    command: str
+    payload: Dict[str, Any] = field(default_factory=dict)
+    requested_by: str = "system"
+    target_id: Optional[str] = None
+    trigger: str = "manual"
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: str = JobStatus.PENDING
+    result_summary: Optional[Dict[str, Any]] = None
+    log_lines: List[str] = field(default_factory=list)
+    submitted_at: datetime = field(default_factory=utcnow)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SettingsRecord:
+    restic_repository_base: str = ""
+    restic_password_secret_id: Optional[str] = None
+    rclone_conf_secret_id: Optional[str] = None
+    id: str = "default"
+    updated_at: datetime = field(default_factory=utcnow)
