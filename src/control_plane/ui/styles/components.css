@@ -507,3 +507,8 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .log-panel-title { display: flex; flex-direction: column; gap: 8px; }
 .log-panel-title h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .log-panel .log-container { border-radius: 0; max-height: 480px; margin: 0; border: none; }
+
+.log-accordion-row > td { padding: 0 !important; border: none; }
+.log-accordion-content { padding: 12px; }
+.log-accordion-content .log-panel { margin-top: 0; }
+.log-accordion-content .log-container { max-height: 360px; }

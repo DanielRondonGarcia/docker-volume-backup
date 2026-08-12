@@ -1479,6 +1479,97 @@ docker compose up -d
     let jobsTableState = { sortKey: "started_at", sortDir: "desc", page: 1, pageSize: 25, filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
     let jobsPollTimer = null;
     let jobsPolling = false;
+    let accordionLogJobId = null;
+    let accordionLogTimer = null;
+    let accordionContentEl = null;
+
+    function toggleJobLogAccordion(jobId, content) {
+      const accordionRow = document.getElementById("log-accordion-" + jobId);
+      if (!accordionRow) return;
+      const isOpen = accordionRow.style.display !== "none";
+      if (isOpen) {
+        closeJobLogAccordion();
+        return;
+      }
+      closeJobLogAccordion();
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const tid = existingJob ? existingJob.target_id : null;
+      const target = tid ? state.targets.find(t => t.id === tid) : null;
+      const targetLabel = target ? target.name : (tid || "job");
+      const status = existingJob ? existingJob.status : "pending";
+      const contentDiv = document.getElementById("log-content-" + jobId);
+      if (!contentDiv) return;
+      contentDiv.innerHTML = `
+        <div class="log-panel">
+          <div class="log-panel-header">
+            <div class="log-panel-title">
+              <h3>Logs: ${escapeHtml(targetLabel)}</h3>
+              <div class="job-status-bar" id="jobStatusBar">
+                <span class="job-status-pill ${status}">${status}</span>
+                <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
+              </div>
+            </div>
+            <button class="btn ghost xs" id="logAccordionClose">Cerrar</button>
+          </div>
+          <div class="log-container" id="logContainer"><div class="log-line info">Cargando logs...</div></div>
+        </div>
+      `;
+      accordionRow.style.display = "";
+      accordionLogJobId = jobId;
+      accordionContentEl = contentDiv;
+      const closeBtn = document.getElementById("logAccordionClose");
+      if (closeBtn) closeBtn.addEventListener("click", closeJobLogAccordion);
+      if (existingJob) renderJobLogsInto(existingJob, contentDiv.querySelector("#logContainer"));
+      pollAccordionJobLogs(jobId);
+      accordionRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function closeJobLogAccordion() {
+      if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
+      if (accordionLogJobId) {
+        const row = document.getElementById("log-accordion-" + accordionLogJobId);
+        if (row) row.style.display = "none";
+        const contentDiv = document.getElementById("log-content-" + accordionLogJobId);
+        if (contentDiv) contentDiv.innerHTML = "";
+      }
+      accordionLogJobId = null;
+      accordionContentEl = null;
+    }
+
+    function pollAccordionJobLogs(jobId) {
+      if (accordionLogTimer) clearInterval(accordionLogTimer);
+      accordionLogTimer = setInterval(async () => {
+        try {
+          const job = await apiGet("/api/v1/jobs/" + jobId);
+          const updates = (state.jobs || []).map(j => j.id === job.id ? job : j);
+          state.jobs = updates;
+          const container = accordionContentEl ? accordionContentEl.querySelector("#logContainer") : null;
+          if (container) renderJobLogsInto(job, container);
+          const pill = accordionContentEl ? accordionContentEl.querySelector(".job-status-pill") : null;
+          if (pill) { pill.className = "job-status-pill " + job.status; pill.textContent = job.status; }
+          if (["succeeded", "failed", "cancelled"].includes(job.status)) {
+            clearInterval(accordionLogTimer);
+            accordionLogTimer = null;
+          }
+        } catch (e) {}
+      }, 3000);
+    }
+
+    function renderJobLogsInto(job, container) {
+      if (!container) return;
+      const lines = job.log_lines || [];
+      if (lines.length === 0) {
+        container.innerHTML = '<div class="log-line info">Sin logs disponibles</div>';
+        return;
+      }
+      container.innerHTML = lines.map(l => {
+        const escaped = escapeHtml(l);
+        if (/ERROR|FAILED|CRITICAL/i.test(l)) return `<div class="log-line error">${escaped}</div>`;
+        if (/WARN/i.test(l)) return `<div class="log-line warn">${escaped}</div>`;
+        return `<div class="log-line info">${escaped}</div>`;
+      }).join("");
+      container.scrollTop = container.scrollHeight;
+    }
 
     function renderJobs(content) {
       const allJobs = state.jobs || [];
@@ -1589,7 +1680,7 @@ docker compose up -d
               ${pagedJobs.length === 0 ? `<tr><td colspan="7" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
                 const canCancel = j.status === "pending" || j.status === "in_progress";
                 return `
-                <tr>
+                <tr id="job-row-${escapeHtml(j.id)}">
                   <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
                   <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
                   <td>${fmtJobCommand(j.command)}</td>
@@ -1599,6 +1690,11 @@ docker compose up -d
                   <td class="action-cell">
                     <button class="btn ghost xs" data-view-logs="${escapeHtml(j.id)}">Ver logs</button>
                     ${canCancel ? `<button class="btn ghost xs danger" data-cancel-job="${escapeHtml(j.id)}">Cancelar</button>` : ""}
+                  </td>
+                </tr>
+                <tr class="log-accordion-row" id="log-accordion-${escapeHtml(j.id)}" style="display:none;">
+                  <td colspan="7">
+                    <div class="log-accordion-content" id="log-content-${escapeHtml(j.id)}"></div>
                   </td>
                 </tr>
               `;
@@ -1667,7 +1763,7 @@ docker compose up -d
           });
         }
         content.querySelectorAll("[data-view-logs]").forEach(btn => {
-          btn.addEventListener("click", () => openLogPanel(btn.dataset.viewLogs));
+          btn.addEventListener("click", () => toggleJobLogAccordion(btn.dataset.viewLogs, content));
         });
         content.querySelectorAll("[data-cancel-job]").forEach(btn => {
           btn.addEventListener("click", async () => {
