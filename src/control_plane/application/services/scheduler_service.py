@@ -86,6 +86,7 @@ class SchedulerService:
         settings = self._service.get_settings()
         global_cron = settings.global_cron_expression if settings else None
         targets = self._service.list_targets()
+        logger.debug("Scheduler tick: now=%s, targets=%d, global_cron=%s", now, len(targets), global_cron or "none")
         for target in targets:
             if not target.enabled:
                 continue
