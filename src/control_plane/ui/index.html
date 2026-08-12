@@ -197,6 +197,7 @@
 
     function setView(view) {
       state.currentView = view;
+      if (view !== "jobs") stopJobsPolling();
       renderSidebar();
       renderTopbar();
       const content = document.getElementById("content");
@@ -1338,6 +1339,8 @@ docker compose up -d
     }
 
     let jobsTableState = { sortKey: "started_at", sortDir: "desc", filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
+    let jobsPollTimer = null;
+    let jobsPolling = false;
 
     function renderJobs(content) {
       const allJobs = state.jobs || [];
@@ -1392,7 +1395,12 @@ docker compose up -d
         const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
 
         content.innerHTML = `
-          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${jobs.length} de ${allJobs.length})</div></div></div>
+          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${jobs.length} de ${allJobs.length})</div></div>
+            <div class="jobs-autorefresh">
+              <label class="switch sm"><input type="checkbox" id="jobsAutoRefresh" ${jobsPolling ? "checked" : ""} /><span class="slider"></span></label>
+              <span class="autorefresh-label" id="jobsAutoRefreshLabel">${jobsPolling ? "Auto-refresh ON" : "Auto-refresh"}</span>
+            </div>
+          </div>
           <div class="table-wrap"><div class="sheet"><table class="table datatable">
             <thead>
               <tr>
@@ -1445,9 +1453,59 @@ docker compose up -d
             renderTable();
           });
         });
+        const autoRefreshToggle = document.getElementById("jobsAutoRefresh");
+        if (autoRefreshToggle) {
+          autoRefreshToggle.addEventListener("change", () => {
+            if (autoRefreshToggle.checked) {
+              startJobsPolling();
+            } else {
+              stopJobsPolling();
+            }
+          });
+        }
       };
 
       renderTable();
+    }
+
+    function startJobsPolling() {
+      stopJobsPolling();
+      jobsPolling = true;
+      const label = document.getElementById("jobsAutoRefreshLabel");
+      if (label) label.textContent = "Auto-refresh ON";
+      const tick = async () => {
+        if (!jobsPolling) return;
+        try {
+          const jobsResp = await apiGet("/api/v1/jobs");
+          const newJobs = jobsResp.items || [];
+          const oldIds = new Set((state.jobs || []).map(j => j.id));
+          const hasNew = newJobs.some(j => !oldIds.has(j.id));
+          const hasChanged = JSON.stringify(newJobs.map(j => j.id + j.status)) !== JSON.stringify((state.jobs || []).map(j => j.id + j.status));
+          state.jobs = newJobs;
+          if (hasNew || hasChanged) {
+            const content = document.getElementById("content");
+            if (content && state.currentView === "jobs") {
+              renderJobs(content);
+            }
+          }
+        } catch (e) {
+          // ignore polling errors
+        }
+        if (jobsPolling) {
+          jobsPollTimer = setTimeout(tick, 3000);
+        }
+      };
+      jobsPollTimer = setTimeout(tick, 3000);
+    }
+
+    function stopJobsPolling() {
+      jobsPolling = false;
+      if (jobsPollTimer) {
+        clearTimeout(jobsPollTimer);
+        jobsPollTimer = null;
+      }
+      const label = document.getElementById("jobsAutoRefreshLabel");
+      if (label) label.textContent = "Auto-refresh";
     }
 
     function renderStorage(content) {
