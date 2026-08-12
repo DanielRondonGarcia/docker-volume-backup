@@ -359,8 +359,8 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .settings-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 16px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--border); }
 @media (max-width: 768px) { .settings-grid { grid-template-columns: 1fr; } }
 
-.job-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; white-space: nowrap; border: 1px solid transparent; }
-.job-badge-icon { font-size: 13px; line-height: 1; font-weight: 900; }
+.job-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; white-space: nowrap; border: 1px solid transparent; line-height: 1.2; }
+.job-badge-icon { font-size: 12px; line-height: 1; font-weight: 900; display: inline-flex; align-items: center; }
 .job-success { background: #bbf7d0; color: #14532d; border-color: #22c55e; }
 .job-failed { background: #fecaca; color: #7f1d1d; border-color: #ef4444; }
 .job-running { background: #bfdbfe; color: #1e3a8a; border-color: #3b82f6; }
@@ -368,8 +368,8 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .job-canceled { background: #e5e7eb; color: #374151; border-color: #9ca3af; }
 .job-unknown { background: var(--muted); color: var(--muted-foreground); border-color: var(--border); }
 
-.cmd-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 8px; font-size: 11px; font-weight: 600; white-space: nowrap; font-family: var(--mono-font, monospace); border: 1px solid transparent; }
-.cmd-badge-icon { font-size: 12px; line-height: 1; font-weight: 900; }
+.cmd-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 8px; font-size: 11px; font-weight: 600; white-space: nowrap; font-family: var(--mono-font, monospace); border: 1px solid transparent; line-height: 1.2; }
+.cmd-badge-icon { font-size: 12px; line-height: 1; font-weight: 900; display: inline-flex; align-items: center; }
 .cmd-backup { background: #ddd6fe; color: #4c1d95; border-color: #8b5cf6; }
 .cmd-restore { background: #bae6fd; color: #0c4a6e; border-color: #0ea5e9; }
 .cmd-list { background: #d9f99d; color: #365314; border-color: #84cc16; }
