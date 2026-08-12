@@ -113,6 +113,7 @@ class WorkerAgentService:
             if command == "backup.run":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.run_runtime_job(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
@@ -120,7 +121,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "compose_project": payload.get("compose_project"),
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-50:],
+                    log_lines=combined_logs.splitlines()[-50:],
                 )
 
             if command == "snapshots.list":
@@ -194,6 +195,7 @@ class WorkerAgentService:
             if command in ("restore.dry_run", "restore.run"):
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.run_runtime_job(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
@@ -201,7 +203,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "dry_run": command == "restore.dry_run",
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-80:],
+                    log_lines=combined_logs.splitlines()[-80:],
                 )
 
             return WorkerJobExecutionResult(
