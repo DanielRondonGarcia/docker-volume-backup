@@ -460,7 +460,7 @@ docker compose up -d
               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
               <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
-              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div></div>
+              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
               ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
             </div>
             <div class="field full">
@@ -874,6 +874,119 @@ docker compose up -d
       }
     }
 
+    function cronNextRun(cronExpr, fromDate) {
+      const parts = cronExpr.trim().split(/\s+/);
+      if (parts.length !== 5) return null;
+      const d = fromDate ? new Date(fromDate) : new Date();
+      d.setSeconds(0, 0);
+      const maxIter = 525600;
+      for (let i = 0; i < maxIter; i++) {
+        const next = new Date(d.getTime() + 60000 * (i + 1));
+        const m = next.getMinutes();
+        const h = next.getHours();
+        const dom = next.getDate();
+        const mon = next.getMonth() + 1;
+        const dow = next.getDay();
+        if (cronFieldMatch(parts[0], m) &&
+            cronFieldMatch(parts[1], h) &&
+            cronFieldMatch(parts[2], dom) &&
+            cronFieldMatch(parts[3], mon) &&
+            cronFieldMatch(parts[4], dow)) {
+          return next;
+        }
+      }
+      return null;
+    }
+
+    function cronFieldMatch(field, value) {
+      if (field === "*") return true;
+      for (let part of field.split(",")) {
+        part = part.trim();
+        let step = 1;
+        if (part.includes("/")) {
+          const [base, s] = part.split("/");
+          step = parseInt(s, 10);
+          part = base;
+        }
+        let lo, hi;
+        if (part === "*") { lo = 0; hi = 59; }
+        else if (part.includes("-")) { const [a, b] = part.split("-"); lo = parseInt(a, 10); hi = parseInt(b, 10); }
+        else { lo = parseInt(part, 10); hi = lo; }
+        if (isNaN(lo) || isNaN(hi) || isNaN(step)) continue;
+        for (let v = lo; v <= hi; v += step) {
+          if (v === value) return true;
+        }
+      }
+      return false;
+    }
+
+    function cronDescribe(cronExpr) {
+      const parts = cronExpr.trim().split(/\s+/);
+      if (parts.length !== 5) return "";
+      const [m, h, dom, mon, dow] = parts;
+      if (m === "*" && h === "*" && dom === "*" && mon === "*" && dow === "*") return "cada minuto";
+      const timeStr = (hh, mm) => `${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;
+      if (m !== "*" && h !== "*" && !m.includes("/") && !h.includes("/") && dom === "*" && mon === "*" && dow === "*") {
+        return `diario a las ${timeStr(parseInt(h,10), parseInt(m,10))}`;
+      }
+      if (m !== "*" && h !== "*" && !m.includes("/") && !h.includes("/") && dom === "*" && mon === "*" && dow !== "*") {
+        const days = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
+        const d = parseInt(dow,10);
+        return `cada ${days[d]||""} a las ${timeStr(parseInt(h,10), parseInt(m,10))}`;
+      }
+      if (m !== "*" && h === "*" && dom === "*" && mon === "*" && dow === "*") {
+        return `cada hora en el minuto ${parseInt(m,10)}`;
+      }
+      if (h.includes("*/") && m === "0" && dom === "*" && mon === "*" && dow === "*") {
+        const every = parseInt(h.split("/")[1],10);
+        return `cada ${every} horas`;
+      }
+      if (m.includes("*/") && h === "*" && dom === "*" && mon === "*" && dow === "*") {
+        const every = parseInt(m.split("/")[1],10);
+        return `cada ${every} minutos`;
+      }
+      if (dom !== "*" && mon === "*" && m !== "*" && h !== "*") {
+        return `el dia ${dom} de cada mes a las ${timeStr(parseInt(h,10), parseInt(m,10))}`;
+      }
+      return `cron: ${cronExpr}`;
+    }
+
+    function updateCronPreview(inputId, previewId) {
+      const input = document.getElementById(inputId);
+      const preview = document.getElementById(previewId);
+      if (!input || !preview) return;
+      const expr = input.value.trim();
+      if (!expr) {
+        preview.innerHTML = '<span class="cron-manual">Solo manual (sin cron)</span>';
+        return;
+      }
+      const parts = expr.split(/\s+/);
+      if (parts.length !== 5) {
+        preview.innerHTML = '<span class="cron-error">Formato invalido: debe tener 5 campos</span>';
+        return;
+      }
+      try {
+        const next = cronNextRun(expr);
+        if (!next) {
+          preview.innerHTML = '<span class="cron-error">No se encontro proxima ejecucion valida</span>';
+          return;
+        }
+        const desc = cronDescribe(expr);
+        const now = new Date();
+        const diffMs = next.getTime() - now.getTime();
+        const diffMin = Math.round(diffMs / 60000);
+        let inStr;
+        if (diffMin < 1) inStr = "ahora";
+        else if (diffMin < 60) inStr = `en ${diffMin} min`;
+        else if (diffMin < 1440) inStr = `en ${Math.floor(diffMin/60)}h ${diffMin%60}m`;
+        else inStr = `en ${Math.floor(diffMin/1440)}d ${Math.floor((diffMin%1440)/60)}h`;
+        const dateStr = next.toLocaleString("es-CO", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+        preview.innerHTML = `<span class="cron-badge">⏱ ${escapeHtml(desc)}</span><br><span class="cron-next">Proxima: <strong>${escapeHtml(dateStr)}</strong> (${inStr})</span>`;
+      } catch (e) {
+        preview.innerHTML = '<span class="cron-error">Error calculando proxima ejecucion</span>';
+      }
+    }
+
     function openEditTargetModal(target) {
       targetModalState = { mode: "edit", target, isEditing: true };
       const overlay = document.getElementById("modalOverlay");
@@ -894,7 +1007,7 @@ docker compose up -d
                 <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
                 <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
                 <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
-                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual.</div></div>
+                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
                 <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
               </div>
               <details class="sub-section">
@@ -936,6 +1049,11 @@ docker compose up -d
           await refreshAll();
         } catch (error) { alert(`Error actualizando target: ${error.message}`); }
       });
+      const etCronInput = document.getElementById("etCronExpression");
+      if (etCronInput) {
+        etCronInput.addEventListener("input", () => updateCronPreview("etCronExpression", "etCronPreview"));
+        updateCronPreview("etCronExpression", "etCronPreview");
+      }
     }
 
     function closeTargetModal() {
@@ -1158,6 +1276,11 @@ docker compose up -d
       const workerSelect = document.getElementById("targetWorkerId");
       const projectSelect = document.getElementById("targetComposeProject");
       const summary = document.getElementById("targetProjectSummary");
+      const ctCronInput = document.getElementById("targetCronExpression");
+      if (ctCronInput) {
+        ctCronInput.addEventListener("input", () => updateCronPreview("targetCronExpression", "targetCronPreview"));
+        updateCronPreview("targetCronExpression", "targetCronPreview");
+      }
       async function refreshProjects() {
         const workerId = workerSelect.value;
         projectSelect.innerHTML = `<option value="">-- Seleccionar compose project --</option>`;
