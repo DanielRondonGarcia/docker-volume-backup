@@ -14,6 +14,13 @@ if [ ! -f /run/secrets/rclone.conf ] && [ -f /root/.config/rclone/rclone.conf ];
   cp /root/.config/rclone/rclone.conf /run/secrets/rclone.conf
 fi
 
+# If rclone.conf is not on disk but was passed as env var (RCLONE_CONF_CONTENT),
+# write it to /run/secrets/rclone.conf so rclone finds it.
+if [ ! -f /run/secrets/rclone.conf ] && [ -n "$RCLONE_CONF_CONTENT" ]; then
+  mkdir -p /run/secrets
+  printf '%s' "$RCLONE_CONF_CONTENT" > /run/secrets/rclone.conf
+fi
+
 # If rclone.conf is mounted at /run/secrets/, copy it to a writable
 # location so rclone can save config changes without "read-only file system" errors.
 # Docker bind mounts marked :ro may still report as writable to [ -w ], so we

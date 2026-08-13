@@ -724,6 +724,12 @@ class ControlPlaneService:
             environment.update(self._resolve_secret_refs(profile.secret_refs))
             volumes.update(profile.runtime_volumes)
             resolved_files.extend(self._resolve_file_secret_refs(profile.file_secret_refs))
+            for file_spec in resolved_files:
+                if "rclone" in file_spec.get("secret_name", "").lower() or file_spec.get("container_path", "").endswith("rclone.conf"):
+                    environment["RCLONE_CONF_CONTENT"] = file_spec["content"]
+                    if "RCLONE_CONFIG" not in environment:
+                        environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+                    break
 
         environment.update(target.runtime_environment)
         volumes.update(target.runtime_volumes)
@@ -755,13 +761,15 @@ class ControlPlaneService:
                 if rclone_path not in existing_paths:
                     secret = self.secret_repository.get(settings.rclone_conf_secret_id)
                     if secret:
+                        rclone_content = self.secret_codec.decrypt(secret.ciphertext)
                         resolved_files.append({
                             "container_path": rclone_path,
-                            "content": self.secret_codec.decrypt(secret.ciphertext),
+                            "content": rclone_content,
                             "secret_id": secret.id,
                             "secret_name": secret.name,
                         })
                         environment["RCLONE_CONFIG"] = rclone_path
+                        environment["RCLONE_CONF_CONTENT"] = rclone_content
 
         return environment, volumes, resolved_files
 
