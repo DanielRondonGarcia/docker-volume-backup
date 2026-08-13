@@ -56,6 +56,7 @@
       currentRole: null,
       workerInventories: {},
       currentView: "dashboard",
+      systemVersion: "dev",
     };
 
     function escapeHtml(str) {
@@ -170,6 +171,7 @@
           <nav class="section">
             <a class="item" href="#" id="logoutBtn">${ICONS.logout}<span>Cerrar sesion</span></a>
           </nav>
+          <div class="sidebar-version">v${escapeHtml(state.systemVersion)}</div>
         </div>
       `;
       sidebar.querySelector("#logoutBtn").addEventListener("click", async (e) => {
@@ -2531,6 +2533,7 @@ docker compose up -d
         } catch (e) {}
         state.rcloneRemote = rcloneRemote;
         state.workerInventories = {};
+        try { state.systemVersion = (await apiGet("/api/v1/version")).version || "dev"; } catch (e) {}
         route();
       } catch (error) {
         if (error.message !== "auth") console.error(error);

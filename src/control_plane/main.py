@@ -223,6 +223,8 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 return self._write_empty(204)
             if path == "/healthz":
                 return self._write_json(200, {"ok": True}, head_only=head_only)
+            if path == "/api/v1/version":
+                return self._write_json(200, {"version": os.environ.get("APP_VERSION", "dev")}, head_only=head_only)
             if path == "/api/v1/config/public":
                 public_url = ""
                 try:

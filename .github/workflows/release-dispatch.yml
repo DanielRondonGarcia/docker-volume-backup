@@ -167,6 +167,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_runtime.outputs.tags }}
           labels: ${{ steps.meta_runtime.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -179,6 +180,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_control_plane.outputs.tags }}
           labels: ${{ steps.meta_control_plane.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -191,5 +193,6 @@ jobs:
           push: true
           tags: ${{ steps.meta_worker.outputs.tags }}
           labels: ${{ steps.meta_worker.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
