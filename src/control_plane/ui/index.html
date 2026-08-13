@@ -710,7 +710,7 @@ docker compose up -d
         const maxAttempts = 150;
         for (let i = 0; i < maxAttempts; i++) {
           if (!document.getElementById("snapSyncBanner")) return;
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 1000));
           const syncText = document.getElementById("snapSyncText");
           if (syncText) syncText.textContent = `Sincronizando con el storage remoto... (${i + 1}/${maxAttempts})`;
           try {

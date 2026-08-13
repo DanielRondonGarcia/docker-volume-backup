@@ -249,7 +249,7 @@ class DockerRuntimeAdapter:
                     handle.write(file_spec["content"])
             volumes[temp_dir] = {
                 "bind": "/run/secrets",
-                "mode": "ro",
+                "mode": "rw",
             }
             rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
             if rclone_spec:
@@ -287,12 +287,25 @@ class DockerRuntimeAdapter:
         logs = summary.get("logs", "")
         snapshots = []
         if summary.get("success"):
-            try:
-                parsed = json.loads(logs or "[]")
-                snapshots = parsed if isinstance(parsed, list) else [parsed]
-            except json.JSONDecodeError:
-                summary["success"] = False
-                summary["error"] = "failed to parse restic snapshots JSON"
+            json_candidates = []
+            for line in logs.splitlines():
+                line = line.strip()
+                if line.startswith("[") or line.startswith("{"):
+                    json_candidates.append(line)
+            if json_candidates:
+                try:
+                    parsed = json.loads("".join(json_candidates))
+                    snapshots = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    summary["success"] = False
+                    summary["error"] = "failed to parse restic snapshots JSON"
+            else:
+                try:
+                    parsed = json.loads(logs or "[]")
+                    snapshots = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    summary["success"] = False
+                    summary["error"] = "failed to parse restic snapshots JSON"
         summary["snapshots"] = snapshots
         return summary
 
