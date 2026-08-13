@@ -1,5 +1,6 @@
 import docker
 import logging
+import os
 from typing import List, Optional
 from src.app.application.ports.ports import ContainerPort
 
@@ -112,4 +113,39 @@ class DockerAdapter(ContainerPort):
             return result
         except Exception as e:
             logger.error(f"Error finding containers using {target_path}: {e}")
+            return []
+
+    def find_containers_using_runtime_volumes(self) -> List[str]:
+        if not self.client: return []
+        try:
+            runtime_id = os.environ.get("HOSTNAME")
+            if not runtime_id:
+                logger.warning("HOSTNAME env var not set; cannot identify runtime container")
+                return []
+            runtime = self.client.containers.get(runtime_id)
+            runtime_mounts = runtime.attrs.get("Mounts", [])
+            backup_sources = set()
+            for mount in runtime_mounts:
+                dest = mount.get("Destination", "")
+                if dest.startswith("/backup/"):
+                    source = mount.get("Source") or mount.get("Name")
+                    if source:
+                        backup_sources.add(source)
+            logger.info(f"Runtime container {runtime_id} has {len(backup_sources)} backup volume source(s): {list(backup_sources)}")
+            if not backup_sources:
+                return []
+            containers = self.client.containers.list()
+            result = []
+            for container in containers:
+                if container.id == runtime_id:
+                    continue
+                mounts = container.attrs.get("Mounts", [])
+                for mount in mounts:
+                    source = mount.get("Source") or mount.get("Name")
+                    if source and source in backup_sources:
+                        result.append(container.id)
+                        break
+            return result
+        except Exception as e:
+            logger.error(f"Error finding containers using runtime volumes: {e}")
             return []

@@ -68,16 +68,21 @@ class RestoreService:
         return None
 
     def _find_affected_containers(self) -> List[str]:
+        logger.info("Finding containers that mount the same volumes as the runtime container")
+        containers = self.container_port.find_containers_using_runtime_volumes()
+        logger.info(f"Found {len(containers)} container(s) sharing runtime volumes: {containers}")
+        if containers:
+            return containers
         if self.restore_config.stop_label:
             labels = [self.restore_config.stop_label]
             if self.restore_config.custom_label:
                 labels.append(self.restore_config.custom_label)
-            logger.info(f"Finding containers with labels: {labels}")
+            logger.info(f"Fallback: finding containers with labels: {labels}")
             containers = self.container_port.get_containers_by_labels(labels)
             logger.info(f"Found {len(containers)} container(s) by labels: {containers}")
             if containers:
                 return containers
-        logger.info(f"Finding containers by volume mount: {self.restore_config.target_path}")
+        logger.info(f"Fallback: finding containers by volume mount: {self.restore_config.target_path}")
         containers = self.container_port.find_containers_using_volume(self.restore_config.target_path)
         logger.info(f"Found {len(containers)} container(s) by volume: {containers}")
         return containers

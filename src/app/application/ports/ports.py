@@ -45,6 +45,9 @@ class ContainerPort(ABC):
     def find_containers_using_volume(self, target_path: str) -> List[str]:
         return []
 
+    def find_containers_using_runtime_volumes(self) -> List[str]:
+        return []
+
 class NotifierPort(ABC):
     @abstractmethod
     def send_metrics(self, result: BackupResult) -> None:
