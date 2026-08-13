@@ -455,7 +455,7 @@ docker compose up -d
 
       const tlsNote = tlsEnabled
         ? `<div class="card compact"><div class="eyebrow">Worker ID</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(workerId)}</div><div class="meta">Token expira: ${escapeHtml(fmtDate(e.expires_at))}</div></div>`
-        : `<div class="card compact"><div class="eyebrow">Modo</div><div class="title">Sin TLS</div><div class="support">El worker se registrara automaticamente al arrancar. No se requiere token ni CA.</div></div>`;
+        : "";
 
       overlay.innerHTML = `
         <div class="modal">
@@ -478,7 +478,7 @@ docker compose up -d
               <button class="btn primary sm" id="awDone">Listo</button>
               <button class="btn ghost sm" id="awBack">Volver</button>
             </div>
-            <div class="helper">${tlsEnabled ? "El token se usa una sola vez al arrancar el worker. Si necesitas re-enrolar, genera uno nuevo." : "Para produccion con el Control Plane expuesto a una red no confiable, habilita TLS (mTLS) en el Control Plane."}</div>
+            <div class="helper">${tlsEnabled ? "El token se usa una sola vez al arrancar el worker. Si necesitas re-enrolar, genera uno nuevo." : ""}</div>
           </div>
         </div>
       `;
