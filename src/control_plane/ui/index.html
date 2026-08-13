@@ -1841,7 +1841,7 @@ docker compose up -d
       const targetMap = {};
       (state.targets || []).forEach(t => { targetMap[t.id] = t.name; });
 
-      const renderTable = () => {
+      const renderTableBody = () => {
         let jobs = allJobs.slice();
         jobs = jobs.filter(j => {
           const id = String(j.id || "").toLowerCase();
@@ -1882,12 +1882,6 @@ docker compose up -d
           return 0;
         });
 
-        const sortIcon = (key) => {
-          if (jobsTableState.sortKey !== key) return " ↕";
-          return jobsTableState.sortDir === "asc" ? " ↑" : " ↓";
-        };
-        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
-
         const pageSize = jobsTableState.pageSize;
         const totalFiltered = jobs.length;
         const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
@@ -1897,6 +1891,12 @@ docker compose up -d
         const pagedJobs = jobs.slice(startIdx, startIdx + pageSize);
         const showingFrom = totalFiltered === 0 ? 0 : startIdx + 1;
         const showingTo = Math.min(startIdx + pageSize, totalFiltered);
+
+        const sortIcon = (key) => {
+          if (jobsTableState.sortKey !== key) return " ↕";
+          return jobsTableState.sortDir === "asc" ? " ↑" : " ↓";
+        };
+        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
 
         const pageBtn = (label, page, disabled, active) => `<button class="btn sm ${active ? "primary" : ""}" data-page="${page}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
         const pageButtons = [];
@@ -1913,8 +1913,58 @@ docker compose up -d
         pageButtons.push(pageBtn("›", cur + 1, cur >= totalPages, false));
         pageButtons.push(pageBtn("»", totalPages, cur >= totalPages, false));
 
+        const tbody = content.querySelector("#jobsTbody");
+        if (tbody) {
+          tbody.innerHTML = pagedJobs.length === 0 ? `<tr><td colspan="7" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
+            const canCancel = j.status === "pending" || j.status === "in_progress";
+            return `
+            <tr id="job-row-${escapeHtml(j.id)}">
+              <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
+              <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
+              <td>${fmtJobCommand(j.command)}</td>
+              <td>${fmtJobStatus(j.status)}</td>
+              <td class="mono">${fmtDate(j.started_at)}</td>
+              <td class="mono">${fmtDate(j.finished_at)}</td>
+              <td class="action-cell">
+                <button class="btn ghost xs" data-view-logs="${escapeHtml(j.id)}">Ver logs</button>
+                ${canCancel ? `<button class="btn ghost xs danger" data-cancel-job="${escapeHtml(j.id)}">Cancelar</button>` : ""}
+              </td>
+            </tr>
+            <tr class="log-accordion-row" id="log-accordion-${escapeHtml(j.id)}" style="display:none;">
+              <td colspan="7">
+                <div class="log-accordion-content" id="log-content-${escapeHtml(j.id)}"></div>
+              </td>
+            </tr>
+          `;
+          }).join("");
+        }
+
+        const subtitle = content.querySelector(".page-header .subtitle");
+        if (subtitle) subtitle.textContent = `Historico de jobs de backup/restore (${totalFiltered} de ${allJobs.length})`;
+
+        const pagInfo = content.querySelector(".pagination-info");
+        if (pagInfo) pagInfo.textContent = `Mostrando ${showingFrom}-${showingTo} de ${totalFiltered} jobs`;
+
+        const pagControls = content.querySelector(".pagination-controls");
+        if (pagControls) pagControls.innerHTML = pageButtons.join("");
+
+        const sortThs = content.querySelectorAll("[data-sort]");
+        sortThs.forEach(th => {
+          const key = th.dataset.sort;
+          th.innerHTML = `${key === "id" ? "ID" : key === "target" ? "Target" : key === "command" ? "Comando" : key === "status" ? "Status" : key === "started_at" ? "Inicio" : "Fin"}${sortIcon(key)}`;
+        });
+
+        bindJobsRowEvents();
+      };
+
+      const renderTable = () => {
+        const sortIcon = (key) => {
+          if (jobsTableState.sortKey !== key) return " ↕";
+          return jobsTableState.sortDir === "asc" ? " ↑" : " ↓";
+        };
+        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
         content.innerHTML = `
-          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${totalFiltered} de ${allJobs.length})</div></div>
+          <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore</div></div>
           </div>
           <div class="table-wrap"><div class="sheet"><table class="table datatable">
             <thead>
@@ -1937,41 +1987,18 @@ docker compose up -d
                 <th></th>
               </tr>
             </thead>
-            <tbody>
-              ${pagedJobs.length === 0 ? `<tr><td colspan="7" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
-                const canCancel = j.status === "pending" || j.status === "in_progress";
-                return `
-                <tr id="job-row-${escapeHtml(j.id)}">
-                  <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
-                  <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
-                  <td>${fmtJobCommand(j.command)}</td>
-                  <td>${fmtJobStatus(j.status)}</td>
-                  <td class="mono">${fmtDate(j.started_at)}</td>
-                  <td class="mono">${fmtDate(j.finished_at)}</td>
-                  <td class="action-cell">
-                    <button class="btn ghost xs" data-view-logs="${escapeHtml(j.id)}">Ver logs</button>
-                    ${canCancel ? `<button class="btn ghost xs danger" data-cancel-job="${escapeHtml(j.id)}">Cancelar</button>` : ""}
-                  </td>
-                </tr>
-                <tr class="log-accordion-row" id="log-accordion-${escapeHtml(j.id)}" style="display:none;">
-                  <td colspan="7">
-                    <div class="log-accordion-content" id="log-content-${escapeHtml(j.id)}"></div>
-                  </td>
-                </tr>
-              `;
-              }).join("")}
-            </tbody>
+            <tbody id="jobsTbody"></tbody>
           </table></div></div>
           <div class="pagination">
-            <div class="pagination-info">Mostrando ${showingFrom}-${showingTo} de ${totalFiltered} jobs</div>
-            <div class="pagination-controls">${pageButtons.join("")}</div>
+            <div class="pagination-info"></div>
+            <div class="pagination-controls"></div>
             <div class="pagination-size">
               <label>Por pagina:
                 <select id="jobsPageSize">
-                  <option value="10" ${pageSize === 10 ? "selected" : ""}>10</option>
-                  <option value="25" ${pageSize === 25 ? "selected" : ""}>25</option>
-                  <option value="50" ${pageSize === 50 ? "selected" : ""}>50</option>
-                  <option value="100" ${pageSize === 100 ? "selected" : ""}>100</option>
+                  <option value="10" ${jobsTableState.pageSize === 10 ? "selected" : ""}>10</option>
+                  <option value="25" ${jobsTableState.pageSize === 25 ? "selected" : ""}>25</option>
+                  <option value="50" ${jobsTableState.pageSize === 50 ? "selected" : ""}>50</option>
+                  <option value="100" ${jobsTableState.pageSize === 100 ? "selected" : ""}>100</option>
                 </select>
               </label>
             </div>
@@ -1988,21 +2015,14 @@ docker compose up -d
               jobsTableState.sortKey = key;
               jobsTableState.sortDir = "desc";
             }
-            renderTable();
+            renderTableBody();
           });
         });
         content.querySelectorAll(".dt-filter").forEach(input => {
           input.addEventListener("input", () => {
             jobsTableState.filters[input.dataset.col] = input.value;
             jobsTableState.page = 1;
-            renderTable();
-          });
-        });
-        content.querySelectorAll("[data-page]").forEach(btn => {
-          btn.addEventListener("click", () => {
-            if (btn.disabled) return;
-            jobsTableState.page = parseInt(btn.dataset.page, 10);
-            renderTable();
+            renderTableBody();
           });
         });
         const pageSizeSelect = document.getElementById("jobsPageSize");
@@ -2010,9 +2030,20 @@ docker compose up -d
           pageSizeSelect.addEventListener("change", () => {
             jobsTableState.pageSize = parseInt(pageSizeSelect.value, 10);
             jobsTableState.page = 1;
-            renderTable();
+            renderTableBody();
           });
         }
+        renderTableBody();
+      };
+
+      function bindJobsRowEvents() {
+        content.querySelectorAll("[data-page]").forEach(btn => {
+          btn.addEventListener("click", () => {
+            if (btn.disabled) return;
+            jobsTableState.page = parseInt(btn.dataset.page, 10);
+            renderTableBody();
+          });
+        });
         content.querySelectorAll("[data-view-logs]").forEach(btn => {
           btn.addEventListener("click", () => toggleJobLogAccordion(btn.dataset.viewLogs, content));
         });
@@ -2028,11 +2059,14 @@ docker compose up -d
             } catch (e) { alert(`Error cancelando job: ${e.message}`); }
           });
         });
-      };
+      }
 
       renderTable();
+      _jobsRenderTableBody = renderTableBody;
       startJobsPolling();
     }
+
+    let _jobsRenderTableBody = null;
 
     function startJobsPolling() {
       if (jobsPolling) return;
@@ -2049,7 +2083,11 @@ docker compose up -d
           if (hasNew || hasChanged) {
             const content = document.getElementById("content");
             if (content && state.currentView === "jobs") {
-              renderJobs(content);
+              if (_jobsRenderTableBody) {
+                _jobsRenderTableBody();
+              } else {
+                renderJobs(content);
+              }
             }
           }
         } catch (e) {
@@ -2064,6 +2102,7 @@ docker compose up -d
 
     function stopJobsPolling() {
       jobsPolling = false;
+      _jobsRenderTableBody = null;
       if (jobsPollTimer) {
         clearTimeout(jobsPollTimer);
         jobsPollTimer = null;
