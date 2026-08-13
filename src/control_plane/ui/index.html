@@ -201,6 +201,7 @@
     function setView(view) {
       state.currentView = view;
       if (view !== "jobs") stopJobsPolling();
+      if (view !== "workers") stopWorkersPolling();
       renderSidebar();
       renderTopbar();
       const content = document.getElementById("content");
@@ -377,11 +378,49 @@
         </div>
         <div class="table-wrap"><div class="sheet"><table class="table">
           <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th></tr></thead>
-          <tbody>${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td class="mono">${escapeHtml(w.version || "—")}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td class="mono">${escapeHtml(w.version || "—")}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
         </table></div></div>
       `;
       const addBtn = document.getElementById("addWorkerBtn");
       if (addBtn) addBtn.addEventListener("click", openAddWorkerModal);
+      startWorkersPolling();
+    }
+
+    let workersPollTimer = null;
+    let workersPolling = false;
+
+    function startWorkersPolling() {
+      if (workersPolling) return;
+      workersPolling = true;
+      const tick = async () => {
+        if (!workersPolling) return;
+        try {
+          const resp = await apiGet("/api/v1/workers");
+          const newWorkers = resp.items || [];
+          const hasChanged = JSON.stringify(newWorkers.map(w => w.id + w.status + (w.last_seen_at || ""))) !== JSON.stringify((state.workers || []).map(w => w.id + w.status + (w.last_seen_at || "")));
+          state.workers = newWorkers;
+          if (hasChanged) {
+            const content = document.getElementById("content");
+            if (content && state.currentView === "workers") {
+              renderWorkers(content);
+            }
+          }
+        } catch (e) {
+          // ignore polling errors
+        }
+        if (workersPolling) {
+          workersPollTimer = setTimeout(tick, 3000);
+        }
+      };
+      workersPollTimer = setTimeout(tick, 3000);
+    }
+
+    function stopWorkersPolling() {
+      workersPolling = false;
+      if (workersPollTimer) {
+        clearTimeout(workersPollTimer);
+        workersPollTimer = null;
+      }
     }
 
     let addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
