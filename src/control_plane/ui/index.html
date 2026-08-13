@@ -158,7 +158,7 @@
       const sidebar = document.getElementById("sidebar");
       const items = NAV_ITEMS.filter(item => !state.currentRole || item.roles.includes(state.currentRole));
       sidebar.innerHTML = `
-        <div class="workspace"><span class="logo">DV</span><span>Docker Volume Backup</span></div>
+        <div class="workspace"><img src="/favicon.ico" class="sidebar-logo" alt="logo" /><span>Docker Volume Backup</span></div>
         <div class="section-label">Operacion</div>
         <nav class="section">
           ${items.map(item => `

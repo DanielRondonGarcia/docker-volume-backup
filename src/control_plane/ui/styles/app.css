@@ -36,6 +36,12 @@
   justify-content: center;
   font: 700 11px/1 var(--font-sans);
 }
+.sidebar .workspace .sidebar-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
+}
 .sidebar .section-label {
   padding: 4px 12px;
   font: 600 10px/1 var(--font-mono);
