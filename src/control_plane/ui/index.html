@@ -1050,6 +1050,14 @@ docker compose up -d
                 <option value="true">Sobrescribir archivos existentes</option>
               </select>
             </div>
+            <div class="field">
+              <label for="rsMode">Modo de restauracion</label>
+              <select id="rsMode">
+                <option value="cold">Cold restore (apagar servicios asociados)</option>
+                <option value="hot">Hot restore (sin apagar servicios)</option>
+              </select>
+              <div class="helper" style="margin-top:4px;">Cold restore detiene los contenedores del target antes de restaurar y los reinicia al terminar. Hot restore restaura sin detener nada.</div>
+            </div>
             <div class="restore-warning">
               <strong>Atencion:</strong> La restauracion reemplazara los datos del volumen con el contenido del snapshot.
               Asegurate de entender el impacto antes de continuar.
@@ -1067,11 +1075,13 @@ docker compose up -d
       document.getElementById("rsCancel").addEventListener("click", backToSnapshots);
       document.getElementById("rsConfirm").addEventListener("click", async () => {
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
+        const stopContainers = document.getElementById("rsMode").value === "cold";
         try {
           const job = await apiPost(`/api/v1/targets/${target.id}/restore/run`, {
             requested_by: "ui",
             snapshot_id: snapshotId,
             force_overwrite: forceOverwrite,
+            stop_containers: stopContainers,
           });
           close();
           openLogPanel(job.id, target.id);
