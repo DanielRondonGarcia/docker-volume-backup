@@ -4,10 +4,15 @@
 # Load from the entrypoint-generated env file in both cases.
 # We use set -a to export all variables to child processes (python)
 set -a
-if [ -f /root/env.sh ]; then
-  source /root/env.sh
-fi
+[ -f /root/env.sh ] && . /root/env.sh 2>/dev/null || true
 set +a
+
+# Also check /root/.config/rclone/rclone.conf (storage profile mount path)
+# and copy to /run/secrets/ so the rest of the script finds it there.
+if [ ! -f /run/secrets/rclone.conf ] && [ -f /root/.config/rclone/rclone.conf ]; then
+  mkdir -p /run/secrets
+  cp /root/.config/rclone/rclone.conf /run/secrets/rclone.conf
+fi
 
 # If rclone.conf is mounted at /run/secrets/, copy it to a writable
 # location so rclone can save config changes without "read-only file system" errors.

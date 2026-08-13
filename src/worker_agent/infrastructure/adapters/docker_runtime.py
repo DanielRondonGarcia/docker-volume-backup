@@ -239,6 +239,10 @@ class DockerRuntimeAdapter:
         resolved_files = payload.get("resolved_files") or []
         temp_dir = None
 
+        docker_sock_path = "/var/run/docker.sock"
+        if os.path.exists(docker_sock_path):
+            volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
+
         if resolved_files:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
             for index, file_spec in enumerate(resolved_files, start=1):
@@ -254,6 +258,17 @@ class DockerRuntimeAdapter:
             rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
             if rclone_spec:
                 environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        else:
+            restic_repo = environment.get("RESTIC_REPOSITORY", "")
+            if restic_repo.startswith("rclone:"):
+                return {
+                    "success": False,
+                    "status_code": 1,
+                    "logs": f"ERROR: RESTIC_REPOSITORY starts with 'rclone:' but no rclone.conf secret was mounted.\n"
+                            f"Configure the rclone.conf secret in the storage profile's file_secret_refs or in Settings > rclone.conf secret.\n"
+                            f"RESTIC_REPOSITORY={restic_repo}",
+                    "stderr": "",
+                }
 
         try:
             container = self.client.containers.run(
@@ -330,6 +345,10 @@ class DockerRuntimeAdapter:
 
         resolved_files = payload.get("resolved_files") or []
         temp_dir = None
+
+        docker_sock_path = "/var/run/docker.sock"
+        if os.path.exists(docker_sock_path):
+            volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
         if resolved_files:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
