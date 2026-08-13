@@ -67,6 +67,21 @@ class RestoreService:
             return "RESTORE_LAYOUT must be one of: auto, direct, backup-dir"
         return None
 
+    def _find_affected_containers(self) -> List[str]:
+        if self.restore_config.stop_label:
+            labels = [self.restore_config.stop_label]
+            if self.restore_config.custom_label:
+                labels.append(self.restore_config.custom_label)
+            logger.info(f"Finding containers with labels: {labels}")
+            containers = self.container_port.get_containers_by_labels(labels)
+            logger.info(f"Found {len(containers)} container(s) by labels: {containers}")
+            if containers:
+                return containers
+        logger.info(f"Finding containers by volume mount: {self.restore_config.target_path}")
+        containers = self.container_port.find_containers_using_volume(self.restore_config.target_path)
+        logger.info(f"Found {len(containers)} container(s) by volume: {containers}")
+        return containers
+
     def _planned_actions(self, candidate: RestoreCandidate, affected_containers: List[str]) -> List[str]:
         actions = [
             f"Select restore source: {candidate.source}",
@@ -102,7 +117,7 @@ class RestoreService:
 
         try:
             candidate = self._select_candidate()
-            affected_containers = self.container_port.find_containers_using_volume(self.restore_config.target_path)
+            affected_containers = self._find_affected_containers()
             planned_actions = self._planned_actions(candidate, affected_containers)
             return RestoreResult(
                 timestamp=datetime.now(),
@@ -142,14 +157,23 @@ class RestoreService:
         candidate = RestoreCandidate(plan.source or "", self.restore_config.backup_strategy)
         stopped_containers: List[str] = []
         try:
-            if self.restore_config.stop_containers and plan.affected_containers:
-                stopped_containers = self.container_port.stop_containers(plan.affected_containers)
+            if self.restore_config.stop_containers:
+                if plan.affected_containers:
+                    logger.info(f"Cold restore: stopping {len(plan.affected_containers)} container(s): {plan.affected_containers}")
+                    stopped_containers = self.container_port.stop_containers(plan.affected_containers)
+                    logger.info(f"Cold restore: {len(stopped_containers)} container(s) stopped successfully")
+                else:
+                    logger.warning("Cold restore: stop_containers=true but no affected containers found (check labels or volume mounts)")
+            else:
+                logger.info("Hot restore: containers will not be stopped")
 
             downloaded_path = self.storage_port.download_restore_candidate(candidate, self.restore_config)
             result = self.restore_strategy.restore(downloaded_path, self.restore_config)
         finally:
             if stopped_containers:
+                logger.info(f"Cold restore: restarting {len(stopped_containers)} container(s): {stopped_containers}")
                 self.container_port.start_containers(stopped_containers)
+                logger.info("Cold restore: containers restarted")
 
         result.duration = time.time() - started_at
         result.source = plan.source

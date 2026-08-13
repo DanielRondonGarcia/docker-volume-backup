@@ -733,6 +733,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     volume_targets=body.get("volume_targets"),
                     backup_mode=body.get("backup_mode"),
                     backup_strategy=body.get("backup_strategy"),
+                    runtime_image=body.get("runtime_image"),
                     runtime_command=body.get("runtime_command"),
                     runtime_environment=body.get("runtime_environment"),
                     storage_profile_id=body.get("storage_profile_id"),

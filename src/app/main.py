@@ -85,6 +85,8 @@ def main():
             scp_directory=scp_dir,
             rclone_remote=rclone_remote,
             local_archive_path=local_archive_path,
+            stop_label=os.environ.get("RESTORE_STOP_LABEL") or None,
+            custom_label=os.environ.get("RESTORE_CUSTOM_LABEL") or None,
         )
 
         service = RestoreService(

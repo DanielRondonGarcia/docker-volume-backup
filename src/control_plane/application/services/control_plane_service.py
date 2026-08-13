@@ -298,6 +298,7 @@ class ControlPlaneService:
         volume_targets: Optional[List[str]] = None,
         backup_mode: Optional[str] = None,
         backup_strategy: Optional[str] = None,
+        runtime_image: Optional[str] = None,
         runtime_command: Optional[str] = None,
         runtime_environment: Optional[Dict[str, str]] = None,
         storage_profile_id: Optional[str] = None,
@@ -329,6 +330,8 @@ class ControlPlaneService:
             target.backup_strategy = backup_strategy
         if runtime_command is not None:
             target.runtime_command = runtime_command
+        if runtime_image is not None:
+            target.runtime_image = runtime_image or None
         if runtime_environment is not None:
             target.runtime_environment = runtime_environment
         if storage_profile_id is not None:
@@ -693,7 +696,10 @@ class ControlPlaneService:
             "RESTORE_TARGET_PATH": restore_target_path or defaults.get("target_path") or defaults.get("RESTORE_TARGET_PATH") or "/backup",
             "RESTORE_LAYOUT": layout or defaults.get("layout") or defaults.get("RESTORE_LAYOUT") or "auto",
             "RESTORE_STOP_CONTAINERS": "true" if (stop_containers if stop_containers is not None else defaults.get("stop_containers", False)) else "false",
+            "RESTORE_STOP_LABEL": "docker-volume-backup.stop-during-backup=true",
         })
+        if target.labels.get("BACKUP_CUSTOM_LABEL"):
+            environment["RESTORE_CUSTOM_LABEL"] = target.labels["BACKUP_CUSTOM_LABEL"]
         final_source = restore_source or defaults.get("source") or defaults.get("RESTORE_SOURCE")
         if final_source:
             environment["RESTORE_SOURCE"] = final_source

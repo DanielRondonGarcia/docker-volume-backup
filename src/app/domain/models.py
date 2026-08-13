@@ -60,6 +60,8 @@ class RestoreConfig:
     scp_directory: Optional[str] = None
     rclone_remote: Optional[str] = None
     local_archive_path: Optional[str] = None
+    stop_label: Optional[str] = None
+    custom_label: Optional[str] = None
 
 @dataclass
 class RestoreCandidate:

@@ -20,6 +20,8 @@ services:
       - "8080:80"
     volumes:
       - ./demo-app-data:/usr/share/nginx/html
+    labels:
+      docker-volume-backup.stop-during-backup: "true"
 
   # ------------------------------------------------------------------
   # Worker Agent: se registra contra el Control Plane y reporta el
