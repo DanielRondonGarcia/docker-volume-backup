@@ -137,7 +137,7 @@ class DockerAdapter(ContainerPort):
             containers = self.client.containers.list()
             result = []
             for container in containers:
-                if container.id == runtime_id:
+                if container.id == runtime.id:
                     continue
                 mounts = container.attrs.get("Mounts", [])
                 for mount in mounts:
