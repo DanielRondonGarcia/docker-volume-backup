@@ -260,6 +260,7 @@ class DockerRuntimeAdapter:
         if os.path.exists(docker_sock_path):
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
+        rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
         if resolved_files:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
             for index, file_spec in enumerate(resolved_files, start=1):
@@ -275,6 +276,16 @@ class DockerRuntimeAdapter:
             rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
             if rclone_spec:
                 environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        elif rclone_content:
+            temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
+            local_path = os.path.join(temp_dir, "rclone.conf")
+            with open(local_path, "w", encoding="utf-8") as handle:
+                handle.write(rclone_content)
+            volumes[temp_dir] = {
+                "bind": "/run/secrets",
+                "mode": "rw",
+            }
+            environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
         else:
             restic_repo = environment.get("RESTIC_REPOSITORY", "")
             if restic_repo.startswith("rclone:"):
@@ -368,6 +379,7 @@ class DockerRuntimeAdapter:
         if os.path.exists(docker_sock_path):
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
+        rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
         if resolved_files:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
             for index, file_spec in enumerate(resolved_files, start=1):
@@ -380,6 +392,13 @@ class DockerRuntimeAdapter:
             rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
             if rclone_spec:
                 environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        elif rclone_content:
+            temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
+            local_path = os.path.join(temp_dir, "rclone.conf")
+            with open(local_path, "w", encoding="utf-8") as handle:
+                handle.write(rclone_content)
+            volumes[temp_dir] = {"bind": "/run/secrets", "mode": "rw"}
+            environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
 
         try:
             self._pull_image(image)
