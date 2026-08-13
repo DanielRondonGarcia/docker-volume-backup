@@ -260,10 +260,10 @@
       if (addBtn) addBtn.addEventListener("click", openAddWorkerModal);
     }
 
-    let addWorkerState = { step: "form", enrollment: null };
+    let addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
 
     async function openAddWorkerModal() {
-      addWorkerState = { step: "form", enrollment: null };
+      addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
       renderAddWorkerModal();
       const overlay = document.getElementById("modalOverlay");
       if (overlay) overlay.classList.add("open");
@@ -470,10 +470,11 @@ docker compose up -d
               <div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(cpUrl)}</div>
               <div class="support">Si esta URL no es correcta (proxy, puerto distinto, dominio), configura <code>CONTROL_PLANE_PUBLIC_URL</code> en Settings.</div>
             </div>
-            <div class="helper">docker-compose.yml</div>
-            <div class="code-block"><button class="copy-btn" data-code-id="composeCode">Copiar</button><pre id="composeCode">${escapeHtml(composeCmd + "\\n\\n# --- docker-compose.yml ---\\n" + composeYml)}</pre></div>
-            <div class="helper" style="margin-top:16px;">Alternativa: docker run</div>
-            <div class="code-block"><button class="copy-btn" data-code-id="runCode">Copiar</button><pre id="runCode">${escapeHtml(dockerRun)}</pre></div>
+            <div class="tabs">
+              <button class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
+              <button class="tab ${addWorkerState.activeTab === "run" ? "active" : ""}" data-tab="run">docker run</button>
+            </div>
+            <div id="tabContent"></div>
             <div class="btn-row">
               <button class="btn primary sm" id="awDone">Listo</button>
               <button class="btn ghost sm" id="awBack">Volver</button>
@@ -487,19 +488,32 @@ docker compose up -d
       document.getElementById("awBack").addEventListener("click", () => { addWorkerState.step = "form"; renderAddWorkerModal(); });
       overlay.addEventListener("click", (e2) => { if (e2.target === overlay) closeAddWorkerModal(); });
 
-      const copyBtns = overlay.querySelectorAll(".copy-btn");
-      copyBtns.forEach(btn => {
-        btn.addEventListener("click", () => {
-          const codeId = btn.dataset.codeId;
-          const codeEl = document.getElementById(codeId);
+      const tabs = overlay.querySelectorAll(".tab");
+      tabs.forEach(tab => tab.addEventListener("click", () => {
+        addWorkerState.activeTab = tab.dataset.tab;
+        renderAddWorkerCommands();
+      }));
+
+      const tabContent = document.getElementById("tabContent");
+      let code = "";
+      let label = "";
+      if (addWorkerState.activeTab === "compose") { code = composeCmd + "\\n\\n# --- docker-compose.yml ---\\n" + composeYml; label = "docker-compose.yml"; }
+      else if (addWorkerState.activeTab === "run") { code = dockerRun; label = "docker run"; }
+      tabContent.innerHTML = `
+        <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>
+      `;
+      const copyBtn = tabContent.querySelector(".copy-btn");
+      if (copyBtn) {
+        copyBtn.addEventListener("click", () => {
+          const codeEl = document.getElementById("modalCode");
           if (!codeEl) return;
           navigator.clipboard.writeText(codeEl.textContent).then(() => {
-            btn.textContent = "Copiado";
-            btn.classList.add("copied");
-            setTimeout(() => { btn.textContent = "Copiar"; btn.classList.remove("copied"); }, 1500);
+            copyBtn.textContent = "Copiado";
+            copyBtn.classList.add("copied");
+            setTimeout(() => { copyBtn.textContent = "Copiar"; copyBtn.classList.remove("copied"); }, 1500);
           }).catch(() => {});
         });
-      });
+      }
     }
 
     let targetModalState = { mode: "create", target: null, volumeProject: null, isEditing: false };
