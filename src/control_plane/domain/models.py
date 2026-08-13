@@ -174,5 +174,6 @@ class SettingsRecord:
     restic_password_secret_id: Optional[str] = None
     rclone_conf_secret_id: Optional[str] = None
     global_cron_expression: Optional[str] = None
+    control_plane_public_url: str = ""
     id: str = "default"
     updated_at: datetime = field(default_factory=utcnow)

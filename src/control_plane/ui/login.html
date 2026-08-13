@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Iniciar Sesion | Docker Volume Backup</title>
+  <title>Iniciar Sesión | Docker Volume Backup</title>
   <link rel="stylesheet" href="/styles/tokens.css" />
   <link rel="stylesheet" href="/styles/components.css" />
   <style>
@@ -70,7 +70,7 @@
     <div class="brand"><span class="logo">DV</span><span class="name">Docker Volume Backup</span></div>
     <div class="card login-card">
       <div>
-        <h1>Iniciar sesion</h1>
+        <h1>Iniciar sesión</h1>
         <div class="subtitle">Control Plane</div>
       </div>
       <form id="loginForm">
@@ -79,13 +79,12 @@
           <input id="username" name="username" autocomplete="username" required />
         </div>
         <div class="field">
-          <label for="password">Contrasenia</label>
+          <label for="password">Contraseña</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required />
         </div>
         <button type="submit" class="btn primary full">Entrar</button>
         <div class="alert" id="errorBox"></div>
       </form>
-      <div class="helper">Usuario inicial: <strong>admin</strong> / <strong>changeme</strong></div>
     </div>
   </div>
 
@@ -113,7 +112,7 @@
         }
         if (!resp.ok) {
           const payload = await resp.json().catch(() => ({}));
-          errorBox.textContent = payload.error || "Credenciales invalidas";
+          errorBox.textContent = payload.error || "Credenciales inválidas";
           return;
         }
         window.location.href = "/";

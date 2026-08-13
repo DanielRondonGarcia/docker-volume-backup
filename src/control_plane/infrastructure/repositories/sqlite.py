@@ -208,6 +208,7 @@ class SQLiteRepositoryBase:
             self._ensure_column(connection, "workers", "certificate_fingerprint", "TEXT")
             self._ensure_column(connection, "settings", "rclone_conf_secret_id", "TEXT")
             self._ensure_column(connection, "settings", "global_cron_expression", "TEXT")
+            self._ensure_column(connection, "settings", "control_plane_public_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
 
     @staticmethod
@@ -765,6 +766,7 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
             restic_password_secret_id=row["restic_password_secret_id"],
             rclone_conf_secret_id=row["rclone_conf_secret_id"],
             global_cron_expression=row["global_cron_expression"] if "global_cron_expression" in row.keys() else None,
+            control_plane_public_url=row["control_plane_public_url"] if "control_plane_public_url" in row.keys() else "",
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
         )
 
@@ -773,8 +775,8 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO settings (
-                    id, restic_repository_base, restic_password_secret_id, rclone_conf_secret_id, global_cron_expression, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    id, restic_repository_base, restic_password_secret_id, rclone_conf_secret_id, global_cron_expression, control_plane_public_url, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.id,
@@ -782,6 +784,7 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
                     settings.restic_password_secret_id,
                     settings.rclone_conf_secret_id,
                     settings.global_cron_expression,
+                    settings.control_plane_public_url,
                     settings.updated_at.isoformat(),
                 ),
             )

@@ -2182,7 +2182,7 @@ docker compose up -d
           <form id="createUserForm">
             <div class="form-grid">
               <div class="field"><label for="usrName">Usuario</label><input id="usrName" required /></div>
-              <div class="field"><label for="usrPassword">Contrasenia</label><input id="usrPassword" type="password" required /></div>
+              <div class="field"><label for="usrPassword">Contraseña</label><input id="usrPassword" type="password" required /></div>
               <div class="field"><label for="usrRole">Rol</label><select id="usrRole"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></div>
             </div>
             <div class="btn-row"><button type="submit" class="btn primary sm">Crear usuario</button></div>
@@ -2286,6 +2286,22 @@ docker compose up -d
             </div>
           </div>
 
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">🌐</span>
+              <div>
+                <h3>URL pública del Control Plane</h3>
+                <div class="settings-card-sub">URL para los comandos del worker</div>
+              </div>
+            </div>
+            <div class="helper">URL que la UI usa al generar los comandos de despliegue del worker. Úsala cuando el Control Plane esté detrás de un proxy, en un puerto distinto, o con un dominio. Si se deja vacío, la UI usa la URL del navegador.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsPublicUrl">URL pública (opcional)</label>
+              <input id="settingsPublicUrl" value="${escapeHtml(settings.control_plane_public_url || "")}" placeholder="https://backups.miempresa.com" />
+              <div class="helper">Ej: <code>https://backups.miempresa.com</code> o <code>http://192.168.1.10:18080</code></div>
+            </div>
+          </div>
+
           <div class="settings-actions">
             <button type="submit" class="btn primary">Guardar configuracion</button>
             <div id="settingsFeedback"></div>
@@ -2338,6 +2354,7 @@ docker compose up -d
         const passwordSecret = emptyToNull(document.getElementById("settingsPasswordSecret").value);
         const rcloneSecret = emptyToNull(document.getElementById("settingsRcloneSecret").value);
         const globalCron = emptyToNull(document.getElementById("settingsGlobalCron").value);
+        const publicUrl = document.getElementById("settingsPublicUrl").value.trim();
         if (!repoBase) {
           showFeedback("La ruta base del repositorio es obligatoria.", "error");
           document.getElementById("settingsRepoBase").focus();
@@ -2354,6 +2371,7 @@ docker compose up -d
             restic_password_secret_id: passwordSecret,
             rclone_conf_secret_id: rcloneSecret,
             global_cron_expression: globalCron,
+            control_plane_public_url: publicUrl,
           });
           await refreshAll();
           showFeedback("Guardado exitosamente.", "success");

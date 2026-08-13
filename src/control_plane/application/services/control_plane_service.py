@@ -776,6 +776,7 @@ class ControlPlaneService:
         restic_password_secret_id: Optional[str] = None,
         rclone_conf_secret_id: Optional[str] = None,
         global_cron_expression: Optional[str] = None,
+        control_plane_public_url: Optional[str] = None,
     ) -> SettingsRecord:
         if not self.settings_repository:
             raise ValueError("settings repository not configured")
@@ -794,6 +795,8 @@ class ControlPlaneService:
                 existing.rclone_conf_secret_id = rclone_conf_secret_id or None
         if global_cron_expression is not None:
             existing.global_cron_expression = global_cron_expression.strip() or None
+        if control_plane_public_url is not None:
+            existing.control_plane_public_url = control_plane_public_url.strip()
         existing.updated_at = utcnow()
         return self.settings_repository.save(existing)
 

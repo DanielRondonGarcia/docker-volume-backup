@@ -224,7 +224,15 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path == "/healthz":
                 return self._write_json(200, {"ok": True}, head_only=head_only)
             if path == "/api/v1/config/public":
-                public_url = os.environ.get("CONTROL_PLANE_PUBLIC_URL", "").strip()
+                public_url = ""
+                try:
+                    settings = self._control_plane_service().get_settings()
+                    if settings and settings.control_plane_public_url:
+                        public_url = settings.control_plane_public_url.strip()
+                except Exception:
+                    pass
+                if not public_url:
+                    public_url = os.environ.get("CONTROL_PLANE_PUBLIC_URL", "").strip()
                 tls_enabled = os.environ.get("CONTROL_PLANE_TLS_ENABLED", "").strip().lower() in ("1", "true", "yes")
                 return self._write_json(200, {"public_url": public_url, "tls_enabled": tls_enabled}, head_only=head_only)
             if path == "/api/v1/auth/me":
@@ -740,6 +748,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restic_password_secret_id=body.get("restic_password_secret_id"),
                     rclone_conf_secret_id=body.get("rclone_conf_secret_id"),
                     global_cron_expression=body.get("global_cron_expression"),
+                    control_plane_public_url=body.get("control_plane_public_url"),
                 )
                 return self._write_json(200, _to_jsonable(settings))
             if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:
