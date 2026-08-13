@@ -136,7 +136,7 @@ def build_service() -> WorkerAgentService:
         control_plane_url=os.environ.get("CONTROL_PLANE_URL", "http://127.0.0.1:8080"),
         name=os.environ.get("WORKER_NAME", socket.gethostname()),
         host_name=os.environ.get("WORKER_HOST_NAME", socket.gethostname()),
-        version=os.environ.get("WORKER_VERSION", "dev"),
+        version=os.environ.get("WORKER_VERSION") or os.environ.get("APP_VERSION") or "dev",
         worker_id=os.environ.get("WORKER_ID") or None,
         labels=_labels_from_env(),
         backup_runtime_image=os.environ.get(

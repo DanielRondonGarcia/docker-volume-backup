@@ -36,6 +36,7 @@ ENV PYTHONPATH=/app
 
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION}
+ENV WORKER_VERSION=${APP_VERSION}
 
 # Scripts
 # entrypoint.sh expects backup.sh at /root/backup.sh for cron backups and one-shot restores

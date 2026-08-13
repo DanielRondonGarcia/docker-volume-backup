@@ -39,7 +39,6 @@ services:
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
       WORKER_NAME: ${WORKER_NAME:-worker-docker}
       WORKER_HOST_NAME: ${WORKER_HOST_NAME:-worker-docker}
-      WORKER_VERSION: docker
       WORKER_RUN_ONCE: "false"
       WORKER_POLL_INTERVAL_SECONDS: "15"
       WORKER_HEALTH_PORT: "8081"

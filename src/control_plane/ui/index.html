@@ -412,6 +412,18 @@
 
     function renderWorkers(content) {
       const canEnroll = state.currentRole === "admin";
+      const latest = state.latestVersion ? state.latestVersion.replace(/^v/, "").trim() : null;
+      const isOutdated = (wv) => {
+        const cur = (wv || "").replace(/^v/, "").trim();
+        if (!cur || !latest || cur === "dev") return false;
+        return cur !== latest;
+      };
+      const versionCell = (wv) => {
+        const cur = (wv || "").replace(/^v/, "").trim();
+        if (!cur || cur === "dev") return `<span class="mono">—</span>`;
+        if (isOutdated(wv)) return `<span class="version-badge outdated" title="Desactualizado: ultima version es v${escapeHtml(latest)}">${ICONS.warn || "⚠"} v${escapeHtml(cur)}</span>`;
+        return `<span class="version-badge current" title="Actualizado">✓ v${escapeHtml(cur)}</span>`;
+      };
       content.innerHTML = `
         <div class="page-header">
           <div><h2>Workers</h2><div class="subtitle">Agentes registrados en el Control Plane</div></div>
@@ -419,7 +431,7 @@
         </div>
         <div class="table-wrap"><div class="sheet"><table class="table">
           <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th></tr></thead>
-          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td class="mono">${escapeHtml(w.version || "—")}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td>${versionCell(w.version)}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
         </table></div></div>
       `;
       const addBtn = document.getElementById("addWorkerBtn");
@@ -438,7 +450,7 @@
         try {
           const resp = await apiGet("/api/v1/workers");
           const newWorkers = resp.items || [];
-          const hasChanged = JSON.stringify(newWorkers.map(w => w.id + w.status + (w.last_seen_at || ""))) !== JSON.stringify((state.workers || []).map(w => w.id + w.status + (w.last_seen_at || "")));
+          const hasChanged = JSON.stringify(newWorkers.map(w => w.id + w.status + (w.last_seen_at || "") + (w.version || ""))) !== JSON.stringify((state.workers || []).map(w => w.id + w.status + (w.last_seen_at || "") + (w.version || "")));
           state.workers = newWorkers;
           if (hasChanged) {
             const content = document.getElementById("content");
