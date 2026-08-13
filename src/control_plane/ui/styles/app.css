@@ -154,6 +154,120 @@
   gap: 12px;
 }
 
+.dashboard-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 12px 0;
+}
+@media (max-width: 768px) {
+  .dashboard-charts { grid-template-columns: 1fr; }
+}
+
+.chart-card { padding: 16px; }
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.chart-value {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+.donut-container {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.donut-svg {
+  width: 120px;
+  height: 120px;
+  flex-shrink: 0;
+}
+.donut-legend {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.legend-label {
+  flex: 1;
+  color: var(--muted-foreground);
+}
+.legend-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--foreground);
+}
+.legend-empty {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.bar-svg {
+  width: 100%;
+  height: 110px;
+}
+.bar-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.legend-item-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dashboard-bars {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0 0 12px 0;
+}
+@media (max-width: 768px) {
+  .dashboard-bars { grid-template-columns: 1fr; }
+}
+
+.progress-bar-container {
+  width: 100%;
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0 6px;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--success);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.progress-bar-blue {
+  background: var(--chart-1);
+}
+.bar-meta {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
 .table-wrap {
   width: 100%;
   overflow-x: auto;

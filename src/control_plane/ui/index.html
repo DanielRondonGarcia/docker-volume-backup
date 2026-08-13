@@ -226,6 +226,81 @@
 
     function renderDashboard(content) {
       const onlineWorkers = state.workers.filter(w => w.status === "online").length;
+      const jobsSuccess = state.jobs.filter(j => j.status === "succeeded" || j.status === "success").length;
+      const jobsFailed = state.jobs.filter(j => j.status === "failed").length;
+      const jobsRunning = state.jobs.filter(j => j.status === "in_progress" || j.status === "running").length;
+      const jobsOther = state.jobs.length - jobsSuccess - jobsFailed - jobsRunning;
+      const successRate = state.jobs.length > 0 ? Math.round((jobsSuccess / state.jobs.length) * 100) : 0;
+
+      const now = new Date();
+      const days = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+        const dayJobs = state.jobs.filter(j => {
+          const ts = j.started_at ? new Date(j.started_at) : null;
+          return ts && ts >= dayStart && ts < dayEnd;
+        });
+        days.push({
+          label: d.toLocaleDateString("es", { weekday: "short" }).slice(0, 3),
+          total: dayJobs.length,
+          success: dayJobs.filter(j => j.status === "succeeded" || j.status === "success").length,
+          failed: dayJobs.filter(j => j.status === "failed").length,
+        });
+      }
+      const maxDay = Math.max(1, ...days.map(d => d.total));
+
+      const donutSegments = [
+        { label: "Exitosos", value: jobsSuccess, color: "var(--success)" },
+        { label: "Fallidos", value: jobsFailed, color: "var(--destructive)" },
+        { label: "En progreso", value: jobsRunning, color: "var(--chart-2)" },
+        { label: "Otros", value: jobsOther, color: "var(--muted-foreground)" },
+      ].filter(s => s.value > 0);
+
+      const donutTotal = donutSegments.reduce((sum, s) => sum + s.value, 0) || 1;
+      let cumulativeAngle = 0;
+      const donutPaths = donutSegments.map(seg => {
+        const angle = (seg.value / donutTotal) * 2 * Math.PI;
+        const startAngle = cumulativeAngle;
+        const endAngle = cumulativeAngle + angle;
+        cumulativeAngle = endAngle;
+        const cx = 60, cy = 60, r = 45, ir = 28;
+        const x1 = cx + r * Math.sin(startAngle);
+        const y1 = cy - r * Math.cos(startAngle);
+        const x2 = cx + r * Math.sin(endAngle);
+        const y2 = cy - r * Math.cos(endAngle);
+        const ix2 = cx + ir * Math.sin(endAngle);
+        const iy2 = cy - ir * Math.cos(endAngle);
+        const ix1 = cx + ir * Math.sin(startAngle);
+        const iy1 = cy - ir * Math.cos(startAngle);
+        const largeArc = angle > Math.PI ? 1 : 0;
+        if (donutSegments.length === 1) {
+          return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${seg.color}" stroke-width="17" />`;
+        }
+        return `<path d="M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${ir} ${ir} 0 ${largeArc} 0 ${ix1} ${iy1} Z" fill="${seg.color}" />`;
+      }).join("");
+
+      const barWidth = 100 / 7;
+      const barChart = days.map((day, i) => {
+        const h = (day.total / maxDay) * 80;
+        const successH = day.total > 0 ? (day.success / day.total) * h : 0;
+        const failedH = day.total > 0 ? (day.failed / day.total) * h : 0;
+        const x = i * barWidth + barWidth * 0.2;
+        const w = barWidth * 0.6;
+        const y = 90 - h;
+        return `
+          <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" fill="var(--border)" opacity="0.3" />
+          <rect x="${x}" y="${90 - successH}" width="${w}" height="${successH}" rx="2" fill="var(--success)" />
+          <rect x="${x}" y="${90 - successH - failedH}" width="${w}" height="${failedH}" rx="2" fill="var(--destructive)" />
+          <text x="${x + w/2}" y="98" text-anchor="middle" font-size="9" fill="var(--muted-foreground)">${day.label}</text>
+        `;
+      }).join("");
+
+      const targetsWithBackup = state.targets.filter(t => t.backup_strategy).length;
+      const storageWithRclone = state.storageProfiles.filter(s => s.runtime_volumes && Object.keys(s.runtime_volumes).length > 0).length;
+
       content.innerHTML = `
         <div class="page-header"><div><h2>Resumen</h2><div class="subtitle">Estado general del Control Plane</div></div></div>
         <div class="stat-grid">
@@ -234,6 +309,52 @@
           ${statCard("Jobs", "Total", state.jobs.length, "historico de jobs")}
           ${statCard("Storage", "Profiles", state.storageProfiles.length, "profiles configurados")}
         </div>
+
+        <div class="dashboard-charts">
+          <div class="card compact chart-card">
+            <div class="chart-header"><span class="eyebrow">Estado de Jobs</span><span class="chart-value">${successRate}% exito</span></div>
+            <div class="donut-container">
+              <svg viewBox="0 0 120 120" class="donut-svg">
+                ${donutPaths || `<circle cx="60" cy="60" r="36.5" fill="none" stroke="var(--border)" stroke-width="17" />`}
+                <text x="60" y="58" text-anchor="middle" font-size="20" font-weight="700" fill="var(--foreground)">${state.jobs.length}</text>
+                <text x="60" y="72" text-anchor="middle" font-size="9" fill="var(--muted-foreground)">jobs</text>
+              </svg>
+              <div class="donut-legend">
+                ${donutSegments.map(s => `<div class="legend-item"><span class="legend-dot" style="background:${s.color}"></span><span class="legend-label">${escapeHtml(s.label)}</span><span class="legend-value">${s.value}</span></div>`).join("") || '<div class="legend-empty">Sin datos</div>'}
+              </div>
+            </div>
+          </div>
+
+          <div class="card compact chart-card">
+            <div class="chart-header"><span class="eyebrow">Actividad (7 dias)</span><span class="chart-value">${days.reduce((s, d) => s + d.total, 0)} jobs</span></div>
+            <svg viewBox="0 0 100 105" class="bar-svg" preserveAspectRatio="none">
+              <line x1="0" y1="90" x2="100" y2="90" stroke="var(--border)" stroke-width="0.3" />
+              ${barChart}
+            </svg>
+            <div class="bar-legend">
+              <span class="legend-item-inline"><span class="legend-dot" style="background:var(--success)"></span>Exitosos</span>
+              <span class="legend-item-inline"><span class="legend-dot" style="background:var(--destructive)"></span>Fallidos</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="dashboard-bars">
+          <div class="card compact">
+            <div class="chart-header"><span class="eyebrow">Cobertura de Targets</span><span class="chart-value">${targetsWithBackup}/${state.targets.length}</span></div>
+            <div class="progress-bar-container">
+              <div class="progress-bar" style="width: ${state.targets.length > 0 ? (targetsWithBackup / state.targets.length) * 100 : 0}%"></div>
+            </div>
+            <div class="bar-meta">${state.targets.length > 0 ? Math.round((targetsWithBackup / state.targets.length) * 100) : 0}% con estrategia configurada</div>
+          </div>
+          <div class="card compact">
+            <div class="chart-header"><span class="eyebrow">Storage con Volumes</span><span class="chart-value">${storageWithRclone}/${state.storageProfiles.length}</span></div>
+            <div class="progress-bar-container">
+              <div class="progress-bar progress-bar-blue" style="width: ${state.storageProfiles.length > 0 ? (storageWithRclone / state.storageProfiles.length) * 100 : 0}%"></div>
+            </div>
+            <div class="bar-meta">${state.storageProfiles.length > 0 ? Math.round((storageWithRclone / state.storageProfiles.length) * 100) : 0}% con runtime_volumes</div>
+          </div>
+        </div>
+
         <div class="page-header"><div><h2>Workers recientes</h2><div class="subtitle">Estado de los agentes registrados</div></div></div>
         <div class="table-wrap"><div class="sheet"><table class="table">
           <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Ult. seen</th></tr></thead>
