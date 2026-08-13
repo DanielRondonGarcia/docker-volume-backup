@@ -10,7 +10,13 @@
   <link rel="stylesheet" href="/styles/app.css" />
 </head>
 <body>
-  <div id="app" class="app">
+  <div id="appLoader" class="app-loader">
+    <div class="app-loader-content">
+      <div class="app-loader-spinner"></div>
+      <div class="app-loader-text">Cargando Docker Volume Backup...</div>
+    </div>
+  </div>
+  <div id="app" class="app" style="visibility:hidden;">
     <aside class="sidebar" id="sidebar"></aside>
     <div class="main">
       <div id="versionBanner" class="version-banner" style="display:none;"></div>
@@ -176,8 +182,9 @@
           <nav class="section">
             <a class="item" href="#" id="logoutBtn">${ICONS.logout}<span>Cerrar sesion</span></a>
           </nav>
-          <div class="sidebar-version">
-            <a href="https://github.com/DanielRondonGarcia/docker-volume-backup" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;color:inherit;text-decoration:none;">${ICONS.github}<span>v${escapeHtml(state.systemVersion)}</span></a>
+          <div class="sidebar-footer-row">
+            <a href="https://github.com/DanielRondonGarcia/docker-volume-backup" target="_blank" rel="noopener" class="sidebar-github-link">${ICONS.github}</a>
+            <span class="sidebar-version">v${escapeHtml(state.systemVersion)}</span>
           </div>
         </div>
       `;
@@ -2748,10 +2755,22 @@ docker compose up -d
         state.currentRole = me.role;
         if (me.must_change_password) { window.location.href = "/change-password"; return; }
         await refreshAll();
+        hideAppLoader();
       } catch (error) {
         if (error.message !== "auth") console.error(error);
+        hideAppLoader();
       }
     })();
+
+    function hideAppLoader() {
+      const loader = document.getElementById("appLoader");
+      const app = document.getElementById("app");
+      if (loader) {
+        loader.classList.add("app-loader-hidden");
+        setTimeout(() => { if (loader.parentNode) loader.parentNode.removeChild(loader); }, 300);
+      }
+      if (app) app.style.visibility = "";
+    }
   </script>
 </body>
 </html>

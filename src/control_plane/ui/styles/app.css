@@ -1,3 +1,40 @@
+.app-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background, #0d1117);
+  transition: opacity .3s ease;
+}
+.app-loader-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.app-loader-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+.app-loader-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, .1);
+  border-top-color: #4f46e5;
+  border-radius: 50%;
+  animation: app-loader-spin .8s linear infinite;
+}
+@keyframes app-loader-spin {
+  to { transform: rotate(360deg); }
+}
+.app-loader-text {
+  font-size: 14px;
+  color: var(--muted-foreground, #8b949e);
+  font-family: var(--font-mono, monospace);
+}
+
 .app {
   display: flex;
   height: 100vh;
@@ -100,9 +137,24 @@
   color: var(--muted-foreground);
   opacity: .5;
 }
-.sidebar-version a { transition: opacity .15s; }
-.sidebar-version a:hover { opacity: .9; }
-.sidebar-version .icon { width: 14px; height: 14px; }
+.sidebar-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-top: 1px solid var(--sidebar-border);
+}
+.sidebar-github-link {
+  display: flex;
+  align-items: center;
+  color: var(--muted-foreground);
+  opacity: .5;
+  transition: opacity .15s;
+  text-decoration: none;
+}
+.sidebar-github-link:hover { opacity: .9; }
+.sidebar-github-link .icon { width: 16px; height: 16px; }
+.sidebar-footer-row .sidebar-version { padding: 0; }
 
 .version-banner {
   background: #fff3cd;
