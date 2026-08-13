@@ -660,7 +660,7 @@ docker compose up -d
       const tabContent = document.getElementById("tabContent");
       let code = "";
       let label = "";
-      if (addWorkerState.activeTab === "compose") { code = composeCmd + "\\n\\n# --- docker-compose.yml ---\\n" + composeYml; label = "docker-compose.yml"; }
+      if (addWorkerState.activeTab === "compose") { code = composeYml; label = "docker-compose.yml"; }
       else if (addWorkerState.activeTab === "run") { code = dockerRun; label = "docker run"; }
       tabContent.innerHTML = `
         <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>
