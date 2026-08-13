@@ -220,7 +220,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/styles/"):
                 return self._serve_static_file(path, "text/css; charset=utf-8", head_only=head_only)
             if path == "/favicon.ico":
-                return self._write_empty(204)
+                return self._serve_static_file("/icon.png", "image/png", head_only=head_only)
             if path == "/healthz":
                 return self._write_json(200, {"ok": True}, head_only=head_only)
             if path == "/api/v1/version":
