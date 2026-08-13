@@ -12,10 +12,16 @@ services:
       CONTROL_PLANE_KEY_FILE: /data/.control_plane.key
       CONTROL_PLANE_SESSION_KEY_FILE: /data/.control_plane.session.key
       CONTROL_PLANE_USERS_FILE: /data/.control_plane.users.json
+      CONTROL_PLANE_PUBLIC_URL: ${CONTROL_PLANE_PUBLIC_URL:-}
     ports:
       - "${CONTROL_PLANE_PUBLISHED_PORT:-8080}:8080"
     volumes:
       - control_plane_state:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 volumes:
   control_plane_state:

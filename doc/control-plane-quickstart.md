@@ -144,6 +144,7 @@ Variables útiles del Control Plane:
 - `CONTROL_PLANE_SESSION_KEY`
 - `CONTROL_PLANE_SESSION_KEY_FILE`
 - `CONTROL_PLANE_SESSION_TTL_SECONDS`
+- `CONTROL_PLANE_PUBLIC_URL`: URL pública que la UI usa al generar los comandos de despliegue del worker. Úsala cuando el Control Plane esté detrás de un proxy, en un puerto distinto, o con un dominio. Ejemplo: `https://backups.miempresa.com`. Si no se define, la UI usa la URL del navegador (`window.location`).
 
 Arranque del Worker en modo nativo:
 

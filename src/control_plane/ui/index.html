@@ -329,15 +329,26 @@
       }
     }
 
-    function renderAddWorkerCommands() {
+    async function renderAddWorkerCommands() {
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       const e = addWorkerState.enrollment;
       if (!e) return;
       const tlsEnabled = addWorkerState.tlsEnabled !== false;
-      const cpHost = window.location.hostname || "localhost";
-      const cpPort = window.location.port || "8080";
-      const cpUrl = `http://${cpHost}:${cpPort}`;
+      let cpUrl = "";
+      try {
+        const resp = await fetch("/api/v1/config/public");
+        if (resp.ok) {
+          const cfg = await resp.json();
+          if (cfg.public_url) cpUrl = cfg.public_url.replace(/\/+$/, "");
+        }
+      } catch (_) {}
+      if (!cpUrl) {
+        const cpHost = window.location.hostname || "localhost";
+        const cpPort = window.location.port || "8080";
+        const cpProto = window.location.protocol || "http:";
+        cpUrl = `${cpProto}//${cpHost}${cpPort ? ":" + cpPort : ""}`;
+      }
       const token = e.token || "";
       const workerId = e.worker_id || "";
       const caPem = (e.ca_certificate_pem || "").replace(/\n/g, "\\n");
@@ -416,6 +427,11 @@ docker compose up -d
           </div>
           <div class="modal-body">
             ${tlsNote}
+            <div class="card compact">
+              <div class="eyebrow">URL del Control Plane en los comandos</div>
+              <div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(cpUrl)}</div>
+              <div class="support">Si esta URL no es correcta (proxy, puerto distinto, dominio), configura <code>CONTROL_PLANE_PUBLIC_URL</code> en el Control Plane.</div>
+            </div>
             <div class="tabs">
               <button class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
               <button class="tab ${addWorkerState.activeTab === "run" ? "active" : ""}" data-tab="run">docker run</button>

@@ -45,6 +45,14 @@ $env:CONTROL_PLANE_PUBLISHED_PORT="18080"
 docker compose -f deploy/control-plane/docker-compose.yml up -d --build
 ```
 
+Si el Control Plane va a estar detrás de un proxy o con un dominio, define
+también la URL pública para que los comandos del worker salgan correctos:
+
+```powershell
+$env:CONTROL_PLANE_PUBLIC_URL="https://backups.miempresa.com"
+docker compose -f deploy/control-plane/docker-compose.yml up -d --build
+```
+
 ## Verificación rápida
 
 Salud del Control Plane:

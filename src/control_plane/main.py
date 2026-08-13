@@ -223,6 +223,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 return self._write_empty(204)
             if path == "/healthz":
                 return self._write_json(200, {"ok": True}, head_only=head_only)
+            if path == "/api/v1/config/public":
+                public_url = os.environ.get("CONTROL_PLANE_PUBLIC_URL", "").strip()
+                tls_enabled = os.environ.get("CONTROL_PLANE_TLS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+                return self._write_json(200, {"public_url": public_url, "tls_enabled": tls_enabled}, head_only=head_only)
             if path == "/api/v1/auth/me":
                 session = self._current_session()
                 if not session:
