@@ -1703,10 +1703,6 @@ docker compose up -d
 
         content.innerHTML = `
           <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore (${totalFiltered} de ${allJobs.length})</div></div>
-            <div class="jobs-autorefresh">
-              <label class="switch sm"><input type="checkbox" id="jobsAutoRefresh" ${jobsPolling ? "checked" : ""} /><span class="slider"></span></label>
-              <span class="autorefresh-label" id="jobsAutoRefreshLabel">${jobsPolling ? "Auto-refresh ON" : "Auto-refresh"}</span>
-            </div>
           </div>
           <div class="table-wrap"><div class="sheet"><table class="table datatable">
             <thead>
@@ -1805,16 +1801,6 @@ docker compose up -d
             renderTable();
           });
         }
-        const autoRefreshToggle = document.getElementById("jobsAutoRefresh");
-        if (autoRefreshToggle) {
-          autoRefreshToggle.addEventListener("change", () => {
-            if (autoRefreshToggle.checked) {
-              startJobsPolling();
-            } else {
-              stopJobsPolling();
-            }
-          });
-        }
         content.querySelectorAll("[data-view-logs]").forEach(btn => {
           btn.addEventListener("click", () => toggleJobLogAccordion(btn.dataset.viewLogs, content));
         });
@@ -1833,13 +1819,12 @@ docker compose up -d
       };
 
       renderTable();
+      startJobsPolling();
     }
 
     function startJobsPolling() {
-      stopJobsPolling();
+      if (jobsPolling) return;
       jobsPolling = true;
-      const label = document.getElementById("jobsAutoRefreshLabel");
-      if (label) label.textContent = "Auto-refresh ON";
       const tick = async () => {
         if (!jobsPolling) return;
         try {
@@ -1871,8 +1856,6 @@ docker compose up -d
         clearTimeout(jobsPollTimer);
         jobsPollTimer = null;
       }
-      const label = document.getElementById("jobsAutoRefreshLabel");
-      if (label) label.textContent = "Auto-refresh";
     }
 
     function renderStorage(content) {
