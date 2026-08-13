@@ -261,6 +261,7 @@ class DockerRuntimeAdapter:
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
         rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
+        needs_rclone = bool(environment.get("RESTIC_REPOSITORY", "").startswith("rclone:"))
         if resolved_files or rclone_content:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
             rclone_written = False
@@ -281,17 +282,31 @@ class DockerRuntimeAdapter:
                 "mode": "rw",
             }
             environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
-        else:
-            restic_repo = environment.get("RESTIC_REPOSITORY", "")
-            if restic_repo.startswith("rclone:"):
-                return {
-                    "success": False,
-                    "status_code": 1,
-                    "logs": f"ERROR: RESTIC_REPOSITORY starts with 'rclone:' but no rclone.conf secret was mounted.\n"
-                            f"Configure the rclone.conf secret in the storage profile's file_secret_refs or in Settings > rclone.conf secret.\n"
-                            f"RESTIC_REPOSITORY={restic_repo}",
-                    "stderr": "",
-                }
+        elif needs_rclone and rclone_content:
+            environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        elif needs_rclone:
+            return {
+                "success": False,
+                "status_code": 1,
+                "logs": f"ERROR: RESTIC_REPOSITORY starts with 'rclone:' but no rclone.conf secret was mounted.\n"
+                        f"Configure the rclone.conf secret in the storage profile's file_secret_refs or in Settings > rclone.conf secret.\n"
+                        f"RESTIC_REPOSITORY={environment.get('RESTIC_REPOSITORY', '')}",
+                "stderr": "",
+            }
+
+        # Docker-in-Docker: bind mounts of paths that only exist inside the
+        # worker container do not work because the Docker daemon runs on the
+        # host and looks for the path on the host filesystem. To work around
+        # this, wrap the command with a shell that writes RCLONE_CONF_CONTENT
+        # to /run/secrets/rclone.conf (if the env var is set) before running
+        # the original command.
+        if rclone_content and not command.startswith("/root/backup.sh"):
+            wrapper = (
+                "mkdir -p /run/secrets && "
+                "printf '%s' \"$RCLONE_CONF_CONTENT\" > /run/secrets/rclone.conf && "
+                f"{command}"
+            )
+            command = f'/bin/sh -c {json.dumps(wrapper)}'
 
         try:
             self._pull_image(image)
@@ -375,6 +390,7 @@ class DockerRuntimeAdapter:
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
         rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
+        needs_rclone = bool(environment.get("RESTIC_REPOSITORY", "").startswith("rclone:"))
         if resolved_files or rclone_content:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
             rclone_written = False
@@ -392,6 +408,25 @@ class DockerRuntimeAdapter:
                     handle.write(rclone_content)
             volumes[temp_dir] = {"bind": "/run/secrets", "mode": "rw"}
             environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        elif needs_rclone and rclone_content:
+            environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
+        elif needs_rclone:
+            return {
+                "success": False,
+                "status_code": 1,
+                "logs": f"ERROR: RESTIC_REPOSITORY starts with 'rclone:' but no rclone.conf secret was mounted.\n"
+                        f"Configure the rclone.conf secret in the storage profile's file_secret_refs or in Settings > rclone.conf secret.\n"
+                        f"RESTIC_REPOSITORY={environment.get('RESTIC_REPOSITORY', '')}",
+                "stderr": "",
+            }
+
+        if rclone_content and not command.startswith("/root/backup.sh"):
+            wrapper = (
+                "mkdir -p /run/secrets && "
+                "printf '%s' \"$RCLONE_CONF_CONTENT\" > /run/secrets/rclone.conf && "
+                f"{command}"
+            )
+            command = f'/bin/sh -c {json.dumps(wrapper)}'
 
         try:
             self._pull_image(image)
