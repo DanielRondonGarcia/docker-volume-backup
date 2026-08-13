@@ -758,6 +758,18 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     name=body.get("name"),
                 )
                 return self._write_json(200, _secret_to_public(secret))
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "storage-profiles"]:
+                profile = self._control_plane_service().update_storage_profile(
+                    profile_id=parts[3],
+                    name=body.get("name"),
+                    backend_type=body.get("backend_type"),
+                    environment=body.get("environment"),
+                    secret_refs=body.get("secret_refs"),
+                    file_secret_refs=body.get("file_secret_refs"),
+                    runtime_volumes=body.get("runtime_volumes"),
+                    labels=body.get("labels"),
+                )
+                return self._write_json(200, _to_jsonable(profile))
             if len(parts) == 5 and parts[:3] == ["api", "v1", "secrets"] and parts[4] == "usages":
                 usages = self._control_plane_service().find_secret_usages(parts[3])
                 return self._write_json(200, {"items": usages})
@@ -781,6 +793,11 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 return self._write_json(204, {})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:
                 self._control_plane_service().delete_secret(parts[3])
+                return self._write_json(204, {})
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "storage-profiles"]:
+                deleted = self._control_plane_service().delete_storage_profile(parts[3])
+                if not deleted:
+                    return self._write_json(404, {"error": "storage profile not found"})
                 return self._write_json(204, {})
             return self._write_json(404, {"error": "not found"})
         except ValueError as exc:

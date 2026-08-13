@@ -826,6 +826,44 @@ class ControlPlaneService:
         )
         return self.storage_profile_repository.save(profile)
 
+    def update_storage_profile(
+        self,
+        profile_id: str,
+        name: Optional[str] = None,
+        backend_type: Optional[str] = None,
+        environment: Optional[Dict[str, str]] = None,
+        secret_refs: Optional[Dict[str, str]] = None,
+        file_secret_refs: Optional[Dict[str, str]] = None,
+        runtime_volumes: Optional[Dict[str, Dict[str, str]]] = None,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> StorageProfileRecord:
+        existing = self.storage_profile_repository.get(profile_id)
+        if not existing:
+            raise ValueError("storage profile not found")
+        if name is not None:
+            existing.name = name
+        if backend_type is not None:
+            existing.backend_type = backend_type
+        if environment is not None:
+            existing.environment = environment
+        if secret_refs is not None:
+            existing.secret_refs = secret_refs
+        if file_secret_refs is not None:
+            self._validate_storage_profile_file_secret_refs(
+                backend_type=existing.backend_type,
+                file_secret_refs=file_secret_refs,
+            )
+            existing.file_secret_refs = file_secret_refs
+        if runtime_volumes is not None:
+            existing.runtime_volumes = runtime_volumes
+        if labels is not None:
+            existing.labels = labels
+        existing.updated_at = utcnow()
+        return self.storage_profile_repository.save(existing)
+
+    def delete_storage_profile(self, profile_id: str) -> bool:
+        return self.storage_profile_repository.delete(profile_id)
+
     def create_retention_policy(
         self,
         name: str,

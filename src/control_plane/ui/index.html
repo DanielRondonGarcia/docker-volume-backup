@@ -1894,13 +1894,19 @@ docker compose up -d
               <textarea id="spEnvironment">{}</textarea>
               <div class="hint">Vars de entorno inyectadas en el runtime. Para rclone, puedes poner <code>RCLONE_REMOTE</code> aqui si tu script lo usa.</div>
             </div>
-            <div class="btn-row"><button type="submit" class="btn primary sm">Crear storage profile</button></div>
+            <div class="btn-row"><button type="submit" class="btn primary sm" id="spSubmitBtn">Crear storage profile</button></div>
           </form>
         </div></details>
         <div class="page-header"><div><h2>Profiles configurados</h2></div></div>
         <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Backend</th><th>Environment</th><th>File secrets</th></tr></thead>
-          <tbody>${state.storageProfiles.length ? state.storageProfiles.map(s => `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.backend_type)}</td><td class="mono">${escapeHtml(JSON.stringify(s.environment || {}))}</td><td class="mono">${escapeHtml(JSON.stringify(s.file_secret_refs || {}))}</td></tr>`).join("") : `<tr><td colspan="4" class="empty-state">Sin storage profiles</td></tr>`}</tbody>
+          <thead><tr><th>Nombre</th><th>Backend</th><th>Environment</th><th>File secrets</th><th class="action-col">Acciones</th></tr></thead>
+          <tbody>${state.storageProfiles.length ? state.storageProfiles.map(s => `<tr>
+            <td>${escapeHtml(s.name)}</td>
+            <td>${escapeHtml(s.backend_type)}</td>
+            <td class="mono">${escapeHtml(JSON.stringify(s.environment || {}))}</td>
+            <td class="mono">${escapeHtml(JSON.stringify(s.file_secret_refs || {}))}</td>
+            <td class="action-cell"><button class="btn ghost xs" onclick="editStorageProfile('${escapeHtml(s.id)}')">Editar</button> <button class="btn danger xs" onclick="deleteStorageProfile('${escapeHtml(s.id)}','${escapeHtml(s.name)}')">Eliminar</button></td>
+          </tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin storage profiles</td></tr>`}</tbody>
         </table></div></div>
       `;
       const form = document.getElementById("createStorageForm");
@@ -1914,6 +1920,8 @@ docker compose up -d
       if (form) {
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
+          const submitBtn = document.getElementById("spSubmitBtn");
+          if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Creando..."; }
           try {
             const bt = backendType.value;
             const envJson = parseJsonField("spEnvironment", "environment del storage profile");
@@ -1930,10 +1938,87 @@ docker compose up -d
               secret_refs: {},
               file_secret_refs: fileSecretRefs,
             });
+            form.reset();
+            document.getElementById("spEnvironment").value = "{}";
+            toggleRcloneRow();
             await refreshAll();
           } catch (error) { alert(`Error creando storage profile: ${error.message}`); }
+          finally { if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Crear storage profile"; } }
         });
       }
+    }
+
+    let storageModalState = { mode: "edit", profile: null };
+
+    function editStorageProfile(profileId) {
+      const profile = state.storageProfiles.find(s => s.id === profileId);
+      if (!profile) return;
+      storageModalState = { mode: "edit", profile };
+      const fileSecrets = state.secrets.filter(s => s.secret_type === "file");
+      const fileSecretOptions = fileSecrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === (profile.file_secret_refs || {})["/root/.config/rclone/rclone.conf"] ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
+      const overlay = document.getElementById("modalOverlay");
+      overlay.innerHTML = `
+        <div class="modal">
+          <div class="modal-header"><h3>Editar storage profile</h3><button class="close" id="modalClose">&times;</button></div>
+          <div class="modal-body">
+            <form id="editStorageForm">
+              <div class="form-grid">
+                <div class="field"><label for="espName">Nombre</label><input id="espName" value="${escapeHtml(profile.name)}" required /></div>
+                <div class="field"><label for="espBackendType">Backend</label><select id="espBackendType"><option value="rclone" ${profile.backend_type === "rclone" ? "selected" : ""}>rclone</option><option value="local" ${profile.backend_type === "local" ? "selected" : ""}>local</option></select></div>
+              </div>
+              <div class="field full" id="espRcloneConfRow">
+                <label for="espRcloneSecretId">Secreto rclone.conf</label>
+                <select id="espRcloneSecretId"><option value="">-- Seleccionar secreto rclone --</option>${fileSecretOptions}</select>
+              </div>
+              <div class="field full">
+                <label for="espEnvironment">Environment JSON</label>
+                <textarea id="espEnvironment">${escapeHtml(JSON.stringify(profile.environment || {}, null, 2))}</textarea>
+              </div>
+              <div class="btn-row"><button type="submit" class="btn primary sm" id="espSubmitBtn">Guardar cambios</button> <button type="button" class="btn ghost sm" id="espCancel">Cancelar</button></div>
+            </form>
+          </div>
+        </div>
+      `;
+      overlay.classList.add("open");
+      const espBackend = document.getElementById("espBackendType");
+      const espRcloneRow = document.getElementById("espRcloneConfRow");
+      function toggleEspRclone() { espRcloneRow.style.display = espBackend.value === "rclone" ? "" : "none"; }
+      espBackend.addEventListener("change", toggleEspRclone);
+      toggleEspRclone();
+      document.getElementById("modalClose").addEventListener("click", () => overlay.classList.remove("open"));
+      document.getElementById("espCancel").addEventListener("click", () => overlay.classList.remove("open"));
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.remove("open"); });
+      document.getElementById("editStorageForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const submitBtn = document.getElementById("espSubmitBtn");
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Guardando..."; }
+        try {
+          const bt = espBackend.value;
+          const envJson = (() => { try { return JSON.parse(document.getElementById("espEnvironment").value || "{}"); } catch (_) { return profile.environment || {}; } })();
+          const fileSecretRefs = {};
+          if (bt === "rclone") {
+            const secretId = document.getElementById("espRcloneSecretId").value;
+            if (secretId) fileSecretRefs["/root/.config/rclone/rclone.conf"] = secretId;
+          }
+          await apiPatch(`/api/v1/storage-profiles/${profile.id}`, {
+            name: document.getElementById("espName").value.trim(),
+            backend_type: bt,
+            environment: envJson,
+            file_secret_refs: fileSecretRefs,
+          });
+          overlay.classList.remove("open");
+          await refreshAll();
+        } catch (error) { alert(`Error editando storage profile: ${error.message}`); }
+        finally { if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Guardar cambios"; } }
+      });
+    }
+
+    async function deleteStorageProfile(profileId, profileName) {
+      if (!confirm(`¿Eliminar el storage profile "${profileName}"?`)) return;
+      try {
+        await apiDelete(`/api/v1/storage-profiles/${profileId}`);
+        await refreshAll();
+      } catch (error) { alert(`Error eliminando storage profile: ${error.message}`); }
     }
 
     function renderRetention(content) {

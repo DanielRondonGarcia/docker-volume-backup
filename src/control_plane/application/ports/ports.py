@@ -111,6 +111,10 @@ class StorageProfileRepository(ABC):
     def list(self) -> List[StorageProfileRecord]:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete(self, profile_id: str) -> bool:
+        raise NotImplementedError
+
 
 class SecretRepository(ABC):
     @abstractmethod

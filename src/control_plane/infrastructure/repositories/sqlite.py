@@ -549,6 +549,11 @@ class SQLiteStorageProfileRepository(SQLiteRepositoryBase, StorageProfileReposit
             rows = connection.execute("SELECT * FROM storage_profiles ORDER BY created_at ASC").fetchall()
         return [self._row_to_profile(row) for row in rows]
 
+    def delete(self, profile_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM storage_profiles WHERE id = ?", (profile_id,))
+            return cursor.rowcount > 0
+
     @staticmethod
     def _row_to_profile(row: sqlite3.Row) -> StorageProfileRecord:
         return StorageProfileRecord(

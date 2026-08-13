@@ -152,6 +152,10 @@ class InMemoryStorageProfileRepository(StorageProfileRepository):
     def list(self) -> List[StorageProfileRecord]:
         return sorted(self._items.values(), key=lambda item: item.created_at)
 
+    def delete(self, profile_id: str) -> bool:
+        with self._lock:
+            return self._items.pop(profile_id, None) is not None
+
 
 class InMemorySecretRepository(SecretRepository):
     def __init__(self):
