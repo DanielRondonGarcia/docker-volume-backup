@@ -282,7 +282,7 @@
         return `<path d="M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${ir} ${ir} 0 ${largeArc} 0 ${ix1} ${iy1} Z" fill="${seg.color}" />`;
       }).join("");
 
-      const barWidth = 100 / 7;
+      const barWidth = 200 / 7;
       const barChart = days.map((day, i) => {
         const h = (day.total / maxDay) * 80;
         const successH = day.total > 0 ? (day.success / day.total) * h : 0;
@@ -294,7 +294,7 @@
           <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" fill="var(--border)" opacity="0.3" />
           <rect x="${x}" y="${90 - successH}" width="${w}" height="${successH}" rx="2" fill="var(--success)" />
           <rect x="${x}" y="${90 - successH - failedH}" width="${w}" height="${failedH}" rx="2" fill="var(--destructive)" />
-          <text x="${x + w/2}" y="99" text-anchor="middle" font-size="7" fill="var(--muted-foreground)" font-family="var(--font-mono)">${day.label}</text>
+          <text x="${x + w/2}" y="103" text-anchor="middle" font-size="11" fill="var(--muted-foreground)" font-family="var(--font-mono)">${day.label}</text>
         `;
       }).join("");
 
@@ -327,8 +327,8 @@
 
           <div class="card compact chart-card">
             <div class="chart-header"><span class="eyebrow">Actividad (7 dias)</span><span class="chart-value">${days.reduce((s, d) => s + d.total, 0)} jobs</span></div>
-            <svg viewBox="0 0 100 105" class="bar-svg" preserveAspectRatio="none">
-              <line x1="0" y1="90" x2="100" y2="90" stroke="var(--border)" stroke-width="0.3" />
+            <svg viewBox="0 0 200 110" class="bar-svg">
+              <line x1="0" y1="90" x2="200" y2="90" stroke="var(--border)" stroke-width="0.5" />
               ${barChart}
             </svg>
             <div class="bar-legend">
