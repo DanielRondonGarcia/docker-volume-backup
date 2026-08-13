@@ -261,26 +261,21 @@ class DockerRuntimeAdapter:
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
         rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
-        if resolved_files:
+        if resolved_files or rclone_content:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
+            rclone_written = False
             for index, file_spec in enumerate(resolved_files, start=1):
                 is_rclone = "rclone" in file_spec.get("secret_name", "").lower() or "rclone.conf" in file_spec.get("container_path", "")
                 filename = "rclone.conf" if is_rclone else f"secret_{index}"
                 local_path = os.path.join(temp_dir, filename)
                 with open(local_path, "w", encoding="utf-8") as handle:
                     handle.write(file_spec["content"])
-            volumes[temp_dir] = {
-                "bind": "/run/secrets",
-                "mode": "rw",
-            }
-            rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
-            if rclone_spec:
-                environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
-        elif rclone_content:
-            temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
-            local_path = os.path.join(temp_dir, "rclone.conf")
-            with open(local_path, "w", encoding="utf-8") as handle:
-                handle.write(rclone_content)
+                if is_rclone:
+                    rclone_written = True
+            if rclone_content and not rclone_written:
+                local_path = os.path.join(temp_dir, "rclone.conf")
+                with open(local_path, "w", encoding="utf-8") as handle:
+                    handle.write(rclone_content)
             volumes[temp_dir] = {
                 "bind": "/run/secrets",
                 "mode": "rw",
@@ -380,23 +375,21 @@ class DockerRuntimeAdapter:
             volumes[docker_sock_path] = {"bind": "/var/run/docker.sock", "mode": "rw"}
 
         rclone_content = environment.get("RCLONE_CONF_CONTENT", "")
-        if resolved_files:
+        if resolved_files or rclone_content:
             temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
+            rclone_written = False
             for index, file_spec in enumerate(resolved_files, start=1):
                 is_rclone = "rclone" in file_spec.get("secret_name", "").lower() or "rclone.conf" in file_spec.get("container_path", "")
                 filename = "rclone.conf" if is_rclone else f"secret_{index}"
                 local_path = os.path.join(temp_dir, filename)
                 with open(local_path, "w", encoding="utf-8") as handle:
                     handle.write(file_spec["content"])
-            volumes[temp_dir] = {"bind": "/run/secrets", "mode": "rw"}
-            rclone_spec = next((f for f in resolved_files if "rclone" in f.get("secret_name", "").lower() or "rclone.conf" in f.get("container_path", "")), None)
-            if rclone_spec:
-                environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
-        elif rclone_content:
-            temp_dir = tempfile.mkdtemp(prefix="worker-job-secrets-", dir="/tmp")
-            local_path = os.path.join(temp_dir, "rclone.conf")
-            with open(local_path, "w", encoding="utf-8") as handle:
-                handle.write(rclone_content)
+                if is_rclone:
+                    rclone_written = True
+            if rclone_content and not rclone_written:
+                local_path = os.path.join(temp_dir, "rclone.conf")
+                with open(local_path, "w", encoding="utf-8") as handle:
+                    handle.write(rclone_content)
             volumes[temp_dir] = {"bind": "/run/secrets", "mode": "rw"}
             environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
 
