@@ -14,115 +14,125 @@ Docker image for performing simple backups of Docker volumes. Main features:
 - **New**: Supports [Restic](https://restic.net/) for efficient, deduplicated backups.
 - **New**: Supports [Rclone](https://rclone.org/) for uploading to various cloud providers.
 
-## Control Plane Status
+## Control Plane + Worker: Inicio Rápido
 
-This repository now also includes an early `Control Plane` and `Worker Agent` implementation under `src/control_plane` and `src/worker_agent`.
+### Arquitectura
 
-Current capabilities include:
+El proyecto incluye un **Control Plane** (UI + API centralizada) y uno o varios
+**Workers** que se ejecutan junto a los servicios que quieres backupear. El
+Control Plane guarda metadatos (workers, targets, jobs, snapshots, retención,
+storage profiles, secretos cifrados) en SQLite y expone una UI para operar
+backups, restores y sincronización. El Worker se despliega en el mismo Compose
+que tus servicios, detecta automáticamente el compose project y sus volúmenes
+vía `docker.sock`, y reporta todo al Control Plane.
 
-- Centralized metadata for workers, targets, jobs, snapshots, stats, retention policies, storage profiles, and encrypted secrets
-- Local UI and HTTP API for operating backups, snapshot sync, stats sync, retention runs, and restore dry-runs
-- Bootstrap authentication with a local `admin / changeme` user when no external user list is provided
-- Mandatory password change on first login for the bootstrap user
-- Local user administration for file-backed users from the dashboard and API
-- Dedicated container targets for `backup-runtime`, `control-plane`, and `worker`
-- Worker health endpoint reporting process liveness and latest CP connectivity
+### Inicio Rápido
 
-Local auth behavior:
+Con tres comandos pasas de cero a un backup funcionando. Asume PowerShell en
+Windows y que ambos stacks corren en el mismo host de Docker.
 
-- If `CONTROL_PLANE_USERS_JSON` is set, users are loaded from the environment and are not editable from the UI
-- Otherwise, the Control Plane creates `.control_plane.users.json` and bootstraps `admin / changeme`
-- The bootstrap user is forced to change the password before accessing the dashboard
+#### 1. Levantar el Control Plane
 
-Useful local docs:
-
-- [Control Plane quickstart](doc/control-plane-quickstart.md)
-- [Control Plane technical spec](doc/control-plane-spec.md)
-- [Control Plane Docker deployment](deploy/control-plane/README.md)
-- [Worker + servicios a backupear](deploy/worker/README.md)
-
-## Control Plane Docker Deployment
-
-The Control Plane and the Worker Agent are deployed as two separate Compose
-stacks. The Worker lives alongside the services you want to back up, so it can
-auto-discover the compose project, its volumes, and Docker daemon access.
-
-### 1. Start the Control Plane
-
-```bash
+```powershell
 $env:CONTROL_PLANE_PUBLISHED_PORT="18080"
 docker compose -f deploy/control-plane/docker-compose.yml up -d --build
 ```
 
-What this stack does:
+Esto publica la UI/API del Control Plane en `http://127.0.0.1:18080` y mantiene
+el puerto `8080` interno dentro de la red del Compose.
 
-- Runs `control-plane` with persisted SQLite DB, bootstrap users file, session key and master key under a named Docker volume
-- Publishes the Control Plane UI/API on `${CONTROL_PLANE_PUBLISHED_PORT}` and keeps `8080` internal inside the Compose network
+#### 2. Levantar el Worker + tus servicios
 
-### 2. Start the Worker + services to back up
+El compose del worker incluye un servicio `demo-app` (nginx) de ejemplo y se
+conecta automáticamente a la red del Control Plane
+(`docker-volume-backup-control-plane_default`). Por eso el valor por defecto de
+`CONTROL_PLANE_URL` es `http://control-plane:8080` y no hace falta exponer el CP
+para que el worker lo alcance.
 
-Edit `deploy/worker/docker-compose.yml` to add your services with their
-volumes (a `demo-app` example is included), then:
-
-```bash
-$env:CONTROL_PLANE_URL="http://host.docker.internal:18080"
+```powershell
 docker compose -f deploy/worker/docker-compose.yml up -d --build
 ```
 
-What this stack does:
+Edita `deploy/worker/docker-compose.yml` para añadir tus propios servicios con
+sus volúmenes. El worker los descubrirá y los expondrá en la UI como compose
+projects seleccionables al crear un target.
 
-- Runs `worker` alongside the services you want to back up, so the worker auto-discovers the compose project and its volumes
-- Mounts `/var/run/docker.sock` into the worker so it can inventory Docker and execute runtime containers
-- Exposes a worker-local `GET /healthz` endpoint on port `8081` with connectivity status toward the Control Plane
+#### 3. Configurar el backup desde la UI
 
-The worker reports the compose project name, its volumes, and Docker daemon
-availability to the Control Plane. When creating a target in the UI, you only
-need to select the worker and the compose project; `volume_targets` and
-`runtime_volumes` are derived automatically from the worker inventory. No
-`network_mode` is required because backups are file-based.
+Abre la UI en `http://127.0.0.1:18080/`, inicia sesión (ver abajo) y desde ahí:
 
-Optional secure mode:
+1. Crea un **secreto** (por ejemplo `rclone.conf` o una contraseña de Restic).
+2. Crea un **storage profile** que referencie ese secreto.
+3. Crea un **target** seleccionando el worker y el compose project. Los
+   `volume_targets` y `runtime_volumes` se derivan automáticamente del
+   inventario del worker.
+4. Dispara un **backup** desde el botón de la UI.
 
-- The Control Plane can generate a local self-signed CA by setting `CONTROL_PLANE_TLS_ENABLED=true`
-- Admins can create one-time worker enrollment tokens with `POST /api/v1/admin/worker-enrollments`
-- The worker can bootstrap trust with `WORKER_ENROLLMENT_CA_PEM`, submit a CSR with `WORKER_ENROLLMENT_TOKEN`, and then continue using its signed client certificate for mTLS
-- If you also set `CONTROL_PLANE_WORKER_MTLS_REQUIRED=true`, worker operational routes only accept the enrolled client certificate fingerprint tied to that `worker_id`
+### Verificación
 
-First login after a clean deployment:
+Salud del Control Plane:
 
-- Username: `admin`
-- Password: `changeme`
-- Mandatory action: change password on first login
-
-### 3. Consume GHCR images instead of building locally
-
-Control Plane:
-
-```bash
-$env:CONTROL_PLANE_PUBLISHED_PORT="18080"
-docker compose -f deploy/control-plane/docker-compose.ghcr.yml up -d
+```powershell
+curl http://127.0.0.1:18080/healthz
 ```
 
-Worker + services:
+Login y cookie de sesión (PowerShell, `^` para continuidad de línea en `cmd`;
+en PowerShell usa una sola línea o `` ` `` como continuación):
 
-```bash
-$env:CONTROL_PLANE_URL="http://host.docker.internal:18080"
+```powershell
+curl -c cp-cookie.txt -X POST http://127.0.0.1:18080/api/v1/auth/login `
+  -H "Content-Type: application/json" `
+  -d "{\"username\":\"admin\",\"password\":\"changeme\"}"
+```
+
+Listar workers registrados:
+
+```powershell
+curl -b cp-cookie.txt http://127.0.0.1:18080/api/v1/workers
+```
+
+Salud del worker (debe responder `status=ok` o `status=degraded`):
+
+```powershell
+docker compose -f deploy/worker/docker-compose.yml ps
+docker compose -f deploy/worker/docker-compose.yml logs --tail=20 worker
+```
+
+### Primer login
+
+- Usuario: `admin`
+- Contraseña inicial: `changeme`
+- El sistema **obliga** a cambiar la contraseña en el primer acceso.
+
+### Imágenes publicadas en GHCR
+
+Si no quieres construir localmente, usa los composes `*.ghcr.yml`:
+
+```powershell
+$env:CONTROL_PLANE_PUBLISHED_PORT="18080"
+docker compose -f deploy/control-plane/docker-compose.ghcr.yml up -d
+
 docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
 ```
 
-### 4. Bring the stacks down
+Imágenes:
 
-Control Plane:
+- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
+- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
 
-```bash
+### Apagar los stacks
+
+```powershell
 docker compose -f deploy/control-plane/docker-compose.yml down
-```
-
-Worker + services:
-
-```bash
 docker compose -f deploy/worker/docker-compose.yml down
 ```
+
+### Documentación detallada
+
+- [Control Plane — Guía completa](doc/control-plane-quickstart.md)
+- [Control Plane — Especificación técnica](doc/control-plane-spec.md)
+- [Despliegue del Control Plane](deploy/control-plane/README.md)
+- [Despliegue del Worker + servicios](deploy/worker/README.md)
 
 ## Examples
 
