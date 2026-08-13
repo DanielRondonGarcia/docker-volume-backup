@@ -244,7 +244,7 @@
           return ts && ts >= dayStart && ts < dayEnd;
         });
         days.push({
-          label: d.toLocaleDateString("es", { weekday: "short" }).slice(0, 3),
+          label: `${d.getDate()}/${d.getMonth() + 1}`,
           total: dayJobs.length,
           success: dayJobs.filter(j => j.status === "succeeded" || j.status === "success").length,
           failed: dayJobs.filter(j => j.status === "failed").length,
@@ -294,7 +294,7 @@
           <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" fill="var(--border)" opacity="0.3" />
           <rect x="${x}" y="${90 - successH}" width="${w}" height="${successH}" rx="2" fill="var(--success)" />
           <rect x="${x}" y="${90 - successH - failedH}" width="${w}" height="${failedH}" rx="2" fill="var(--destructive)" />
-          <text x="${x + w/2}" y="98" text-anchor="middle" font-size="9" fill="var(--muted-foreground)">${day.label}</text>
+          <text x="${x + w/2}" y="99" text-anchor="middle" font-size="7" fill="var(--muted-foreground)" font-family="var(--font-mono)">${day.label}</text>
         `;
       }).join("");
 
