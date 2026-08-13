@@ -158,4 +158,10 @@ class RestoreService:
         result.force_overwrite = True
         result.affected_containers = plan.affected_containers
         result.planned_actions = (plan.planned_actions or []) + (result.planned_actions or [])
+        for action in result.planned_actions or []:
+            logger.info(action)
+        if result.success:
+            logger.info(f"Restore completed successfully in {result.duration:.1f}s")
+        else:
+            logger.error(f"Restore failed: {result.error}")
         return result

@@ -1,5 +1,6 @@
 import subprocess
 import os
+import sys
 import json
 import logging
 import shutil
@@ -82,20 +83,25 @@ def _restore_backup_dir_layout(restore_root: str, config: RestoreConfig, actions
     target_root = Path(config.target_path)
     target_root.mkdir(parents=True, exist_ok=True)
     source_root = _resolve_backup_root(restore_root)
+    logger.info(f"Resolved backup source root: {source_root}")
 
     children = list(target_root.iterdir())
     if not children:
-        raise ValueError(
+        msg = (
             "RESTORE_LAYOUT=backup-dir expects mounted entries inside the target path, "
             "for example /backup/storage_data"
         )
+        logger.error(msg)
+        raise ValueError(msg)
 
     actions.append(f"Resolved backup source root: {source_root}")
+    logger.info(f"Found {len(children)} target entries to restore: {[c.name for c in children]}")
     restored_entries = []
     missing_entries = []
 
     for child in children:
         target_entry = target_root / child.name
+        logger.info(f"Clearing target entry: {target_entry}")
         if target_entry.is_dir() and not target_entry.is_symlink():
             _clear_target_contents(str(target_entry))
         elif target_entry.exists() or target_entry.is_symlink():
@@ -103,21 +109,27 @@ def _restore_backup_dir_layout(restore_root: str, config: RestoreConfig, actions
 
         source_entry = source_root / child.name
         if not source_entry.exists():
+            logger.warning(f"No matching source entry for: {child.name}")
             missing_entries.append(child.name)
             continue
 
         if source_entry.is_dir() and not source_entry.is_symlink():
+            logger.info(f"Copying directory {source_entry} -> {target_entry}")
             _copy_directory_contents(source_entry, target_entry)
         else:
+            logger.info(f"Replacing file {source_entry} -> {target_entry}")
             _replace_path(source_entry, target_entry)
         restored_entries.append(child.name)
+        logger.info(f"Restored entry: {child.name}")
 
     if restored_entries:
         actions.append(f"Restore matching entries under {config.target_path}: {', '.join(sorted(restored_entries))}")
+        logger.info(f"Restore complete. Restored {len(restored_entries)} entries: {sorted(restored_entries)}")
     if missing_entries:
         actions.append(
             f"Mounted entries without matching backup content were left empty: {', '.join(sorted(missing_entries))}"
         )
+        logger.warning(f"Missing entries (no backup content): {sorted(missing_entries)}")
 
 class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
     def perform_backup(self, config: BackupConfig) -> BackupResult:
@@ -334,15 +346,23 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
             snapshot = source_path or config.source or "latest"
             if _should_use_backup_dir_layout(config):
                 temp_dir = tempfile.mkdtemp(prefix="restore-restic-")
+                logger.info(f"Restoring restic snapshot {snapshot} into temp dir: {temp_dir}")
+                sys.stderr.flush()
                 subprocess.run(["restic", "restore", snapshot, "--target", temp_dir], env=env, check=True)
                 actions.append(f"Restore restic snapshot into temporary workspace: {snapshot}")
+                logger.info("Restic restore complete, copying entries to target volumes")
+                sys.stderr.flush()
                 _restore_backup_dir_layout(temp_dir, config, actions)
             else:
+                logger.info(f"Clearing target contents at {config.target_path}")
                 _clear_target_contents(config.target_path)
+                logger.info(f"Restoring restic snapshot {snapshot} directly to {config.target_path}")
+                sys.stderr.flush()
                 subprocess.run(["restic", "restore", snapshot, "--target", config.target_path], env=env, check=True)
                 actions.append(f"Restore restic snapshot: {snapshot}")
 
             if config.chown:
+                logger.info(f"Applying chown {config.chown} recursively to {config.target_path}")
                 _apply_chown(config.target_path, config.chown)
                 actions.append(f"Apply RESTORE_CHOWN recursively after restic restore: {config.chown}")
 

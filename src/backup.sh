@@ -9,9 +9,11 @@ if [ -f /root/env.sh ]; then
 fi
 set +a
 
-# If rclone.conf is mounted read-only at /run/secrets/, copy it to a writable
+# If rclone.conf is mounted at /run/secrets/, copy it to a writable
 # location so rclone can save config changes without "read-only file system" errors.
-if [ -f /run/secrets/rclone.conf ] && [ ! -w /run/secrets/rclone.conf ]; then
+# Docker bind mounts marked :ro may still report as writable to [ -w ], so we
+# always copy when the source file exists.
+if [ -f /run/secrets/rclone.conf ]; then
   mkdir -p /tmp/rclone
   cp /run/secrets/rclone.conf /tmp/rclone/rclone.conf
   export RCLONE_CONFIG="/tmp/rclone/rclone.conf"
@@ -21,4 +23,4 @@ fi
 # cron uses a minimal PATH and may not include /usr/local/bin, where the
 # python base image installs python3.
 cd /app
-/usr/local/bin/python3 -m src.app.main
+exec /usr/local/bin/python3 -u -m src.app.main

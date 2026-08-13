@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 from src.app.domain.models import BackupConfig, ContainerConfig, RestoreConfig
 from src.app.application.services.backup_service import BackupService
@@ -8,7 +9,16 @@ from src.app.infrastructure.adapters.container.docker_adapter import DockerAdapt
 from src.app.infrastructure.adapters.notifier.influx_notifier import InfluxNotifier
 from src.app.infrastructure.adapters.backup_strategy import TarballBackupStrategy, ResticBackupStrategy
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+class FlushingStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[FlushingStreamHandler(sys.stderr)],
+)
 logger = logging.getLogger(__name__)
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -88,8 +98,14 @@ def main():
         if result.permission_warnings:
             for warning in result.permission_warnings:
                 logger.warning(warning)
-        if not result.success:
+        for action in result.planned_actions or []:
+            logger.info(action)
+        if result.success:
+            logger.info(f"Restore completed successfully in {result.duration:.1f}s")
+        else:
+            logger.error(f"Restore failed: {result.error}")
             exit(1)
+        sys.stderr.flush()
         return
 
     config = BackupConfig(

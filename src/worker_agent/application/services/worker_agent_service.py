@@ -121,7 +121,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "compose_project": payload.get("compose_project"),
                     },
-                    log_lines=combined_logs.splitlines()[-50:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             if command == "snapshots.list":
@@ -135,19 +135,20 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "snapshots": summary.get("snapshots", []),
                     },
-                    log_lines=combined_logs.splitlines()[-50:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             if command == "snapshot.ls":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.run_runtime_job(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
                         "status_code": summary.get("status_code"),
                         "target_id": payload.get("target_id"),
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-200:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             if command == "snapshot.dump":
@@ -163,12 +164,13 @@ class WorkerAgentService:
                         "b64_content": b64_content,
                         "stderr": summary.get("stderr", ""),
                     },
-                    log_lines=summary.get("stderr", "").splitlines()[-50:],
+                    log_lines=summary.get("stderr", "").splitlines()[-1000:],
                 )
 
             if command == "stats.get":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.get_restic_stats(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
@@ -176,12 +178,13 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "stats": summary.get("stats", {}),
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-50:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             if command == "retention.run":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.run_runtime_job(image=image, payload=payload)
+                combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
@@ -189,7 +192,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "retention_command": payload.get("command"),
                     },
-                    log_lines=summary.get("logs", "").splitlines()[-80:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             if command in ("restore.dry_run", "restore.run"):
@@ -203,7 +206,7 @@ class WorkerAgentService:
                         "target_id": payload.get("target_id"),
                         "dry_run": command == "restore.dry_run",
                     },
-                    log_lines=combined_logs.splitlines()[-80:],
+                    log_lines=combined_logs.splitlines()[-1000:],
                 )
 
             return WorkerJobExecutionResult(

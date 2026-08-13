@@ -266,8 +266,7 @@ class DockerRuntimeAdapter:
                 remove=False,
             )
             result = container.wait()
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            combined = container.logs(stdout=True, stderr=True, timestamps=False).decode("utf-8", errors="replace")
             try:
                 container.remove(force=True)
             except Exception:
@@ -276,8 +275,8 @@ class DockerRuntimeAdapter:
             return {
                 "success": result.get("StatusCode", 1) == 0,
                 "status_code": result.get("StatusCode", 1),
-                "logs": stdout,
-                "stderr": stderr,
+                "logs": combined,
+                "stderr": "",
             }
         finally:
             if temp_dir:
