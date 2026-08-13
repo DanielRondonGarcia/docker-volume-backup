@@ -225,6 +225,18 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 return self._write_json(200, {"ok": True}, head_only=head_only)
             if path == "/api/v1/version":
                 return self._write_json(200, {"version": os.environ.get("APP_VERSION", "dev")}, head_only=head_only)
+            if path == "/api/v1/version/latest":
+                import urllib.request, json as _json
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/DanielRondonGarcia/docker-volume-backup/releases/latest",
+                        headers={"Accept": "application/vnd.github+json", "User-Agent": "docker-volume-backup-control-plane"},
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        data = _json.loads(resp.read().decode("utf-8"))
+                    return self._write_json(200, {"tag_name": data.get("tag_name", ""), "html_url": data.get("html_url", "")}, head_only=head_only)
+                except Exception as e:
+                    return self._write_json(200, {"tag_name": "", "html_url": "", "error": str(e)}, head_only=head_only)
             if path == "/api/v1/config/public":
                 public_url = ""
                 try:

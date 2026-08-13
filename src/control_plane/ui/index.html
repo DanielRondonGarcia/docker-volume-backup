@@ -13,6 +13,7 @@
   <div id="app" class="app">
     <aside class="sidebar" id="sidebar"></aside>
     <div class="main">
+      <div id="versionBanner" class="version-banner" style="display:none;"></div>
       <header class="topbar" id="topbar"></header>
       <main class="content" id="content"></main>
     </div>
@@ -30,6 +31,7 @@
       secrets: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>',
       users: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3 3-5 6-5s6 2 6 5"/></svg>',
       logout: '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2H3v12h3M10 5l3 3-3 3M6 8h7"/></svg>',
+      github: '<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
     };
 
     const NAV_ITEMS = [
@@ -58,6 +60,8 @@
       workerInventories: {},
       currentView: "dashboard",
       systemVersion: "dev",
+      latestVersion: null,
+      latestVersionUrl: null,
     };
 
     function escapeHtml(str) {
@@ -172,7 +176,9 @@
           <nav class="section">
             <a class="item" href="#" id="logoutBtn">${ICONS.logout}<span>Cerrar sesion</span></a>
           </nav>
-          <div class="sidebar-version">v${escapeHtml(state.systemVersion)}</div>
+          <div class="sidebar-version">
+            <a href="https://github.com/DanielRondonGarcia/docker-volume-backup" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;color:inherit;text-decoration:none;">${ICONS.github}<span>v${escapeHtml(state.systemVersion)}</span></a>
+          </div>
         </div>
       `;
       sidebar.querySelector("#logoutBtn").addEventListener("click", async (e) => {
@@ -196,6 +202,34 @@
           <span class="pill muted">${escapeHtml(state.currentRole || "")}</span>
         </div>
       `;
+    }
+
+    function isVersionOutdated(current, latest) {
+      const normalize = v => (v || "").replace(/^v/, "").trim();
+      const cur = normalize(current);
+      const lat = normalize(latest);
+      if (!cur || !lat || cur === "dev") return false;
+      return cur !== lat;
+    }
+
+    function renderVersionBanner() {
+      const banner = document.getElementById("versionBanner");
+      if (!banner) return;
+      if (state.latestVersion && isVersionOutdated(state.systemVersion, state.latestVersion)) {
+        banner.style.display = "";
+        banner.innerHTML = `
+          <div class="version-banner-inner">
+            <span class="version-banner-icon">⚠</span>
+            <span>Nueva version disponible: <strong>v${escapeHtml(state.latestVersion.replace(/^v/, ""))}</strong> (estas en v${escapeHtml(state.systemVersion)})</span>
+            <a href="${escapeHtml(state.latestVersionUrl || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest")}" target="_blank" rel="noopener" class="version-banner-link">Ver release</a>
+            <button class="version-banner-close" id="versionBannerClose">&times;</button>
+          </div>
+        `;
+        const closeBtn = document.getElementById("versionBannerClose");
+        if (closeBtn) closeBtn.addEventListener("click", () => { banner.style.display = "none"; });
+      } else {
+        banner.style.display = "none";
+      }
     }
 
     function setView(view) {
@@ -2688,6 +2722,15 @@ docker compose up -d
         state.rcloneRemote = rcloneRemote;
         state.workerInventories = {};
         try { state.systemVersion = (await apiGet("/api/v1/version")).version || "dev"; } catch (e) {}
+        try {
+          const latest = await apiGet("/api/v1/version/latest");
+          if (latest && latest.tag_name) {
+            const normalize = v => (v || "").replace(/^v/, "").trim();
+            state.latestVersion = latest.tag_name;
+            state.latestVersionUrl = latest.html_url || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest";
+          }
+        } catch (e) {}
+        renderVersionBanner();
         route();
       } catch (error) {
         if (error.message !== "auth") console.error(error);
