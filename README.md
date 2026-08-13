@@ -1,753 +1,328 @@
 # docker-volume-backup
 
-Docker image for performing simple backups of Docker volumes. Main features:
+Sistema de backup y restore centralizado para volúmenes Docker, con arquitectura
+**Control Plane + Workers**, UI web, soporte para Restic/Rclone, y backups
+fríos (deteniendo contenedores) o calientes.
 
-- Mount volumes into the container, and they'll get backed up
-- Use full `cron` expressions for scheduling the backups
-- Backs up to local disk, to remote host available via `scp`, to [AWS S3](https://aws.amazon.com/s3/), or to all of them
-- Allows triggering a backup manually if needed
-- Optionally stops containers for the duration of the backup, and starts them again afterward, to ensure consistent backups
-- Optionally `docker exec`s commands before/after backing up a container, to allow easy integration with database backup tools, for example
-- Optionally executes commands before/after backing up inside `docker-volume-backup` container and/or on remote host
-- Optionally ships backup metrics to [InfluxDB](https://docs.influxdata.com/influxdb/), for monitoring
-- Optionally encrypts backups with `gpg` before uploading
-- **New**: Supports [Restic](https://restic.net/) for efficient, deduplicated backups.
-- **New**: Supports [Rclone](https://rclone.org/) for uploading to various cloud providers.
+![UI Showcase](doc/ui-showcase.png)
 
-## Control Plane + Worker: Inicio Rápido
+## Características principales
 
-### Arquitectura
+- **Arquitectura Control Plane + Workers**: UI centralizada para operar backups
+  y restores de múltiples hosts desde un solo lugar
+- **Workers auto-descubren** los compose projects y volúmenes vía `docker.sock`
+- **Backup frío (cold)**: detiene los contenedores del target durante el backup
+  y los reinicia después, para garantizar consistencia
+- **Restore frío (cold)**: detiene solo los contenedores que montan los volúmenes
+  del target, restaura, y los reinicia
+- **Restic**: backups eficientes, deduplicados e incrementales
+- **Rclone**: upload a cualquier cloud provider (Google Drive, OneDrive, S3, Dropbox, etc.)
+- **Tar**: backups tradicionales en tarball, con opción de cifrado GPG
+- **Múltiples backends de almacenamiento**: local, S3, SCP, Rclone
+- **Secretos cifrados** gestionados desde la UI
+- **Retention policies** configurables por target
+- **Snapshots** con exploración y restore selectivo
+- **Multi-arch**: imágenes para `linux/amd64` y `linux/arm64`
 
-El proyecto incluye un **Control Plane** (UI + API centralizada) y uno o varios
-**Workers** que se ejecutan junto a los servicios que quieres backupear. El
-Control Plane guarda metadatos (workers, targets, jobs, snapshots, retención,
-storage profiles, secretos cifrados) en SQLite y expone una UI para operar
-backups, restores y sincronización. El Worker se despliega en el mismo Compose
-que tus servicios, detecta automáticamente el compose project y sus volúmenes
-vía `docker.sock`, y reporta todo al Control Plane.
+## Arquitectura
 
-### Inicio Rápido
+```mermaid
+graph TB
+    subgraph "Control Plane Host"
+        CP["Control Plane<br/>UI + REST API<br/>SQLite + Job Queue"]
+    end
 
-Con tres comandos pasas de cero a un backup funcionando. Asume PowerShell en
-Windows y que ambos stacks corren en el mismo host de Docker.
+    subgraph "Worker Host A"
+        WA["Worker A<br/>Polls Control Plane"]
+        SA1["Service 1<br/>+ volúmenes"]
+        SA2["Service 2<br/>+ volúmenes"]
+        WA -.->|docker.sock| SA1
+        WA -.->|docker.sock| SA2
+    end
 
-#### 1. Levantar el Control Plane
+    subgraph "Worker Host B"
+        WB["Worker B<br/>Polls Control Plane"]
+        SB1["Service 3<br/>+ volúmenes"]
+        WB -.->|docker.sock| SB1
+    end
+
+    CP -->|1. Dispatch job| WA
+    CP -->|1. Dispatch job| WB
+    WA -->|2. Run runtime container| RT["Backup/Restore Runtime<br/>Mounts target volumes"]
+    RT -->|3. Stop affected containers| SA1
+    RT -->|4. Backup to storage| ST[("Restic / S3 / Rclone<br/>Local / SCP")]
+    RT -->|5. Restart containers| SA1
+    WA -->|6. Report result| CP
+    CP -->|7. Update UI| UI["Dashboard / Jobs / Targets"]
+
+    WB -->|2. Run runtime container| RT2["Backup/Restore Runtime"]
+    RT2 -->|3-5. Same flow| ST
+    WB -->|6. Report result| CP
+
+    style CP fill:#4f46e5,color:#fff,stroke:none
+    style WA fill:#059669,color:#fff,stroke:none
+    style WB fill:#059669,color:#fff,stroke:none
+    style RT fill:#d97706,color:#fff,stroke:none
+    style RT2 fill:#d97706,color:#fff,stroke:none
+    style ST fill:#374151,color:#fff,stroke:none
+    style UI fill:#7c3aed,color:#fff,stroke:none
+```
+
+### Flujo de un job
+
+1. El operador dispara un backup/restore desde la UI del Control Plane
+2. El Control Plane encola el job y lo asigna al Worker correspondiente
+3. El Worker levanta un **runtime container** efímero que monta los volúmenes del target
+4. Si es cold backup/restore, el runtime detiene los contenedores afectados
+5. El runtime ejecuta el backup (Restic/tar) o el restore, sube a storage
+6. El runtime reinicia los contenedores detenidos
+7. El Worker reporta el resultado (logs, snapshots, métricas) al Control Plane
+8. La UI se actualiza en tiempo real con polling
+
+## Inicio rápido
+
+### 1. Levantar el Control Plane
 
 ```powershell
 $env:CONTROL_PLANE_PUBLISHED_PORT="18080"
 docker compose -f deploy/control-plane/docker-compose.yml up -d --build
 ```
 
-Esto publica la UI/API del Control Plane en `http://127.0.0.1:18080` y mantiene
-el puerto `8080` interno dentro de la red del Compose.
+La UI queda en `http://127.0.0.1:18080/`.
 
-#### 2. Levantar el Worker + tus servicios
+<details>
+<summary>Linux / macOS</summary>
 
-El compose del worker incluye un servicio `demo-app` (nginx) de ejemplo y se
-conecta automáticamente a la red del Control Plane
-(`docker-volume-backup-control-plane_default`). Por eso el valor por defecto de
-`CONTROL_PLANE_URL` es `http://control-plane:8080` y no hace falta exponer el CP
-para que el worker lo alcance.
+```bash
+CONTROL_PLANE_PUBLISHED_PORT=18080 \
+docker compose -f deploy/control-plane/docker-compose.yml up -d --build
+```
+</details>
+
+### 2. Levantar el Worker
 
 ```powershell
 docker compose -f deploy/worker/docker-compose.yml up -d --build
 ```
 
-Edita `deploy/worker/docker-compose.yml` para añadir tus propios servicios con
-sus volúmenes. El worker los descubrirá y los expondrá en la UI como compose
-projects seleccionables al crear un target.
+El worker incluye un servicio `demo-app` (nginx) de ejemplo. Edita
+`deploy/worker/docker-compose.yml` para añadir tus propios servicios con
+sus volúmenes — el worker los descubrirá automáticamente vía `docker.sock`.
 
-#### 3. Configurar el backup desde la UI
+### 3. Configurar el backup desde la UI
 
-Abre la UI en `http://127.0.0.1:18080/`, inicia sesión (ver abajo) y desde ahí:
+Abre `http://127.0.0.1:18080/`, inicia sesión y:
 
-1. Crea un **secreto** (por ejemplo `rclone.conf` o una contraseña de Restic).
-2. Crea un **storage profile** que referencie ese secreto.
-3. Crea un **target** seleccionando el worker y el compose project. Los
-   `volume_targets` y `runtime_volumes` se derivan automáticamente del
-   inventario del worker.
-4. Dispara un **backup** desde el botón de la UI.
-
-### Verificación
-
-Salud del Control Plane:
-
-```powershell
-curl http://127.0.0.1:18080/healthz
-```
-
-Login y cookie de sesión (PowerShell, `^` para continuidad de línea en `cmd`;
-en PowerShell usa una sola línea o `` ` `` como continuación):
-
-```powershell
-curl -c cp-cookie.txt -X POST http://127.0.0.1:18080/api/v1/auth/login `
-  -H "Content-Type: application/json" `
-  -d "{\"username\":\"admin\",\"password\":\"changeme\"}"
-```
-
-Listar workers registrados:
-
-```powershell
-curl -b cp-cookie.txt http://127.0.0.1:18080/api/v1/workers
-```
-
-Salud del worker (debe responder `status=ok` o `status=degraded`):
-
-```powershell
-docker compose -f deploy/worker/docker-compose.yml ps
-docker compose -f deploy/worker/docker-compose.yml logs --tail=20 worker
-```
+1. Crea un **secreto** (ej: `rclone.conf` o contraseña de Restic)
+2. Crea un **storage profile** que referencie ese secreto
+3. Crea un **target** seleccionando el worker y el compose project
+4. Dispara un **backup** desde el botón de la UI
 
 ### Primer login
 
 - Usuario: `admin`
 - Contraseña inicial: `changeme`
-- El sistema **obliga** a cambiar la contraseña en el primer acceso.
+- El sistema fuerza cambio de contraseña en el primer acceso
 
-### Imágenes publicadas en GHCR
+## Imágenes publicadas en GHCR
 
 Si no quieres construir localmente, usa los composes `*.ghcr.yml`:
 
 ```powershell
 $env:CONTROL_PLANE_PUBLISHED_PORT="18080"
 docker compose -f deploy/control-plane/docker-compose.ghcr.yml up -d
-
 docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
 ```
 
 Imágenes:
 
-- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
-- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
+| Imagen | Uso |
+|---|---|
+| `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane` | Control Plane (UI + API) |
+| `ghcr.io/danielrondongarcia/docker-volume-backup-worker` | Worker (agente en el host de los servicios) |
+| `ghcr.io/danielrondongarcia/docker-volume-backup` | Runtime de backup/restore legacy (usado internamente por el worker) |
 
-### Apagar los stacks
+Cada imagen recibe los tags: `latest`, `{version}`, `{major}.{minor}`, `{major}`.
+
+## Backup frío (detener contenedores)
+
+Para garantizar backups consistentes de bases de datos u otros servicios
+que escriben activamente, puedes detener los contenedores durante el backup.
+
+Añade el label al contenedor que quieres detener:
+
+```yaml
+services:
+  database:
+    image: postgres:16
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    labels:
+      - "docker-volume-backup.stop-during-backup=true"
+
+  backup:
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - db-data:/backup/db-data:ro
+
+volumes:
+  db-data:
+```
+
+El runtime buscará los contenedores con ese label, los detendrá, hará el
+backup, y los reiniciará.
+
+## Backup con Restic y Rclone
+
+```yaml
+services:
+  app:
+    image: my-app
+    volumes:
+      - app-data:/data
+
+  backup:
+    image: ghcr.io/danielrondongarcia/docker-volume-backup
+    environment:
+      BACKUP_STRATEGY: restic
+      RESTIC_REPOSITORY: rclone:myremote:/backups/docker-volumes
+      RESTIC_PASSWORD: my-secure-password
+      BACKUP_CRON_EXPRESSION: "0 2 * * *"
+    volumes:
+      - app-data:/backup/app-data:ro
+      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
+
+volumes:
+  app-data:
+```
+
+Inicializa el repositorio Restic una sola vez:
+
+```bash
+docker run --rm \
+  -v $(pwd)/rclone.conf:/root/.config/rclone/rclone.conf:ro \
+  -e RESTIC_PASSWORD=my-secure-password \
+  ghcr.io/danielrondongarcia/docker-volume-backup \
+  restic -r rclone:myremote:/backups/docker-volumes init
+```
+
+## Restore
+
+### Desde la UI
+
+1. Ve a **Targets** → selecciona el target → **Snapshots**
+2. Explora el contenido del snapshot (archivos y directorios)
+3. Selecciona un snapshot y haz click en **Restore**
+4. Marca **force overwrite** y opcionalmente **stop containers** (cold restore)
+5. El restore detiene solo los contenedores que montan los volúmenes del
+   target, restaura, y los reinicia
+
+### Desde CLI (modo legacy)
+
+```bash
+# Dry-run para verificar qué se va a restaurar
+RESTORE_MODE=true RESTORE_TARGET_PATH=/restore-target \
+docker compose run --rm restore
+
+# Restore real
+RESTORE_MODE=true RESTORE_TARGET_PATH=/restore-target \
+RESTORE_DRY_RUN=false RESTORE_FORCE_OVERWRITE=true \
+docker compose run --rm restore
+
+# Desde el contenedor backup en ejecución
+docker compose exec backup /root/restore.sh
+```
+
+### Permisos y bases de datos SQLite
+
+Si la app corre como non-root, usa `RESTORE_CHOWN=uid:gid` para que los
+archivos restaurados tengan el owner correcto. Las bases SQLite necesitan
+tanto el archivo como el directorio padre writables por el runtime user.
+
+```bash
+RESTORE_DRY_RUN=false RESTORE_FORCE_OVERWRITE=true \
+RESTORE_CHOWN=1000:1000 \
+docker compose run --rm restore
+```
+
+## Configuración
+
+### Backup
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `BACKUP_STRATEGY` | `tar` | `tar` o `restic` |
+| `BACKUP_SOURCES` | `/backup` | Path de lectura (puede ser lista separada por espacios) |
+| `BACKUP_CRON_EXPRESSION` | `@daily` | Expresión cron estándar |
+| `BACKUP_FILENAME` | `backup-%Y-%m-%dT%H-%M-%S.tar.gz` | Template del nombre del archivo |
+| `BACKUP_ARCHIVE` | `/archive` | Directorio de archivo local |
+| `BACKUP_CUSTOM_LABEL` | | Label custom para selectivamente detener/exec contenedores |
+| `RESTIC_REPOSITORY` | | Repositorio Restic (requerido si `BACKUP_STRATEGY=restic`) |
+| `RESTIC_PASSWORD` | | Password del repositorio Restic |
+| `RESTIC_KEEP_DAILY` | `7` | Retención diaria (Restic) |
+| `RESTIC_KEEP_WEEKLY` | `4` | Retención semanal (Restic) |
+| `RESTIC_KEEP_MONTHLY` | `12` | Retención mensual (Restic) |
+| `RCLONE_REMOTE` | | Remote path de Rclone para upload |
+| `AWS_S3_BUCKET_NAME` | | Bucket S3 para upload |
+| `AWS_ACCESS_KEY_ID` | | Access key de AWS (requerido para S3) |
+| `AWS_SECRET_ACCESS_KEY` | | Secret key de AWS (requerido para S3) |
+| `AWS_EXTRA_ARGS` | | Args extra para AWS CLI (ej: `--endpoint-url` para S3-compatible) |
+| `SCP_HOST` | | Host remoto para SCP |
+| `SCP_USER` | | Usuario SSH para SCP |
+| `SCP_DIRECTORY` | | Directorio remoto para SCP |
+| `GPG_PASSPHRASE` | | Cifra el backup con GPG |
+| `TZ` | `UTC` | Timezone para cron |
+
+### Restore
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `RESTORE_MODE` | | `true` para ejecutar restore once |
+| `RESTORE_TARGET_PATH` | | Path donde se monta el volumen destino (read-write) |
+| `RESTORE_SOURCE` | Latest | Source específico: path local, `s3://`, `scp://`, `rclone://`, o snapshot id Restic |
+| `RESTORE_DRY_RUN` | `true` | `false` para restore real |
+| `RESTORE_FORCE_OVERWRITE` | `false` | `true` para sobrescribir el target |
+| `RESTORE_BACKUP_STRATEGY` | `BACKUP_STRATEGY` | `tar` o `restic` |
+| `RESTORE_STOP_CONTAINERS` | `false` | `true` para cold restore (detiene contenedores del target) |
+| `RESTORE_CHOWN` | Archive ownership | `uid:gid` aplicado al target después del restore |
+
+## Apagar los stacks
 
 ```powershell
 docker compose -f deploy/control-plane/docker-compose.yml down
 docker compose -f deploy/worker/docker-compose.yml down
 ```
 
-### Documentación detallada
+## Documentación detallada
 
 - [Control Plane — Guía completa](doc/control-plane-quickstart.md)
 - [Control Plane — Especificación técnica](doc/control-plane-spec.md)
 - [Despliegue del Control Plane](deploy/control-plane/README.md)
 - [Despliegue del Worker + servicios](deploy/worker/README.md)
 
-## Examples
-
-### Backing up locally
-
-Say you're running some dashboards with [Grafana](https://grafana.com/) and want to back them up:
-
-```yml
-version: "3"
-
-services:
-
-  dashboard:
-    image: grafana/grafana:7.4.5
-    volumes:
-      - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    volumes:
-      - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
-      - ./backups:/archive                      # Mount a local folder as the backup archive
-
-volumes:
-  grafana-data:
-```
-
-This will back up the Grafana data volume, once per day, and write it to `./backups` with a filename like `backup-2018-11-27T16-51-56.tar.gz`.
-
-### Backing up to S3
-
-Off-site backups are better, though:
-
-```yml
-version: "3"
-
-services:
-
-  dashboard:
-    image: grafana/grafana:7.4.5
-    volumes:
-      - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    environment:
-      AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    volumes:
-      - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
-
-volumes:
-  grafana-data:
-```
-
-This configuration will back up to AWS S3 instead. See below for additional tips about [S3 Bucket setup](#s3-bucket-setup).
-
-### Restoring data
-
-Run restore as a one-shot container: start with a dry-run, verify the source and target, then run the destructive restore only with `RESTORE_FORCE_OVERWRITE=true`.
-
-If you already have the long-running `backup` service running, you can also restore from that same container with the new helper script:
-
-```bash
-docker compose exec backup /root/restore.sh
-```
-
-By default, `/root/restore.sh` assumes the centralized `/backup` layout and activates a smart restore flow that matches each mounted entry under `/backup` with the corresponding entry stored in the backup source.
-
-**Important:** an actual restore replaces the contents of `RESTORE_TARGET_PATH`. It does not merge files. Keep `RESTORE_DRY_RUN=true` until you're ready to overwrite the target.
-
-#### Quick path
-
-1. Mount the target volume read-write at `RESTORE_TARGET_PATH`.
-2. Run a dry-run restore and verify the selected source, target, affected containers, and permission warnings.
-3. Stop the application container yourself, or enable `RESTORE_STOP_CONTAINERS=true` with Docker socket access.
-4. Run the actual restore with both `RESTORE_DRY_RUN=false` and `RESTORE_FORCE_OVERWRITE=true`.
-5. Verify application ownership and database writability before starting the app again.
-
-```yml
-services:
-  restore:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    environment:
-      RESTORE_MODE: "true"
-      RESTORE_TARGET_PATH: /restore-target
-      BACKUP_ARCHIVE: /archive
-    volumes:
-      - grafana-data:/restore-target
-      - ./backups:/archive:ro
-
-volumes:
-  grafana-data:
-```
-
-Preview the latest compatible backup candidate:
-
-```bash
-docker compose run --rm restore
-```
-
-Restore a specific backup after checking the dry-run output:
-
-```bash
-RESTORE_SOURCE=/archive/backup-2026-05-20T10-00-00.tar.gz \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-docker compose run --rm restore
-```
-
-#### Restore environment variables
-
-Required for restore mode:
-
-| Variable | Required | Notes |
-|---|---:|---|
-| `RESTORE_MODE` | Yes | Set to `true` to run restore once and skip cron scheduling. |
-| `RESTORE_TARGET_PATH` | Yes | Container path where the target volume is mounted read-write. Its contents are replaced during actual restore. |
-
-Common optional restore variables:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `RESTORE_SOURCE` | Latest compatible candidate | Use a local path, `s3://bucket/key`, `scp://user@host:/path/file`, `rclone://remote:path/file`, or a Restic snapshot id. |
-| `RESTORE_DRY_RUN` | `true` | When true, reports the plan without downloading, replacing, extracting, stopping containers, or changing files. |
-| `RESTORE_FORCE_OVERWRITE` | `false` | Must be `true` for actual restore. Without it, restore fails before modifying the target. |
-| `RESTORE_BACKUP_STRATEGY` | `BACKUP_STRATEGY` or `tar` | Use `tar` for tarballs/encrypted tarballs or `restic` for Restic snapshots. |
-| `RESTORE_LAYOUT` | `auto` | `auto` switches to smart `/backup` matching when `RESTORE_TARGET_PATH=/backup`; `direct` keeps the previous extract/restore behavior; `backup-dir` forces name-based matching of entries under `/backup`. |
-| `RESTORE_STOP_CONTAINERS` | `false` | Stops and starts containers using the target volume when Docker socket access is mounted. |
-| `RESTORE_CHOWN` | Archive ownership | Numeric `uid:gid` applied recursively after target replacement and extraction/restore. Preferred for non-root application containers. |
-
-Backend variables used during restore:
-
-| Backend | Variables | Notes |
-|---|---|---|
-| Local archive | `BACKUP_ARCHIVE` | Directory or file mounted in the restore container. If `RESTORE_SOURCE` is omitted, the latest file is selected. |
-| S3 | `AWS_S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_DEFAULT_REGION`, `AWS_EXTRA_ARGS` | Lists and downloads `s3://` restore candidates. |
-| SCP | `SCP_HOST`, optional `SCP_USER`, `SCP_DIRECTORY`; mount SSH key at `/ssh/id_rsa` | Lists remote files over SSH and downloads selected `scp://` candidates. |
-| Rclone | `RCLONE_REMOTE`; mount `rclone.conf` if needed | Lists and downloads files via `rclone://` candidates. |
-| Restic | `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` | Restores `latest` or the snapshot id from `RESTORE_SOURCE`. |
-| Encrypted tarball | `GPG_PASSPHRASE` | Required when restoring a `.gpg` tarball. |
-| Glacier | `AWS_GLACIER_VAULT_NAME` | Glacier archives are reported as unavailable because retrieval is delayed; restore them to S3/local storage first. |
-
-#### Restore examples by backend
-
-These examples assume the `restore` service already sets `RESTORE_MODE=true` and mounts the target volume at `RESTORE_TARGET_PATH`.
-
-Local latest dry-run:
-
-```bash
-RESTORE_MODE=true \
-RESTORE_TARGET_PATH=/restore-target \
-BACKUP_ARCHIVE=/archive \
-docker compose run --rm restore
-```
-
-Restore from the running `backup` container using the centralized `/backup` layout:
-
-```bash
-docker compose exec backup /root/restore.sh
-```
-
-Force restore from the running `backup` container after validating the dry-run:
-
-```bash
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-docker compose exec backup /root/restore.sh
-```
-
-Local force restore with explicit ownership for a non-root app:
-
-```bash
-RESTORE_MODE=true \
-RESTORE_TARGET_PATH=/restore-target \
-RESTORE_SOURCE=/archive/latest.tar.gz \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-RESTORE_CHOWN=472:472 \
-docker compose run --rm restore
-```
-
-S3 selected-source restore:
-
-```bash
-RESTORE_SOURCE=s3://my-backup-bucket/backup-2026-05-20T10-00-00.tar.gz \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-docker compose run --rm restore
-```
-
-Restic latest restore:
-
-```bash
-RESTORE_BACKUP_STRATEGY=restic \
-RESTIC_REPOSITORY=/restic-repo \
-RESTIC_PASSWORD=my-secure-password \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-docker compose run --rm restore
-```
-
-Encrypted tarball restore:
-
-```bash
-RESTORE_SOURCE=/archive/backup.tar.gz.gpg \
-GPG_PASSPHRASE=my-passphrase \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-docker compose run --rm restore
-```
-
-SCP and Rclone restores use the same flow: first dry-run with `SCP_*` or `RCLONE_REMOTE` configured, then pass the selected `scp://...` or `rclone://...` value as `RESTORE_SOURCE` for the force restore.
-
-#### Permissions and SQLite/SFTPGo troubleshooting
-
-If the application container runs as a non-root user, set `RESTORE_CHOWN=uid:gid`. Archive ownership may work when the archived owner already matches the runtime user, but explicit chown is safer because it runs after the target is replaced and after files are extracted or restored.
-
-SQLite-like databases need both the database file and the parent directory writable by the runtime user. Otherwise the app can fail after restore with errors such as `attempt to write a readonly database`, because SQLite needs to create journal, WAL, and temporary files next to the database.
-
-For SFTPGo, identify the UID/GID used by the SFTPGo container, then restore with that ownership:
-
-```bash
-RESTORE_SOURCE=/archive/sftpgo-root-owned.tar.gz \
-RESTORE_DRY_RUN=false \
-RESTORE_FORCE_OVERWRITE=true \
-RESTORE_CHOWN=1000:1000 \
-docker compose run --rm restore
-```
-
-After restore, verify both ownership and write access:
-
-```bash
-docker compose run --rm --user 1000:1000 sftpgo \
-  sh -c 'test -w /srv/sftpgo && test -w /srv/sftpgo/sftpgo.db'
-```
-
-Manual restore scenarios live under [`test/restore-local`](test/restore-local/), [`test/restore-backup-dir`](test/restore-backup-dir/), [`test/restore-permissions`](test/restore-permissions/), [`test/restore-sftpgo-sqlite`](test/restore-sftpgo-sqlite/), [`test/restore-s3`](test/restore-s3/), and [`test/restore-restic`](test/restore-restic/).
-
-### Backing up to remote host by means of SCP
-
-You can also upload to your backups to a remote host by means of secure copy (SCP) based on SSH. To do so, [create an SSH key pair if you do not have one yet and copy the public key to the remote host where your backups should be stored.](https://foofunc.com/how-to-create-and-add-ssh-key-in-remote-ssh-server/) Then, start the backup container by setting the variables `SCP_HOST`, `SCP_USER`, `SCP_DIRECTORY`, and provide the private SSH key by mounting it into `/ssh/id_rsa`.
-
-In the example, we store the backups in the remote host folder `/home/pi/backups` and use the default SSH key located at `~/.ssh/id_rsa`:
-
-```yml
-version: "3"
-
-services:
-
-  dashboard:
-    image: grafana/grafana:7.4.5
-    volumes:
-      - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    environment:
-      SCP_HOST: 192.168.0.42                    # Remote host IP address
-      SCP_USER: pi                              # Remote host user to log in
-      SCP_DIRECTORY: /home/pi/backups           # Remote host directory
-    volumes:
-      - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
-      - ~/.ssh/id_rsa:/ssh/id_rsa:ro            # Mount the SSH private key (as read-only)
-
-volumes:
-  grafana-data:
-```
-
-### Backing up with Restic and Rclone
-
-You can use [Restic](https://restic.net/) for efficient, incremental, and encrypted backups. This is particularly useful for large volumes where full backups are too slow or expensive. You can also use [Rclone](https://rclone.org/) as a backend for Restic, allowing you to store your backups on any cloud provider supported by Rclone (Google Drive, OneDrive, Dropbox, etc.).
-
-In this example, we back up 3 example volumes (`vol1`, `vol2`, `vol3`) to a remote location defined in `rclone.conf`.
-
-1.  **Prepare your `rclone.conf`**: Run `rclone config` on your local machine to set up your remote (e.g., named `myremote`).
-2.  **Initialize the repository**:
-    ```bash
-    # You only need to do this once
-    docker run --rm \
-      -v $(pwd)/rclone.conf:/root/.config/rclone/rclone.conf:ro \
-      -e RESTIC_PASSWORD=my-secure-password \
-      ghcr.io/danielrondongarcia/docker-volume-backup \
-      restic -r rclone:myremote:/backups/docker-volumes init
-    ```
-3.  **Configure the service**:
-
-```yml
-version: "3"
-
-services:
-  # Example services with data to backup
-  app1:
-    image: alpine
-    command: sh -c "while true; do echo 'app1 data' >> /data/file.txt; sleep 5; done"
-    volumes:
-      - vol1:/data
-
-  app2:
-    image: alpine
-    command: sh -c "while true; do echo 'app2 data' >> /data/file.txt; sleep 5; done"
-    volumes:
-      - vol2:/data
-
-  app3:
-    image: alpine
-    command: sh -c "while true; do echo 'app3 data' >> /data/file.txt; sleep 5; done"
-    volumes:
-      - vol3:/data
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    environment:
-      BACKUP_STRATEGY: restic
-      # Restic repository location.
-      # Syntax: rclone:<remote-name>:<path-in-remote>
-      RESTIC_REPOSITORY: rclone:myremote:/backups/docker-volumes
-      RESTIC_PASSWORD: my-secure-password
-      # Optional: Cron schedule
-      BACKUP_CRON_EXPRESSION: "0 2 * * *"
-    volumes:
-      # Mount the volumes to be backed up
-      - vol1:/backup/vol1:ro
-      - vol2:/backup/vol2:ro
-      - vol3:/backup/vol3:ro
-      # Mount your rclone configuration
-      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
-
-volumes:
-  vol1:
-  vol2:
-  vol3:
-```
-
-### Managing and Verifying Backups
-
-When using Restic, your backups are stored as snapshots in the repository. You can inspect them using the `restic` CLI inside the container.
-
-**List all snapshots:**
-```bash
-docker compose exec backup restic snapshots
-```
-
-**Check repository stats:**
-```bash
-docker compose exec backup restic stats
-```
-
-**Inspect repository content using Rclone (on your local machine):**
-If you want to browse the repository structure on your local machine (e.g., Windows), you can mount the bucket using Rclone. Note that Restic stores data in a specific deduplicated format (`data`, `index`, `keys`, `snapshots`), so you won't see your original files directly.
-
-```bash
-# Mount the bucket to drive X: (Windows)
-rclone mount oci:your-bucket X: --vfs-cache-mode full
-```
-
-To browse the *actual files* inside the backup, you would need to use `restic mount` (requires FUSE) or `restic restore`.
-
-### Triggering a backup manually
-
-Sometimes it's useful to trigger a backup manually, e.g. right before making some big changes, without waiting for the scheduled cron job.
-
-You can force a backup immediately by executing the backup script inside the running container:
-
-```bash
-docker compose exec backup /root/backup.sh
-```
-
-This will run the full backup process (including pre/post commands and notifications) and you will see the logs in your terminal.
-
-If you **only** want to back up manually (i.e. not on a schedule), you should use `BACKUP_CRON_EXPRESSION="#"` (to ensure scheduled backup never runs) and execute the command above whenever you want to run a backup.
-
-### Stopping containers while backing up
-
-It's not generally safe to read files to which other processes might be writing. You may end up with corrupted copies.
-
-**Important:** By default, **NO containers are stopped** during the backup process. This feature is strictly **opt-in** to ensure your application's SLA is not affected unexpectedly.
-
-To enable this feature for a specific container, you must:
-1. Give the backup container access to the Docker socket (`/var/run/docker.sock`).
-2. Add the label `docker-volume-backup.stop-during-backup=true` to the container you want to stop.
-
-```yml
-version: "3"
-
-services:
-
-  dashboard:
-    image: grafana/grafana:7.4.5
-    volumes:
-      - grafana-data:/var/lib/grafana           # This is where Grafana keeps its data
-    labels:
-      # Adding this label means this container should be stopped while it's being backed up:
-      - "docker-volume-backup.stop-during-backup=true"
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    environment:
-      AWS_S3_BUCKET_NAME: my-backup-bucket      # S3 bucket which you own, and already exists
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}   # Read AWS secrets from environment (or a .env file)
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro # Allow use of the "stop-during-backup" feature
-      - grafana-data:/backup/grafana-data:ro    # Mount the Grafana data volume (as read-only)
-
-volumes:
-  grafana-data:
-```
-
-This configuration allows you to safely back up things like databases, if you can tolerate a bit of downtime.
-
-### Pre/post backup exec
-
-If you don't want to stop the container while it's being backed up, and the container comes with a backup utility (this is true for most databases), you can label the container with commands to run before/after backing it up:
-
-```yml
-version: "3"
-
-services:
-
-  database:
-    image: influxdb:1.5.4
-    volumes:
-      - influxdb-data:/var/lib/influxdb         # This is where InfluxDB keeps its data
-      - influxdb-temp:/tmp/influxdb             # This is our temp space for the backup
-    labels:
-      # These commands will be exec'd (in the same container) before/after the backup starts:
-      - docker-volume-backup.exec-pre-backup=influxd backup -portable /tmp/influxdb
-      - docker-volume-backup.exec-post-backup=rm -rfv /tmp/influxdb
-
-  backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro # Allow use of the "pre/post exec" feature
-      - influxdb-temp:/backup/influxdb:ro       # Mount the temp space so it gets backed up
-      - ./backups:/archive                      # Mount a local folder as the backup archive
-
-volumes:
-  influxdb-data:
-  influxdb-temp:
-```
-
-The above configuration will perform a `docker exec` for the database container with `influxd backup`, right before the backup runs. The resulting DB snapshot is written to a temp volume (`influxdb-temp`), which is then backed up. Note that the main InfluxDB data volume (`influxdb-data`) isn't used at all, as it'd be unsafe to read while the DB process is running.
-
-Similarly, after the temp volume has been backed up, it's cleaned up with another `docker exec` in the database container, this time just invoking `rm`.
-
-If you need a more complex script for pre/post exec, consider mounting and invoking a shell script instead.
-
-## Configuration
-
-Variable | Default | Notes
---- | --- | ---
-`BACKUP_STRATEGY` | `tar` | `tar` or `restic`. Defines the backup strategy to use.
-`RESTIC_REPOSITORY` | | Required when `BACKUP_STRATEGY` is `restic`.
-`RESTIC_PASSWORD` | | Required when `BACKUP_STRATEGY` is `restic`.
-`RESTIC_KEEP_DAILY` | `7` | Number of daily backups to keep (Restic only).
-`RESTIC_KEEP_WEEKLY` | `4` | Number of weekly backups to keep (Restic only).
-`RESTIC_KEEP_MONTHLY` | `12` | Number of monthly backups to keep (Restic only).
-`RESTIC_KEEP_YEARLY` | `1` | Number of yearly backups to keep (Restic only).
-`RCLONE_REMOTE` | | When provided, the backup file will be uploaded using Rclone to this remote path.
-`BACKUP_SOURCES` | `/backup` | Where to read data from. This can be a space-separated list if you need to back up multiple paths, when mounting multiple volumes for example. On the other hand, you can also just mount multiple volumes under `/backup` to have all of them backed up.
-`BACKUP_CRON_EXPRESSION` | `@daily` | Standard debian-flavored `cron` expression for when the backup should run. Use e.g. `0 4 * * *` to back up at 4 AM every night. See the [man page](http://man7.org/linux/man-pages/man8/cron.8.html) or [crontab.guru](https://crontab.guru/) for more.
-`BACKUP_FILENAME` | `backup-%Y-%m-%dT%H-%M-%S.tar.gz` | File name template for the backup file. Is passed through `date` for formatting. See the [man page](http://man7.org/linux/man-pages/man1/date.1.html) for more.
-`BACKUP_ARCHIVE` | `/archive` | When this path is available within the container (i.e. you've mounted a Docker volume there), a finished backup file will get archived there after each run.
-`PRE_BACKUP_COMMAND` |  | Commands that is executed before the backup is created.
-`POST_BACKUP_COMMAND` |  | Commands that is executed after the backup has been transferred.
-`BACKUP_UID` | `root (0)` | After backup file has been moved to archive location the file user ownership is changed to this UID.
-`BACKUP_GID` | `$BACKUP_UID` | After backup file has been moved to archive location the file group ownership is changed to this GID.
-`BACKUP_WAIT_SECONDS` | `0` | The backup script will sleep this many seconds between re-starting stopped containers, and proceeding with archiving/uploading the backup. This can be useful if you don't want the load/network spike of a large upload immediately after the load/network spike of container startup.
-`BACKUP_HOSTNAME` | `$(hostname)` | Name of the host (i.e. Docker container) in which the backup runs. Mostly useful if you want a specific hostname to be associated with backup metrics (see InfluxDB support).
-`BACKUP_CUSTOM_LABEL` |  | When provided, the [start/stop](#stopping-containers-while-backing-up) and [pre/post exec](#prepost-backup-exec) logic only applies to containers with this custom label.
-`CHECK_HOST` |  | When provided, the availability of the named host will be checked. The host should be the destination host of the backups. If the host is available, the backup is conducted as normal. Else, the backup is skipped.
-`AWS_S3_BUCKET_NAME` |  | When provided, the resulting backup file will be uploaded to this S3 bucket after the backup has ran. You may include slashes after the bucket name if you want to upload into a specific path within the bucket, e.g. `your-bucket-name/backups/daily`.
-`AWS_GLACIER_VAULT_NAME` |  | When provided, the resulting backup file will be uploaded to this AWS Glacier vault after the backup has ran.
-`AWS_ACCESS_KEY_ID` |  | Required when using `AWS_S3_BUCKET_NAME`.
-`AWS_SECRET_ACCESS_KEY` |  | Required when using `AWS_S3_BUCKET_NAME`.
-`AWS_DEFAULT_REGION` |  | Optional when using `AWS_S3_BUCKET_NAME`. Allows you to override the AWS CLI default region. Usually not needed.
-`AWS_EXTRA_ARGS` |  | Optional additional args for the AWS CLI. Useful for e.g. providing `--endpoint-url <url>` for S3-compatible systems, such as [DigitalOcean Spaces](https://www.digitalocean.com/products/spaces/), [MinIO](https://min.io/) and the like.
-`SCP_HOST` |  | When provided, the resulting backup file will be uploaded by means of `scp` to the host stated.
-`SCP_USER` |  | User name to log into `SCP_HOST`.
-`SCP_DIRECTORY` |  | Directory on `SCP_HOST` where backup file is stored.
-`PRE_SCP_COMMAND` |  | Commands that is executed on `SCP_HOST` before the backup is transferred.
-`POST_SCP_COMMAND` |  | Commands that is executed on `SCP_HOST` after the backup has been transferred.
-`GPG_PASSPHRASE` |  | When provided, the backup will be encrypted with gpg using this `passphrase`.
-`INFLUXDB_URL` |  | Required when sending metrics to InfluxDB.
-`INFLUXDB_MEASUREMENT` | `docker_volume_backup` | Required when sending metrics to InfluxDB.
-`INFLUXDB_API_TOKEN` | | When provided, backup metrics will be sent to an InfluxDB instance using the API token for authorization. If API Tokens are not supported by the InfluxDB version in use, `INFLUXDB_CREDENTIALS` must be provided instead.
-`INFLUXDB_ORGANIZATION` | | Required when using `INFLUXDB_API_TOKEN`; e.g. `personal`.
-`INFLUXDB_BUCKET` | | Required when using `INFLUXDB_API_TOKEN`; e.g. `backup_metrics`
-`INFLUXDB_CREDENTIALS` |  | When provided, backup metrics will be sent to an InfluxDB instance using `user:password` authentication. This is required if `INFLUXDB_API_TOKEN` not provided.
-`INFLUXDB_DB` |  | Required when using `INFLUXDB_URL`; e.g. `my_database`.
-`TZ` | `UTC` | Which timezone should `cron` use, e.g. `America/New_York` or `Europe/Warsaw`. See [full list of available time zones](http://manpages.ubuntu.com/manpages/bionic/man3/DateTime::TimeZone::Catalog.3pm.html).
-
-## Metrics
-
-After the backup, the script will collect some metrics from the run. By default, they're just written out as logs. For example:
-
-```
-docker_volume_backup
-host=my-demo-host
-size_compressed_bytes=219984
-containers_total=4
-containers_stopped=1
-time_wall=61.6939337253571
-time_total=1.69393372535706
-time_compress=0.171068429946899
-time_upload=0.56016993522644
-```
-
-If so configured, they can also be shipped to an InfluxDB instance. This allows you to set up monitoring and/or alerts for them. Here's a sample visualization on Grafana:
-
-![Backup dashboard sample](doc/backup-dashboard-sample.png)
-
-## Automatic backup rotation
-
-You probably don't want to keep all backups forever. A more common strategy is to hold onto a few recent ones, and remove older ones as they become irrelevant. There's no built-in support for this in `docker-volume-backup`, but you are able to trigger an external Docker container that includes [`rotate-backups`](https://pypi.org/project/rotate-backups/). In the examples, we draw on [docker-rotate-backups](https://github.com/jan-brinkmann/docker-rotate-backups).
-
-In order to start an external Docker container, access to `docker.sock` has to be granted (as already seen in in the section on [stopping containers while backing up](#stopping-containers-while-backing-up)). Then, `docker-rotate-backups` can be run on local directories as well as on remote directories.
-
-The default rotation scheme implemented in `docker-rotate-backups` preserves seven daily, four weekly, twelve monthly, and every yearly backups. For detailed information on customizing the rotation scheme, we refer to the [documentation](https://github.com/jan-brinkmann/docker-rotate-backups#how-to-customize).
-
-### Rotation for local backups
-
-Let `/home/pi/backups` be the path to your local backups. Then, initialize the environmental variable `POST_BACKUP_COMMAND` with the following command.
-```
-environment:
-  POST_BACKUP_COMMAND: "docker run --rm -e DRY_RUN=false -v /home/pi/backups:/archive ghcr.io/jan-brinkmann/docker-rotate-backups"
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock:ro
-  - /home/pi/backups:/archive
-```
-
-### Rotation for backups tranferred via SCP
-
-Here, let `/home/pi/backups` be the backup directory on a remote host. To run `docker-rotate-backups` on that directory, the command in `POST_BACKUP_COMMAND` has to include all necessary information in order to access the remote host by means of SSH. Remember, if you transfer your [backups by means of SCP](#backing-up-to-remote-host-by-means-of-scp), all information in `SSH_USER`, `SSH_HOST`, `SSH_ARCHIVE`, and the SSH public key are already available.
-```
-environment:
-  SCP_HOST: 192.168.0.42
-  SCP_USER: pi
-  SCP_DIRECTORY: /path/to/backups
-  POST_BACKUP_COMMAND: "docker run --rm -e DRY_RUN=false -e SSH_USER=pi -e SSH_HOST=192.168.0.42 -e SSH_ARCHIVE=/home/pi/backups -v /home/pi/.ssh/id_rsa:/root/.ssh/id_rsa:ro ghcr.io/jan-brinkmann/docker-rotate-backups"
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock:ro
-  - /home/pi/.ssh/id_rsa:/ssh/id_rsa:ro
-```
-
-### Rotation for S3 backups
-
-Amazon S3 has [Versioning](https://docs.aws.amazon.com/AmazonS3/latest/dev/Versioning.html) and [Object Lifecycle Management](https://docs.aws.amazon.com/AmazonS3/latest/dev/object-lifecycle-mgmt.html) features that can be useful for backups.
-
-First, you can enable versioning for your backup bucket:
-
-![S3 versioning](doc/s3-versioning.png)
-
-Then, you can change your backup filename to a static one, for example:
-
-```yml
-environment:
-  BACKUP_FILENAME: latest.tar.gz
-```
-
-This allows you to retain previous versions of the backup file, but the _most recent_ version is always available with the same filename:
-
-    $ aws s3 cp s3://my-backup-bucket/latest.tar.gz .
-    download: s3://my-backup-bucket/latest.tar.gz to ./latest.tar.gz
-
-To make sure your bucket doesn't continue to grow indefinitely, you can enable some lifecycle rules:
-
-![S3 lifecycle](doc/s3-lifecycle.png)
-
-These rules will:
-
-- Move non-latest backups to a cheaper, long-term storage class ([Glacier](https://aws.amazon.com/glacier/))
-- Permanently remove backups after a year
-- Still always keep the latest backup available (even after a year has passed)
-
 ## Testing
 
-A bunch of test cases exist under [`test`](test/). To run them:
+Los casos de prueba viven en [`test/`](test/):
 
-    cd test/backing-up-locally/
-    docker-compose stop && docker-compose rm -f && docker-compose build && docker-compose up
-
-Some cases may need secrets available in the environment, e.g. for S3 uploads to work.
+```bash
+cd test/backing-up-locally/
+docker-compose stop && docker-compose rm -f && docker-compose build && docker-compose up
+```
 
 ## Releasing
 
-The `Create Release` GitHub Actions workflow handles release tagging and image publication.
+El workflow **Create Release** en GitHub Actions maneja el tagging y publicación.
 
-Go to **Actions → Create Release → Run workflow** and choose the bump type. This workflow will:
+1. Ve a **Actions → Create Release → Run workflow**
+2. Elige el bump type (`patch`, `minor`, `major`)
+3. El workflow:
+   - Crea y push el Git tag
+   - Genera el changelog desde el tag anterior
+   - Crea el GitHub Release
+   - Construye imágenes multi-arch (`linux/amd64`, `linux/arm64`)
+   - Publica a GHCR con tags `latest`, `{version}`, `{major}.{minor}`, `{major}`
 
-- Create and push a Git tag
-- Generate a changelog from the previous tag
-- Create a GitHub Release with the changelog
-- Build multi-arch images (`linux/amd64`, `linux/arm64`)
-- Push the legacy backup runtime image to `ghcr.io/danielrondongarcia/docker-volume-backup`
-- Push the dedicated Control Plane image to `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
-- Push the dedicated Worker image to `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
+## Licencia
 
-Each published image receives the tags:
-
-- `latest`
-- `{version}` (e.g. `1.2.3`)
-- `{major}.{minor}` (e.g. `1.2`)
-- `{major}` (e.g. `1`)
-
-Legacy backup runtime image:
-
-- `ghcr.io/danielrondongarcia/docker-volume-backup`
-
-Dedicated Control Plane image:
-
-- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
-
-Dedicated Worker image:
-
-- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
+MIT
