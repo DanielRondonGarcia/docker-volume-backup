@@ -4,10 +4,14 @@ import tempfile
 import json
 from typing import Any, Dict, List
 
+import logging
+
 try:
     import docker
 except ModuleNotFoundError:
     docker = None
+
+logger = logging.getLogger(__name__)
 
 
 class DockerRuntimeAdapter:
@@ -19,6 +23,19 @@ class DockerRuntimeAdapter:
             self.client = docker.from_env()
         except Exception:
             self.client = None
+
+    def _pull_image(self, image: str) -> None:
+        if not self.client or not image:
+            return
+        if "/" not in image or "." not in image.split("/")[0]:
+            return
+        if ":" not in image and "@" not in image:
+            image = f"{image}:latest"
+        try:
+            self.client.images.pull(image)
+            logger.info("Pulled runtime image %s", image)
+        except Exception as exc:
+            logger.warning("Failed to pull runtime image %s: %s", image, exc)
 
     def collect_inventory(self) -> Dict[str, Any]:
         if self.client is None:
@@ -271,6 +288,7 @@ class DockerRuntimeAdapter:
                 }
 
         try:
+            self._pull_image(image)
             container = self.client.containers.run(
                 image=image,
                 command=command,
@@ -364,6 +382,7 @@ class DockerRuntimeAdapter:
                 environment["RCLONE_CONFIG"] = "/run/secrets/rclone.conf"
 
         try:
+            self._pull_image(image)
             container = self.client.containers.run(
                 image=image,
                 command=command,
