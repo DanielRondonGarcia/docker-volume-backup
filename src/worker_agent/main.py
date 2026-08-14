@@ -132,11 +132,20 @@ def _worker_tls_paths() -> tuple[str, str, str, str]:
 
 def build_service() -> WorkerAgentService:
     tls_dir, tls_ca_file, tls_cert_file, tls_key_file = _worker_tls_paths()
+    def _resolve_version():
+        wv = (os.environ.get("WORKER_VERSION") or "").strip()
+        av = (os.environ.get("APP_VERSION") or "").strip()
+        if wv and wv not in ("ghcr", "docker", "dev", "latest"):
+            return wv
+        if av and av not in ("dev", "latest"):
+            return av
+        return wv or av or "dev"
+
     config = WorkerAgentConfig(
         control_plane_url=os.environ.get("CONTROL_PLANE_URL", "http://127.0.0.1:8080"),
         name=os.environ.get("WORKER_NAME", socket.gethostname()),
         host_name=os.environ.get("WORKER_HOST_NAME", socket.gethostname()),
-        version=os.environ.get("WORKER_VERSION") or os.environ.get("APP_VERSION") or "dev",
+        version=_resolve_version(),
         worker_id=os.environ.get("WORKER_ID") or None,
         labels=_labels_from_env(),
         backup_runtime_image=os.environ.get(
