@@ -149,6 +149,24 @@
       return resp.json();
     }
 
+    async function withBtnLoading(btn, asyncFn, loadingText) {
+      if (!btn) return asyncFn();
+      if (btn.disabled) return;
+      const originalHTML = btn.innerHTML;
+      const originalDisabled = btn.disabled;
+      btn.disabled = true;
+      btn.innerHTML = `<span class="btn-spinner"></span> ${escapeHtml(loadingText || "Procesando...")}`;
+      try {
+        return await asyncFn();
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+        throw error;
+      } finally {
+        btn.disabled = originalDisabled;
+        btn.innerHTML = originalHTML;
+      }
+    }
+
     async function fetchWorkerInventory(workerId) {
       if (!workerId) return null;
       if (state.workerInventories[workerId]) return state.workerInventories[workerId];
@@ -500,21 +518,17 @@
         errorDiv.style.display = "block";
         return;
       }
-      saveBtn.disabled = true;
-      saveBtn.textContent = "Guardando...";
-      try {
+      await withBtnLoading(saveBtn, async () => {
         await apiPatch(`/api/v1/workers/${_editLabelsWorkerId}`, { labels });
         const resp = await apiGet("/api/v1/workers");
         state.workers = resp.items || [];
         closeEditWorkerLabelsModal();
         const content = document.getElementById("content");
         if (content && state.currentView === "workers") renderWorkers(content);
-      } catch (e) {
+      }, "Guardando...").catch((e) => {
         errorDiv.textContent = "Error: " + e.message;
         errorDiv.style.display = "block";
-        saveBtn.disabled = false;
-        saveBtn.textContent = "Guardar";
-      }
+      });
     }
 
     let workersPollTimer = null;
@@ -643,13 +657,14 @@
       const name = document.getElementById("awName").value.trim() || "worker";
       const host_name = document.getElementById("awHost").value.trim() || "unknown-host";
       const ttl_minutes = parseInt(document.getElementById("awTtl").value) || 60;
-      try {
+      const genBtn = document.getElementById("awGenerate");
+      await withBtnLoading(genBtn, async () => {
         const enrollment = await apiPost("/api/v1/admin/worker-enrollments", { name, host_name, ttl_minutes });
         addWorkerState.enrollment = enrollment;
         addWorkerState.tlsEnabled = true;
         addWorkerState.step = "commands";
         renderAddWorkerModal();
-      } catch (error) {
+      }, "Generando...").catch((error) => {
         if (error.message.includes("TLS manager")) {
           addWorkerState.enrollment = { name, host_name, worker_id: "—", token: null, expires_at: null, ca_certificate_pem: null };
           addWorkerState.tlsEnabled = false;
@@ -658,7 +673,7 @@
         } else {
           errorBox.textContent = `Error generando token: ${error.message}`;
         }
-      }
+      });
     }
 
     async function renderAddWorkerCommands() {
@@ -943,7 +958,7 @@ docker compose up -d
           const jobId = btn.dataset.job;
           const target = state.targets.find(t => t.id === id);
           if (!target) return;
-          if (action === "run") { await runBackupNow(id); }
+          if (action === "run") { await runBackupNow(id, e.currentTarget); }
           else if (action === "snapshots") { openSnapshotsModal(target); }
           else if (action === "logs") { openLogPanel(jobId, id); }
           else if (action === "edit") { openEditTargetModal(target); }
@@ -985,20 +1000,18 @@ docker compose up -d
       document.getElementById("tdelClose").addEventListener("click", close);
       document.getElementById("tdelCancel").addEventListener("click", close);
       overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-      document.getElementById("tdelConfirm").addEventListener("click", async () => {
-        try {
-          await apiDelete(`/api/v1/targets/${targetId}`);
-          await refreshAll();
-          close();
-        } catch (error) { alert(`Error eliminando target: ${error.message}`); }
-      });
+      document.getElementById("tdelConfirm").addEventListener("click", (e) => withBtnLoading(e.currentTarget, async () => {
+        await apiDelete(`/api/v1/targets/${targetId}`);
+        await refreshAll();
+        close();
+      }, "Eliminando...").catch(() => {}));
     }
 
-    async function runBackupNow(targetId) {
-      try {
+    async function runBackupNow(targetId, btn) {
+      await withBtnLoading(btn, async () => {
         const job = await apiPost(`/api/v1/targets/${targetId}/backup`, { requested_by: "ui" });
         openLogPanel(job.id, targetId);
-      } catch (error) { alert(`Error ejecutando backup: ${error.message}`); }
+      }, "Ejecutando...").catch(() => {});
     }
 
     let snapshotBrowserState = null;
@@ -1243,20 +1256,18 @@ docker compose up -d
       function backToSnapshots() { overlay.innerHTML = prevHtml; }
       document.getElementById("rsClose").addEventListener("click", backToSnapshots);
       document.getElementById("rsCancel").addEventListener("click", backToSnapshots);
-      document.getElementById("rsConfirm").addEventListener("click", async () => {
+      document.getElementById("rsConfirm").addEventListener("click", (e) => withBtnLoading(e.currentTarget, async () => {
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
         const stopContainers = document.getElementById("rsMode").value === "cold";
-        try {
-          const job = await apiPost(`/api/v1/targets/${target.id}/restore/run`, {
-            requested_by: "ui",
-            snapshot_id: snapshotId,
-            force_overwrite: forceOverwrite,
-            stop_containers: stopContainers,
-          });
-          close();
-          openLogPanel(job.id, target.id);
-        } catch (error) { alert(`Error restaurando: ${error.message}`); }
-      });
+        const job = await apiPost(`/api/v1/targets/${target.id}/restore/run`, {
+          requested_by: "ui",
+          snapshot_id: snapshotId,
+          force_overwrite: forceOverwrite,
+          stop_containers: stopContainers,
+        });
+        close();
+        openLogPanel(job.id, target.id);
+      }, "Restaurando...").catch(() => {}));
     }
 
     async function browseSnapshot(snapshotId, path) {
@@ -1546,7 +1557,7 @@ docker compose up -d
       overlay.addEventListener("click", (e) => { if (e.target === overlay) closeTargetModal(); });
       document.getElementById("editTargetForm").addEventListener("submit", async (e) => {
         e.preventDefault();
-        try {
+        await withBtnLoading(e.submitter, async () => {
           await apiPatch(`/api/v1/targets/${target.id}`, {
             name: document.getElementById("etName").value.trim(),
             backup_mode: document.getElementById("etBackupMode").value,
@@ -1561,7 +1572,7 @@ docker compose up -d
           });
           closeTargetModal();
           await refreshAll();
-        } catch (error) { alert(`Error actualizando target: ${error.message}`); }
+        }, "Guardando...").catch(() => {});
       });
       const etCronInput = document.getElementById("etCronExpression");
       if (etCronInput) {
@@ -1766,9 +1777,7 @@ docker compose up -d
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const submitBtn = document.getElementById("createTargetSubmitBtn");
-        const originalText = submitBtn ? submitBtn.textContent : "";
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<span class="btn-spinner"></span> Creando...'; }
-        try {
+        await withBtnLoading(submitBtn, async () => {
           const selectedVols = getSelectedVolumes();
           const backupStrategy = document.getElementById("targetBackupStrategy").value;
           const resticPasswordSecret = emptyToNull(document.getElementById("targetResticPasswordSecret")?.value || "");
@@ -1793,10 +1802,7 @@ docker compose up -d
             cron_expression: emptyToNull(document.getElementById("targetCronExpression").value),
           });
           await refreshAll();
-        } catch (error) { alert(`Error creando target: ${error.message}`); }
-        finally {
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = originalText; }
-        }
+        }, "Creando...").catch(() => {});
       });
       const workerSelect = document.getElementById("targetWorkerId");
       const projectSelect = document.getElementById("targetComposeProject");
@@ -2144,16 +2150,14 @@ docker compose up -d
           btn.addEventListener("click", () => toggleJobLogAccordion(btn.dataset.viewLogs, content));
         });
         content.querySelectorAll("[data-cancel-job]").forEach(btn => {
-          btn.addEventListener("click", async () => {
+          btn.addEventListener("click", () => withBtnLoading(btn, async () => {
             const jobId = btn.dataset.cancelJob;
             if (!confirm(`¿Cancelar el job ${jobId.slice(0,8)}?`)) return;
-            try {
-              await apiPost(`/api/v1/jobs/${jobId}/cancel`, {});
-              const jobsResp = await apiGet("/api/v1/jobs?include_logs=false");
-              state.jobs = jobsResp.items || [];
-              renderJobs(content);
-            } catch (e) { alert(`Error cancelando job: ${e.message}`); }
-          });
+            await apiPost(`/api/v1/jobs/${jobId}/cancel`, {});
+            const jobsResp = await apiGet("/api/v1/jobs?include_logs=false");
+            state.jobs = jobsResp.items || [];
+            renderJobs(content);
+          }, "Cancelando...").catch(() => {}));
         });
       }
 
@@ -2237,7 +2241,7 @@ docker compose up -d
             <td>${escapeHtml(s.backend_type)}</td>
             <td class="mono">${escapeHtml(JSON.stringify(s.environment || {}))}</td>
             <td class="mono">${escapeHtml(JSON.stringify(s.file_secret_refs || {}))}</td>
-            <td class="action-cell"><button class="btn ghost xs" onclick="editStorageProfile('${escapeHtml(s.id)}')">Editar</button> <button class="btn danger xs" onclick="deleteStorageProfile('${escapeHtml(s.id)}','${escapeHtml(s.name)}')">Eliminar</button></td>
+            <td class="action-cell"><button class="btn ghost xs" onclick="editStorageProfile('${escapeHtml(s.id)}')">Editar</button> <button class="btn danger xs" onclick="deleteStorageProfile('${escapeHtml(s.id)}','${escapeHtml(s.name)}', event)">Eliminar</button></td>
           </tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin storage profiles</td></tr>`}</tbody>
         </table></div></div>
       `;
@@ -2253,8 +2257,7 @@ docker compose up -d
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
           const submitBtn = document.getElementById("spSubmitBtn");
-          if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Creando..."; }
-          try {
+          await withBtnLoading(submitBtn, async () => {
             const bt = backendType.value;
             const envJson = parseJsonField("spEnvironment", "environment del storage profile");
             const fileSecretRefs = {};
@@ -2274,8 +2277,7 @@ docker compose up -d
             document.getElementById("spEnvironment").value = "{}";
             toggleRcloneRow();
             await refreshAll();
-          } catch (error) { alert(`Error creando storage profile: ${error.message}`); }
-          finally { if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Crear storage profile"; } }
+          }, "Creando...").catch(() => {});
         });
       }
     }
@@ -2323,8 +2325,7 @@ docker compose up -d
       document.getElementById("editStorageForm").addEventListener("submit", async (e) => {
         e.preventDefault();
         const submitBtn = document.getElementById("espSubmitBtn");
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Guardando..."; }
-        try {
+        await withBtnLoading(submitBtn, async () => {
           const bt = espBackend.value;
           const envJson = (() => { try { return JSON.parse(document.getElementById("espEnvironment").value || "{}"); } catch (_) { return profile.environment || {}; } })();
           const fileSecretRefs = {};
@@ -2340,17 +2341,17 @@ docker compose up -d
           });
           overlay.classList.remove("open");
           await refreshAll();
-        } catch (error) { alert(`Error editando storage profile: ${error.message}`); }
-        finally { if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Guardar cambios"; } }
+        }, "Guardando...").catch(() => {});
       });
     }
 
-    async function deleteStorageProfile(profileId, profileName) {
+    async function deleteStorageProfile(profileId, profileName, ev) {
       if (!confirm(`¿Eliminar el storage profile "${profileName}"?`)) return;
-      try {
+      const btn = ev ? ev.currentTarget : null;
+      await withBtnLoading(btn, async () => {
         await apiDelete(`/api/v1/storage-profiles/${profileId}`);
         await refreshAll();
-      } catch (error) { alert(`Error eliminando storage profile: ${error.message}`); }
+      }, "Eliminando...").catch(() => {});
     }
 
     function renderRetention(content) {
@@ -2378,7 +2379,7 @@ docker compose up -d
       if (form) {
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
-          try {
+          await withBtnLoading(e.submitter, async () => {
             await apiPost("/api/v1/retention-policies", {
               name: document.getElementById("rpName").value.trim(),
               keep_last: parseInt(document.getElementById("rpKeepLast").value) || 0,
@@ -2387,7 +2388,7 @@ docker compose up -d
               keep_monthly: parseInt(document.getElementById("rpKeepMonthly").value) || 0,
             });
             await refreshAll();
-          } catch (error) { alert(`Error creando politica: ${error.message}`); }
+          }, "Creando...").catch(() => {});
         });
       }
     }
@@ -2455,7 +2456,7 @@ docker compose up -d
       if (form) {
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
-          try {
+          await withBtnLoading(e.submitter, async () => {
             const uiType = document.getElementById("secType").value;
             const backendType = uiType === "rclone" ? "file" : uiType;
             await apiPost("/api/v1/secrets", {
@@ -2466,7 +2467,7 @@ docker compose up -d
             await refreshAll();
             document.getElementById("secName").value = "";
             document.getElementById("secPlaintext").value = "";
-          } catch (error) { alert(`Error creando secreto: ${error.message}`); }
+          }, "Creando...").catch(() => {});
         });
       }
 
@@ -2551,7 +2552,7 @@ docker compose up -d
           }
         });
 
-        document.getElementById("secEditSave").addEventListener("click", async () => {
+        document.getElementById("secEditSave").addEventListener("click", async (e) => {
           if (!editingSecretId) return;
           const newName = document.getElementById("secEditName").value.trim();
           const patch = { name: newName };
@@ -2560,11 +2561,11 @@ docker compose up -d
             if (!plaintext) { alert("Debes ingresar el nuevo valor del secreto"); return; }
             patch.plaintext = plaintext;
           }
-          try {
+          await withBtnLoading(e.currentTarget, async () => {
             await apiPatch(`/api/v1/secrets/${editingSecretId}`, patch);
             await refreshAll();
             closeSecretEditModal();
-          } catch (error) { alert(`Error actualizando secreto: ${error.message}`); }
+          }, "Guardando...").catch(() => {});
         });
       }
 
@@ -2615,13 +2616,13 @@ docker compose up -d
           deleteConfirm.disabled = true;
         }
 
-        deleteConfirm.addEventListener("click", async () => {
+        deleteConfirm.addEventListener("click", async (e) => {
           if (!deletingSecretId || deleteConfirm.disabled) return;
-          try {
+          await withBtnLoading(e.currentTarget, async () => {
             await apiDelete(`/api/v1/secrets/${deletingSecretId}`);
             await refreshAll();
             closeSecretDeleteModal();
-          } catch (error) { alert(`Error eliminando secreto: ${error.message}`); }
+          }, "Eliminando...").catch(() => {});
         });
       }
     }
@@ -2650,14 +2651,14 @@ docker compose up -d
       if (form) {
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
-          try {
+          await withBtnLoading(e.submitter, async () => {
             await apiPost("/api/v1/admin/users", {
               username: document.getElementById("usrName").value.trim(),
               password: document.getElementById("usrPassword").value,
               role: document.getElementById("usrRole").value,
             });
             await refreshAll();
-          } catch (error) { alert(`Error creando usuario: ${error.message}`); }
+          }, "Creando...").catch(() => {});
         });
       }
     }
@@ -2817,7 +2818,7 @@ docker compose up -d
           document.getElementById("settingsRepoBase").focus();
           return;
         }
-        try {
+        await withBtnLoading(e.submitter, async () => {
           await apiPatch("/api/v1/settings", {
             restic_repository_base: repoBase,
             restic_password_secret_id: passwordSecret,
@@ -2827,9 +2828,9 @@ docker compose up -d
           });
           await refreshAll();
           showFeedback("Guardado exitosamente.", "success");
-        } catch (error) {
+        }, "Guardando...").catch((error) => {
           showFeedback(`Error guardando configuracion: ${error.message}`, "error");
-        }
+        });
       });
     }
 
