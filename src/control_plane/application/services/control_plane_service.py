@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import re
@@ -1022,19 +1023,23 @@ class ControlPlaneService:
     def list_workers(self) -> List[WorkerRecord]:
         return self.worker_repository.list()
 
-    def list_jobs(self, limit: Optional[int] = None, offset: int = 0, include_logs: bool = False, include_payload: bool = False) -> List[JobRecord]:
+    def list_jobs(self, limit: Optional[int] = None, offset: int = 0, include_logs: bool = False, include_payload: bool = False) -> tuple:
         jobs = self.job_repository.list()
         total = len(jobs)
+        result = []
         for j in jobs:
-            if not include_logs:
-                j.log_lines = []
-            if not include_payload:
-                j.payload = {}
+            if not include_logs or not include_payload:
+                j = copy.copy(j)
+                if not include_logs:
+                    j.log_lines = []
+                if not include_payload:
+                    j.payload = {}
+            result.append(j)
         if limit is not None and limit > 0:
-            return jobs[offset:offset + limit], total
+            return result[offset:offset + limit], total
         if offset > 0:
-            return jobs[offset:], total
-        return jobs, total
+            return result[offset:], total
+        return result, total
 
     def cancel_job(self, job_id: str) -> JobRecord:
         job = self.job_repository.get(job_id)

@@ -1617,7 +1617,6 @@ docker compose up -d
       `;
       panel.classList.add("active");
       document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
-      if (existingJob) renderJobLogs(existingJob);
       pollJobLogs(jobId);
     }
 
@@ -1886,7 +1885,6 @@ docker compose up -d
       accordionContentEl = contentDiv;
       const closeBtn = document.getElementById("logAccordionClose");
       if (closeBtn) closeBtn.addEventListener("click", closeJobLogAccordion);
-      if (existingJob) renderJobLogsInto(existingJob, contentDiv.querySelector("#logContainer"));
       pollAccordionJobLogs(jobId);
       accordionRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
@@ -1905,7 +1903,7 @@ docker compose up -d
 
     function pollAccordionJobLogs(jobId) {
       if (accordionLogTimer) clearInterval(accordionLogTimer);
-      accordionLogTimer = setInterval(async () => {
+      const fetchJobLogs = async () => {
         try {
           const job = await apiGet("/api/v1/jobs/" + jobId);
           const updates = (state.jobs || []).map(j => j.id === job.id ? job : j);
@@ -1915,11 +1913,12 @@ docker compose up -d
           const pill = accordionContentEl ? accordionContentEl.querySelector(".job-status-pill") : null;
           if (pill) { pill.className = "job-status-pill " + job.status; pill.textContent = job.status; }
           if (["succeeded", "failed", "cancelled"].includes(job.status)) {
-            clearInterval(accordionLogTimer);
-            accordionLogTimer = null;
+            if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
           }
         } catch (e) {}
-      }, 3000);
+      };
+      fetchJobLogs();
+      accordionLogTimer = setInterval(fetchJobLogs, 3000);
     }
 
     function renderJobLogsInto(job, container) {
