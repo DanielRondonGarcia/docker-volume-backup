@@ -826,6 +826,7 @@ docker compose up -d
     }
 
     let targetModalState = { mode: "create", target: null, volumeProject: null, isEditing: false };
+    let targetsTableState = { sortKey: "name", sortDir: "asc", page: 1, pageSize: 25, filters: { name: "", worker: "", compose: "", mode: "", retention: "", cron: "" } };
 
     function renderTargets(content) {
       const workerOptions = state.workers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
@@ -868,47 +869,11 @@ docker compose up -d
           </form>
         </div></details>
         <div class="page-header"><div><h2>Targets configurados</h2></div></div>
-        <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Worker</th><th>Compose project</th><th>Modo</th><th>Volumenes</th><th>Retencion</th><th>Cron</th><th class="col-toggle">Activo</th><th class="col-actions">Acciones</th></tr></thead>
-          <tbody>${state.targets.length ? state.targets.map(t => {
-            const worker = state.workers.find(w => w.id === t.worker_id);
-            const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
-            const lastJob = getLastJobForTarget(t.id);
-            const cronLabel = t.cron_expression ? `<code class="mono" style="font-size:11px;">${escapeHtml(t.cron_expression)}</code>` : '<span style="color:var(--muted-foreground);">manual</span>';
-            return `<tr>
-              <td>${escapeHtml(t.name)}</td>
-              <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
-              <td class="mono">${escapeHtml(t.compose_project || "—")}</td>
-              <td>${escapeHtml(t.backup_mode)}</td>
-              <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
-              <td>${escapeHtml(retention ? retention.name : "—")}</td>
-              <td>${cronLabel}</td>
-              <td class="toggle-cell">
-                <label class="switch" title="${t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target"}">
-                  <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" ${t.enabled ? "checked" : ""} />
-                  <span class="slider"></span>
-                </label>
-                <span class="toggle-label ${t.enabled ? "on" : ""}">${t.enabled ? "Si" : "No"}</span>
-              </td>
-              <td class="action-cell">
-                <div class="dropdown">
-                  <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
-                  <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
-                    <button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar backup</button>
-                    ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
-                    ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
-                    <button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
-                    <div class="dropdown-divider"></div>
-                    <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>
-                  </div>
-                </div>
-              </td>
-            </tr>`;
-          }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets configurados</td></tr>`}</tbody>
-        </table></div></div>
+        <div id="targetsTableContainer"></div>
         <div id="targetLogPanel"></div>
       `;
       bindTargetForm();
+      renderTargetsTable();
       bindTargetActions();
       if (currentLogJobId) {
         const target = state.targets.find(t => {
@@ -917,6 +882,197 @@ docker compose up -d
         });
         reopenLogPanel(currentLogJobId, target ? target.id : null);
       }
+    }
+
+    function getFilteredTargets() {
+      const f = targetsTableState.filters;
+      return (state.targets || []).filter(t => {
+        const worker = state.workers.find(w => w.id === t.worker_id);
+        const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
+        const wName = worker ? worker.name : (t.worker_id || "");
+        const rName = retention ? retention.name : "";
+        const cron = t.cron_expression || "manual";
+        if (f.name && !(t.name || "").toLowerCase().includes(f.name.toLowerCase())) return false;
+        if (f.worker && !wName.toLowerCase().includes(f.worker.toLowerCase())) return false;
+        if (f.compose && !(t.compose_project || "").toLowerCase().includes(f.compose.toLowerCase())) return false;
+        if (f.mode && !(t.backup_mode || "").toLowerCase().includes(f.mode.toLowerCase())) return false;
+        if (f.retention && !rName.toLowerCase().includes(f.retention.toLowerCase())) return false;
+        if (f.cron && !cron.toLowerCase().includes(f.cron.toLowerCase())) return false;
+        return true;
+      });
+    }
+
+    function sortTargets(list) {
+      const dir = targetsTableState.sortDir === "asc" ? 1 : -1;
+      const key = targetsTableState.sortKey;
+      return list.sort((a, b) => {
+        let va = "", vb = "";
+        if (key === "name") { va = a.name || ""; vb = b.name || ""; }
+        else if (key === "worker") {
+          const wa = state.workers.find(w => w.id === a.worker_id);
+          const wb = state.workers.find(w => w.id === b.worker_id);
+          va = wa ? wa.name : (a.worker_id || ""); vb = wb ? wb.name : (b.worker_id || "");
+        }
+        else if (key === "compose") { va = a.compose_project || ""; vb = b.compose_project || ""; }
+        else if (key === "mode") { va = a.backup_mode || ""; vb = b.backup_mode || ""; }
+        else if (key === "retention") {
+          const ra = state.retentionPolicies.find(r => r.id === a.retention_policy_id);
+          const rb = state.retentionPolicies.find(r => r.id === b.retention_policy_id);
+          va = ra ? ra.name : ""; vb = rb ? rb.name : "";
+        }
+        else if (key === "cron") { va = a.cron_expression || "manual"; vb = b.cron_expression || "manual"; }
+        return va.localeCompare(vb) * dir;
+      });
+    }
+
+    function renderTargetsTable() {
+      const container = document.getElementById("targetsTableContainer");
+      if (!container) return;
+      const sortIcon = (key) => {
+        if (targetsTableState.sortKey !== key) return " ↕";
+        return targetsTableState.sortDir === "asc" ? " ↑" : " ↓";
+      };
+      const sortAttrs = (key) => `data-tsort="${key}" style="cursor:pointer; user-select:none;"`;
+      const f = targetsTableState.filters;
+      container.innerHTML = `
+        <div class="table-wrap"><div class="sheet"><table class="table datatable">
+          <thead>
+            <tr>
+              <th ${sortAttrs("name")}>Nombre${sortIcon("name")}</th>
+              <th ${sortAttrs("worker")}>Worker${sortIcon("worker")}</th>
+              <th ${sortAttrs("compose")}>Compose project${sortIcon("compose")}</th>
+              <th ${sortAttrs("mode")}>Modo${sortIcon("mode")}</th>
+              <th>Volumenes</th>
+              <th ${sortAttrs("retention")}>Retencion${sortIcon("retention")}</th>
+              <th ${sortAttrs("cron")}>Cron${sortIcon("cron")}</th>
+              <th class="col-toggle">Activo</th>
+              <th class="col-actions">Acciones</th>
+            </tr>
+            <tr class="filter-row">
+              <th><input type="text" class="dt-filter" data-col="name" placeholder="Filtrar nombre..." value="${escapeHtml(f.name)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="worker" placeholder="Filtrar worker..." value="${escapeHtml(f.worker)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="compose" placeholder="Filtrar compose..." value="${escapeHtml(f.compose)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="mode" placeholder="Filtrar modo..." value="${escapeHtml(f.mode)}" /></th>
+              <th></th>
+              <th><input type="text" class="dt-filter" data-col="retention" placeholder="Filtrar..." value="${escapeHtml(f.retention)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="cron" placeholder="Filtrar..." value="${escapeHtml(f.cron)}" /></th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="targetsTbody"></tbody>
+        </table></div></div>
+        <div class="pagination">
+          <div class="pagination-info"></div>
+          <div class="pagination-controls"></div>
+          <div class="pagination-size">
+            <label>Por pagina:
+              <select id="targetsPageSize">
+                <option value="10" ${targetsTableState.pageSize === 10 ? "selected" : ""}>10</option>
+                <option value="25" ${targetsTableState.pageSize === 25 ? "selected" : ""}>25</option>
+                <option value="50" ${targetsTableState.pageSize === 50 ? "selected" : ""}>50</option>
+                <option value="100" ${targetsTableState.pageSize === 100 ? "selected" : ""}>100</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      `;
+      container.querySelectorAll("[data-tsort]").forEach(th => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.tsort;
+          if (targetsTableState.sortKey === key) {
+            targetsTableState.sortDir = targetsTableState.sortDir === "asc" ? "desc" : "asc";
+          } else {
+            targetsTableState.sortKey = key;
+            targetsTableState.sortDir = "asc";
+          }
+          renderTargetsTableBody();
+          container.querySelectorAll("[data-tsort]").forEach(t2 => {
+            const k2 = t2.dataset.tsort;
+            t2.innerHTML = `${k2 === "name" ? "Nombre" : k2 === "worker" ? "Worker" : k2 === "compose" ? "Compose project" : k2 === "mode" ? "Modo" : k2 === "retention" ? "Retencion" : "Cron"}${sortIcon(k2)}`;
+          });
+        });
+      });
+      container.querySelectorAll(".dt-filter").forEach(input => {
+        input.addEventListener("input", () => {
+          targetsTableState.filters[input.dataset.col] = input.value;
+          targetsTableState.page = 1;
+          renderTargetsTableBody();
+        });
+      });
+      const pageSizeSelect = document.getElementById("targetsPageSize");
+      if (pageSizeSelect) {
+        pageSizeSelect.addEventListener("change", () => {
+          targetsTableState.pageSize = parseInt(pageSizeSelect.value, 10);
+          targetsTableState.page = 1;
+          renderTargetsTableBody();
+        });
+      }
+      renderTargetsTableBody();
+    }
+
+    function renderTargetsTableBody() {
+      const tbody = document.getElementById("targetsTbody");
+      if (!tbody) return;
+      const filtered = sortTargets(getFilteredTargets());
+      const total = filtered.length;
+      const pageSize = targetsTableState.pageSize;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      if (targetsTableState.page > totalPages) targetsTableState.page = totalPages;
+      if (targetsTableState.page < 1) targetsTableState.page = 1;
+      const startIdx = (targetsTableState.page - 1) * pageSize;
+      const paged = filtered.slice(startIdx, startIdx + pageSize);
+      tbody.innerHTML = paged.length ? paged.map(t => {
+        const worker = state.workers.find(w => w.id === t.worker_id);
+        const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
+        const lastJob = getLastJobForTarget(t.id);
+        const cronLabel = t.cron_expression ? `<code class="mono" style="font-size:11px;">${escapeHtml(t.cron_expression)}</code>` : '<span style="color:var(--muted-foreground);">manual</span>';
+        return `<tr>
+          <td>${escapeHtml(t.name)}</td>
+          <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
+          <td class="mono">${escapeHtml(t.compose_project || "—")}</td>
+          <td>${escapeHtml(t.backup_mode)}</td>
+          <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
+          <td>${escapeHtml(retention ? retention.name : "—")}</td>
+          <td>${cronLabel}</td>
+          <td class="toggle-cell">
+            <label class="switch" title="${t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target"}">
+              <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" ${t.enabled ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+            <span class="toggle-label ${t.enabled ? "on" : ""}">${t.enabled ? "Si" : "No"}</span>
+          </td>
+          <td class="action-cell">
+            <div class="dropdown">
+              <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
+              <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
+                <button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar backup</button>
+                ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
+                <button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
+                <div class="dropdown-divider"></div>
+                <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>
+              </div>
+            </div>
+          </td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets que coincidan con los filtros</td></tr>`;
+      const infoEl = document.querySelector("#targetsTableContainer .pagination-info");
+      if (infoEl) infoEl.textContent = total === 0 ? "Sin resultados" : `${startIdx + 1}-${Math.min(startIdx + pageSize, total)} de ${total}`;
+      const controlsEl = document.querySelector("#targetsTableContainer .pagination-controls");
+      if (controlsEl) {
+        const cur = targetsTableState.page;
+        controlsEl.innerHTML = totalPages <= 1 ? "" : Array.from({length: totalPages}, (_, i) => i + 1).map(p =>
+          `<button class="btn ghost xs ${p === cur ? "active" : ""}" data-tpage="${p}">${p}</button>`
+        ).join("");
+        controlsEl.querySelectorAll("[data-tpage]").forEach(btn => {
+          btn.addEventListener("click", () => {
+            targetsTableState.page = parseInt(btn.dataset.tpage, 10);
+            renderTargetsTableBody();
+          });
+        });
+      }
+      bindTargetActions();
     }
 
     function renderVolumeTargetsCell(target) {

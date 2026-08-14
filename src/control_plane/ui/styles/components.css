@@ -329,10 +329,11 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .sub-section > summary { padding: 8px 12px; background: var(--muted); cursor: pointer; font-size: 12px; font-weight: 500; color: var(--muted-foreground); user-select: none; }
 .sub-section > summary:hover { background: var(--accent); }
 
-.action-cell { white-space: nowrap; vertical-align: middle; }
-.action-cell .btn { margin: 2px 2px 0 0; }
 .toggle-cell { white-space: nowrap; vertical-align: middle; }
-.toggle-cell .switch { vertical-align: middle; margin-bottom: 4px; }
+.toggle-cell .switch { display: inline-flex; align-items: center; vertical-align: middle; margin-bottom: 4px; }
+.action-cell { white-space: nowrap; vertical-align: middle; }
+.action-cell .dropdown { display: flex; justify-content: center; }
+.action-cell .btn { margin: 2px 2px 0 0; }
 .col-toggle { width: 80px; }
 .btn.xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
 .btn.danger { color: #dc2626; border-color: #fecaca; }
