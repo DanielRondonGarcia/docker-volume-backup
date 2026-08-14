@@ -880,7 +880,7 @@ docker compose up -d
               <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
               <td class="mono">${escapeHtml(t.compose_project || "—")}</td>
               <td>${escapeHtml(t.backup_mode)}</td>
-              <td class="mono">${escapeHtml((t.volume_targets || []).join(", ") || "—")}</td>
+              <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
               <td>${escapeHtml(retention ? retention.name : "—")}</td>
               <td>${cronLabel}</td>
               <td class="toggle-cell">
@@ -917,6 +917,24 @@ docker compose up -d
         });
         reopenLogPanel(currentLogJobId, target ? target.id : null);
       }
+    }
+
+    function renderVolumeTargetsCell(target) {
+      const paths = target.volume_targets || [];
+      if (!paths.length) return '<span style="color:var(--muted-foreground);">— (todos)</span>';
+      const runtimeVols = target.runtime_volumes || {};
+      const items = paths.map(p => {
+        const entry = Object.entries(runtimeVols).find(([_, v]) => v && v.bind === p);
+        const volName = entry ? entry[0] : null;
+        return { path: p, name: volName };
+      });
+      const maxVisible = 2;
+      if (items.length <= maxVisible) {
+        return items.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("");
+      }
+      const visible = items.slice(0, maxVisible);
+      const hidden = items.slice(maxVisible);
+      return `${visible.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("")}<details class="vol-more"><summary>+${hidden.length} mas</summary>${hidden.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("")}</details>`;
     }
 
     function getLastJobForTarget(targetId) {
