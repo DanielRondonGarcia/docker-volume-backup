@@ -251,9 +251,6 @@ class ControlPlaneService:
             derived = self._derive_volumes_from_worker_inventory(worker_id, compose_project)
             if client_volume_targets:
                 client_volume_set = set(client_volume_targets)
-                for bind_path in derived["volume_targets"]:
-                    if bind_path not in client_volume_set and bind_path not in client_volume_targets:
-                        client_volume_targets.append(bind_path)
                 for vol_name, vol_info in derived["runtime_volumes"].items():
                     if vol_info.get("bind") in client_volume_set:
                         client_runtime_volumes.setdefault(vol_name, vol_info)
