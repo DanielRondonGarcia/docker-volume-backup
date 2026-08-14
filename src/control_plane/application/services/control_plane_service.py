@@ -425,8 +425,14 @@ class ControlPlaneService:
             trigger="manual",
         )
         result = self._wait_for_job_completion(job.id, timeout_seconds=60)
-        entries = []
+        job_status = result.get("status")
         logs = result.get("logs", "") or ""
+        if job_status == "failed" or job_status == "cancelled":
+            error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
+            return {"entries": [], "job_id": job.id, "error": f"restic ls failed: {error_msg}"}
+        if job_status == "timeout":
+            return {"entries": [], "job_id": job.id, "error": "restic ls timed out (60s)"}
+        entries = []
         try:
             parsed = json.loads(logs)
             entries = parsed if isinstance(parsed, list) else [parsed]
@@ -1230,7 +1236,10 @@ class ControlPlaneService:
         snapshots: List[SnapshotRecord] = []
         for item in raw_snapshots:
             timestamp = item.get("time") or item.get("timestamp") or utcnow().isoformat()
-            created_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(tzinfo=None)
+            try:
+                created_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                created_at = utcnow().replace(tzinfo=None)
             snapshots.append(
                 SnapshotRecord(
                     target_id=target_id,

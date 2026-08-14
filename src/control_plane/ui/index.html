@@ -1454,6 +1454,10 @@ docker compose up -d
           snapshot_id: snapshotId,
           path: path,
         });
+        if (result.error) {
+          content.innerHTML = `<div style="padding:20px; color:var(--destructive);"><strong>Error:</strong> ${escapeHtml(result.error)}</div>`;
+          return;
+        }
         snapshotBrowserState.entries = result.entries || [];
         renderSnapshotBrowser(content, snapshotId, path, result.entries || []);
       } catch (error) {
