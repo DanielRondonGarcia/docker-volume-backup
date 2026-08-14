@@ -848,7 +848,7 @@ docker compose up -d
                 <div class="field full"><label for="targetRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="targetRestoreDefaults" placeholder="{}">{"layout":"auto"}</textarea></div>
               </div>
             </details>
-            <div class="btn-row"><button type="submit" class="btn primary sm" ${state.workers.length ? "" : "disabled"}>Crear target</button></div>
+            <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${state.workers.length ? "" : "disabled"}>Crear target</button></div>
             <div class="helper">${state.workers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "Primero registra al menos un worker."}</div>
           </form>
         </div></details>
@@ -1765,6 +1765,9 @@ docker compose up -d
       if (!form) return;
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
+        const submitBtn = document.getElementById("createTargetSubmitBtn");
+        const originalText = submitBtn ? submitBtn.textContent : "";
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<span class="btn-spinner"></span> Creando...'; }
         try {
           const selectedVols = getSelectedVolumes();
           const backupStrategy = document.getElementById("targetBackupStrategy").value;
@@ -1791,6 +1794,9 @@ docker compose up -d
           });
           await refreshAll();
         } catch (error) { alert(`Error creando target: ${error.message}`); }
+        finally {
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = originalText; }
+        }
       });
       const workerSelect = document.getElementById("targetWorkerId");
       const projectSelect = document.getElementById("targetComposeProject");
@@ -2143,7 +2149,7 @@ docker compose up -d
             if (!confirm(`¿Cancelar el job ${jobId.slice(0,8)}?`)) return;
             try {
               await apiPost(`/api/v1/jobs/${jobId}/cancel`, {});
-              const jobsResp = await apiGet("/api/v1/jobs");
+              const jobsResp = await apiGet("/api/v1/jobs?include_logs=false");
               state.jobs = jobsResp.items || [];
               renderJobs(content);
             } catch (e) { alert(`Error cancelando job: ${e.message}`); }
@@ -2164,7 +2170,7 @@ docker compose up -d
       const tick = async () => {
         if (!jobsPolling) return;
         try {
-          const jobsResp = await apiGet("/api/v1/jobs");
+          const jobsResp = await apiGet("/api/v1/jobs?include_logs=false");
           const newJobs = jobsResp.items || [];
           const oldIds = new Set((state.jobs || []).map(j => j.id));
           const hasNew = newJobs.some(j => !oldIds.has(j.id));
@@ -2835,7 +2841,7 @@ docker compose up -d
         const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings] = await Promise.all([
           apiGet("/api/v1/workers"),
           apiGet("/api/v1/targets"),
-          apiGet("/api/v1/jobs"),
+          apiGet("/api/v1/jobs?include_logs=false"),
           apiGet("/api/v1/storage-profiles"),
           apiGet("/api/v1/retention-policies"),
           apiGet("/api/v1/secrets").catch(() => ({ items: [] })),

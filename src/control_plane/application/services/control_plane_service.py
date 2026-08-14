@@ -1022,8 +1022,16 @@ class ControlPlaneService:
     def list_workers(self) -> List[WorkerRecord]:
         return self.worker_repository.list()
 
-    def list_jobs(self) -> List[JobRecord]:
-        return self.job_repository.list()
+    def list_jobs(self, limit: Optional[int] = None, offset: int = 0, include_logs: bool = True) -> List[JobRecord]:
+        jobs = self.job_repository.list()
+        if not include_logs:
+            for j in jobs:
+                j.log_lines = []
+        if limit is not None and limit > 0:
+            return jobs[offset:offset + limit]
+        if offset > 0:
+            return jobs[offset:]
+        return jobs
 
     def cancel_job(self, job_id: str) -> JobRecord:
         job = self.job_repository.get(job_id)

@@ -270,7 +270,22 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/jobs":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
-                return self._write_json(200, {"items": _to_jsonable(self._control_plane_service().list_jobs())}, head_only=head_only)
+                parsed = urlparse(self.path)
+                from urllib.parse import parse_qs
+                qs = parse_qs(parsed.query)
+                limit_str = qs.get("limit", [None])[0]
+                offset_str = qs.get("offset", ["0"])[0]
+                include_logs_str = qs.get("include_logs", ["true"])[0]
+                try:
+                    limit = int(limit_str) if limit_str else None
+                    offset = int(offset_str) if offset_str else 0
+                except ValueError:
+                    limit, offset = None, 0
+                include_logs = include_logs_str.lower() not in ("false", "0", "no")
+                all_jobs = self._control_plane_service().list_jobs()
+                total = len(all_jobs)
+                jobs = self._control_plane_service().list_jobs(limit=limit, offset=offset, include_logs=include_logs)
+                return self._write_json(200, {"items": _to_jsonable(jobs), "total": total, "limit": limit, "offset": offset}, head_only=head_only)
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
