@@ -1715,7 +1715,7 @@ docker compose up -d
             </div>
             <div class="stack-toggle">${isExpanded ? "▾" : "▸"}</div>
           </div>
-          <div class="volume-group-body" style="${isExpanded ? "" : "display:none"}">
+          <div class="volume-group-body${isExpanded ? "" : " collapsed"}">
             ${volumes.map(v => {
               const volName = Object.keys(runtimeVols).find(k => runtimeVols[k].bind === v) || "";
               const isSelected = volumeSelectionState.stacks[stackKey][v];

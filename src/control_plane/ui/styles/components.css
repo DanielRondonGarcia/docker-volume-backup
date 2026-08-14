@@ -270,19 +270,28 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .volume-group-header .stack-name { font-size: 12px; font-weight: 600; color: var(--foreground); }
 .volume-group-header .stack-meta { font-size: 11px; color: var(--muted-foreground); }
 .volume-group-header .stack-toggle { font-size: 10px; color: var(--muted-foreground); }
-.volume-group-body { display: flex; flex-direction: column; }
+.volume-group-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  padding: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.volume-group-body.collapsed { display: none; }
 .volume-card {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  transition: background-color .12s ease;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: background-color .12s ease, border-color .12s ease;
+  background: var(--card);
 }
-.volume-card:last-child { border-bottom: none; }
-.volume-card:hover { background: var(--accent); }
-.volume-card.selected { background: rgba(59, 130, 246, 0.12); border-left: 3px solid var(--primary); padding-left: 9px; }
+.volume-card:hover { background: var(--accent); border-color: var(--primary); }
+.volume-card.selected { background: rgba(59, 130, 246, 0.12); border-color: var(--primary); }
 .volume-card .vol-icon {
   width: 28px; height: 28px;
   border-radius: 6px;
