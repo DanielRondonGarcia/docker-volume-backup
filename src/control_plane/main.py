@@ -773,6 +773,12 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     name=body.get("name"),
                 )
                 return self._write_json(200, _secret_to_public(secret))
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "workers"]:
+                worker = self._control_plane_service().update_worker(
+                    worker_id=parts[3],
+                    labels=body.get("labels"),
+                )
+                return self._write_json(200, _to_jsonable(worker))
             if len(parts) == 4 and parts[:3] == ["api", "v1", "storage-profiles"]:
                 profile = self._control_plane_service().update_storage_profile(
                     profile_id=parts[3],

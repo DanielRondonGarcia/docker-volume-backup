@@ -424,19 +424,97 @@
         if (isOutdated(wv)) return `<span class="version-badge outdated" title="Desactualizado: ultima version es v${escapeHtml(latest)}">${ICONS.warn || "⚠"} v${escapeHtml(cur)}</span>`;
         return `<span class="version-badge current" title="Actualizado">✓ v${escapeHtml(cur)}</span>`;
       };
+      const labelsCell = (w) => {
+        const labels = w.labels || {};
+        const keys = Object.keys(labels);
+        if (keys.length === 0) return `<span class="mono muted">—</span>`;
+        return keys.map(k => `<span class="label-chip" title="${escapeHtml(k)}=${escapeHtml(labels[k])}">${escapeHtml(k)}: ${escapeHtml(labels[k])}</span>`).join(" ");
+      };
       content.innerHTML = `
         <div class="page-header">
           <div><h2>Workers</h2><div class="subtitle">Agentes registrados en el Control Plane</div></div>
           ${canEnroll ? `<button class="btn primary sm" id="addWorkerBtn">+ Agregar worker</button>` : ""}
         </div>
         <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th></tr></thead>
-          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td>${versionCell(w.version)}</td><td class="mono">${escapeHtml(w.labels ? JSON.stringify(w.labels) : "—")}</td><td class="mono">${fmtDate(w.last_seen_at)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+          <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th>${canEnroll ? "<th>Acciones</th>" : ""}</tr></thead>
+          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td>${versionCell(w.version)}</td><td>${labelsCell(w)}</td><td class="mono">${fmtDate(w.last_seen_at)}</td>${canEnroll ? `<td class="action-cell"><button class="btn ghost xs" data-edit-labels="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Editar labels</button></td>` : ""}</tr>`).join("") : `<tr><td colspan="${canEnroll ? 7 : 6}" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
         </table></div></div>
       `;
       const addBtn = document.getElementById("addWorkerBtn");
       if (addBtn) addBtn.addEventListener("click", openAddWorkerModal);
+      content.querySelectorAll("[data-edit-labels]").forEach(btn => {
+        btn.addEventListener("click", () => openEditWorkerLabelsModal(btn.dataset.editLabels, btn.dataset.workerName));
+      });
       startWorkersPolling();
+    }
+
+    let _editLabelsWorkerId = null;
+
+    function openEditWorkerLabelsModal(workerId, workerName) {
+      const worker = (state.workers || []).find(w => w.id === workerId);
+      const labels = worker && worker.labels ? worker.labels : {};
+      _editLabelsWorkerId = workerId;
+      const labelsJson = Object.keys(labels).length > 0 ? JSON.stringify(labels, null, 2) : "{\n  \n}";
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      overlay.innerHTML = `
+        <div class="modal" style="max-width: 520px;">
+          <div class="modal-header"><h3>Editar labels — ${escapeHtml(workerName)}</h3><button class="close" id="closeEditLabelsBtn">&times;</button></div>
+          <div class="modal-body">
+            <div class="helper">Labels del worker en formato JSON (clave: valor). Estas labels se usan para filtrar y agrupar workers.</div>
+            <textarea id="editLabelsTextarea" class="input mono" rows="8" spellcheck="false" style="font-size:13px;resize:vertical;">${escapeHtml(labelsJson)}</textarea>
+            <div id="editLabelsError" class="form-error" style="display:none;"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn" id="cancelEditLabelsBtn">Cancelar</button>
+            <button class="btn primary" id="saveEditLabelsBtn">Guardar</button>
+          </div>
+        </div>
+      `;
+      overlay.classList.add("open");
+      document.getElementById("closeEditLabelsBtn").addEventListener("click", closeEditWorkerLabelsModal);
+      document.getElementById("cancelEditLabelsBtn").addEventListener("click", closeEditWorkerLabelsModal);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) closeEditWorkerLabelsModal(); });
+      document.getElementById("saveEditLabelsBtn").addEventListener("click", saveEditWorkerLabels);
+    }
+
+    function closeEditWorkerLabelsModal() {
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) { overlay.classList.remove("open"); overlay.innerHTML = ""; }
+      _editLabelsWorkerId = null;
+    }
+
+    async function saveEditWorkerLabels() {
+      if (!_editLabelsWorkerId) return;
+      const textarea = document.getElementById("editLabelsTextarea");
+      const errorDiv = document.getElementById("editLabelsError");
+      const saveBtn = document.getElementById("saveEditLabelsBtn");
+      let labels;
+      try {
+        labels = JSON.parse(textarea.value);
+        if (typeof labels !== "object" || labels === null || Array.isArray(labels)) {
+          throw new Error("Debe ser un objeto JSON");
+        }
+      } catch (e) {
+        errorDiv.textContent = "JSON invalido: " + e.message;
+        errorDiv.style.display = "block";
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Guardando...";
+      try {
+        await apiPatch(`/api/v1/workers/${_editLabelsWorkerId}`, { labels });
+        const resp = await apiGet("/api/v1/workers");
+        state.workers = resp.items || [];
+        closeEditWorkerLabelsModal();
+        const content = document.getElementById("content");
+        if (content && state.currentView === "workers") renderWorkers(content);
+      } catch (e) {
+        errorDiv.textContent = "Error: " + e.message;
+        errorDiv.style.display = "block";
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Guardar";
+      }
     }
 
     let workersPollTimer = null;

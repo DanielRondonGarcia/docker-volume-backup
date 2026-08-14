@@ -118,6 +118,13 @@ class ControlPlaneService:
             worker.labels.update(labels)
         return self.worker_repository.save(worker)
 
+    def update_worker(self, worker_id: str, labels: Optional[Dict[str, str]] = None) -> WorkerRecord:
+        worker = self._require_worker(worker_id)
+        if labels is not None:
+            worker.labels = labels
+        worker.updated_at = utcnow()
+        return self.worker_repository.save(worker)
+
     def get_worker(self, worker_id: str) -> WorkerRecord:
         return self._require_worker(worker_id)
 
