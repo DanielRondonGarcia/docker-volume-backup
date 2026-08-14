@@ -154,6 +154,18 @@ class DockerRuntimeAdapter:
         "/etc/hosts",
         "/etc/resolv.conf",
         "/etc/mtab",
+        "/rootfs",
+        "/host/proc",
+        "/host/sys",
+        "/host/dev",
+        "/host/rootfs",
+    }
+
+    _IGNORED_BIND_SOURCES = {
+        "/",
+        "/proc",
+        "/sys",
+        "/dev",
     }
 
     @staticmethod
@@ -164,6 +176,15 @@ class DockerRuntimeAdapter:
         if normalized.startswith("/proc/") or normalized.startswith("/sys/") or normalized.startswith("/dev/"):
             return True
         if normalized.endswith(".sock") or normalized.endswith(".socket"):
+            return True
+        return False
+
+    @staticmethod
+    def _is_ignored_bind_source(source: str) -> bool:
+        normalized = source.rstrip("/")
+        if normalized in DockerRuntimeAdapter._IGNORED_BIND_SOURCES:
+            return True
+        if normalized.startswith("/proc/") or normalized.startswith("/sys/") or normalized.startswith("/dev/"):
             return True
         return False
 
@@ -182,6 +203,8 @@ class DockerRuntimeAdapter:
         else:
             source = mount.get("Source")
         if not source:
+            return None
+        if mount_type == "bind" and DockerRuntimeAdapter._is_ignored_bind_source(source):
             return None
         mode = "rw" if mount.get("RW", False) else "ro"
         return {
