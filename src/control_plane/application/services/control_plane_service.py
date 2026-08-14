@@ -1022,20 +1022,19 @@ class ControlPlaneService:
     def list_workers(self) -> List[WorkerRecord]:
         return self.worker_repository.list()
 
-    def list_jobs(self, limit: Optional[int] = None, offset: int = 0, include_logs: bool = True, slim: bool = False) -> List[JobRecord]:
+    def list_jobs(self, limit: Optional[int] = None, offset: int = 0, include_logs: bool = False, include_payload: bool = False) -> List[JobRecord]:
         jobs = self.job_repository.list()
-        if not include_logs:
-            for j in jobs:
+        total = len(jobs)
+        for j in jobs:
+            if not include_logs:
                 j.log_lines = []
-        if slim:
-            for j in jobs:
+            if not include_payload:
                 j.payload = {}
-                j.log_lines = []
         if limit is not None and limit > 0:
-            return jobs[offset:offset + limit]
+            return jobs[offset:offset + limit], total
         if offset > 0:
-            return jobs[offset:]
-        return jobs
+            return jobs[offset:], total
+        return jobs, total
 
     def cancel_job(self, job_id: str) -> JobRecord:
         job = self.job_repository.get(job_id)
