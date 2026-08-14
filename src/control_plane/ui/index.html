@@ -874,7 +874,6 @@ docker compose up -d
       `;
       bindTargetForm();
       renderTargetsTable();
-      bindTargetActions();
       if (currentLogJobId) {
         const target = state.targets.find(t => {
           const jobs = (state.jobs || []).filter(j => j.id === currentLogJobId);
@@ -1101,7 +1100,7 @@ docker compose up -d
     }
 
     function bindTargetActions() {
-      const container = document.querySelector(".table-wrap");
+      const container = document.querySelector("#targetsTableContainer .table-wrap") || document.querySelector(".table-wrap");
       if (!container) return;
       container.querySelectorAll(".dropdown-trigger").forEach(btn => {
         btn.addEventListener("click", (e) => {
