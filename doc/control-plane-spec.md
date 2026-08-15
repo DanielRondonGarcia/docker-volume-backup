@@ -150,16 +150,17 @@ En despliegues pequeños, `cp-api`, `cp-ui` y `cp-scheduler` pueden convivir en 
 - acceso local a `docker.sock`
 - jobs efímeros de backup/restore usando la imagen del proyecto
 
-## Modelo de confianza
+## Modelo de confianza (release mayor sin migración)
 
 ### Regla principal
 
-El canal de control debe ser seguro incluso si la red subyacente no es de confianza.
+El canal puede usar HTTP en redes privadas de confianza; HTTP no es confidencial.
 
 ### Reglas
 
-- El worker debe autenticarse ante el CP mediante certificado cliente.
-- El CP debe autenticarse ante el worker mediante certificado servidor.
+- El worker debe autenticarse ante el CP con HMAC-SHA256 y secreto por worker.
+- Cada solicitud lleva worker-ID, versión, timestamp, nonce y firma del método,
+  ruta, query y hash del body; el CP no usa certificados de cliente.
 - Cada orden crítica debe llevar:
   - identificador único,
   - timestamp,
@@ -191,34 +192,31 @@ Al bootstrap del Control Plane:
    - `worker_enrollment_token`,
    - `worker_id`,
    - TTL corto,
-   - huella del CP,
+   - URL y CA del servidor solo si se usa HTTPS,
    - parámetros mínimos de conexión.
 3. El operador arranca el worker con ese token.
-4. El worker abre un canal TLS hacia el CP.
+4. El worker usa HTTP local o HTTPS server-only hacia el CP.
 5. El worker presenta su token de enrolamiento.
 6. El CP valida el token y responde con un desafío.
-7. El worker genera una keypair local.
-8. El worker envía CSR.
-9. El CP firma el certificado cliente y devuelve:
-   - certificado del worker,
-   - cadena de confianza,
-   - política base,
-   - intervalo de rotación.
-10. El worker invalida el token inicial.
+7. El worker conserva el secreto en un archivo local protegido.
+8. El worker completa el enrolamiento HMAC una sola vez.
+9. El CP activa la credencial y sus metadatos de versión.
 
 ### Implementación inicial aterrizada
 
 La primera iteración implementa este flujo de forma pragmática:
 
-- el CP genera y persiste una CA local `self-signed`,
-- el admin crea `worker_enrollments` de un solo uso con `worker_id` preasignado,
+- el HTTPS opcional genera y persiste certificados del servidor,
+- el admin crea un enrolamiento HMAC de un solo uso con `worker_id` preasignado,
 - el token se persiste en hash, no en claro,
-- el PEM de la CA se entrega al worker por canal administrativo fuera de banda,
-- el worker genera su keypair local, envía CSR a `POST /api/v1/worker-enrollments/sign` y recibe su certificado firmado,
-- el CP persiste la huella del certificado cliente en el `WorkerRecord`,
-- cuando `CONTROL_PLANE_WORKER_MTLS_REQUIRED=true`, las rutas operativas del worker aceptan solo el certificado cuya huella coincide con ese `worker_id`.
+- el secreto HMAC se entrega al worker por un gestor de secretos fuera de banda,
+- el CP conserva solo el digest y el worker persiste la credencial con permisos mínimos,
+- mTLS, certificados de cliente, CSR, fingerprints y registro abierto no están soportados.
 
-La fase inicial no introduce todavía un desafío adicional separado entre token y CSR; el token de un solo uso y el canal TLS ya validado cubren el bootstrap básico.
+Los adaptadores históricos de `worker_enrollments` pueden existir en una base descartada,
+pero no están conectados al servicio HMAC, no se leen ni se migran.
+
+El token HMAC es de un solo uso; no existe fallback de certificado ni bearer.
 
 ### Material derivado
 
@@ -245,7 +243,7 @@ El `salt` debe persistirse como dato de configuración del worker o del enrolami
 - `host_name`
 - `docker_endpoint_mode`
 - `last_seen_at`
-- `certificate_serial`
+- `credential_version`
 - `labels`
 
 #### Host Inventory
@@ -377,11 +375,10 @@ Catálogo local de metadatos conocidos para acelerar UI.
 
 #### Workers
 
-- `POST /api/v1/workers/enrollments`
-- `POST /api/v1/workers/register`
+- `POST /api/v1/admin/worker-enrollments`
 - `GET /api/v1/workers`
 - `GET /api/v1/workers/{workerId}`
-- `POST /api/v1/workers/{workerId}/rotate-certificate`
+- `POST /api/v1/admin/workers/{workerId}/rotate`
 - `POST /api/v1/workers/{workerId}/disable`
 
 #### Inventory
@@ -457,7 +454,7 @@ Esto evita requerir conectividad entrante al worker.
 - `command fetch`
 - `job status update`
 - `log streaming`
-- `certificate rotation`
+- `credential rotation`
 
 ### Comandos lógicos mínimos
 
@@ -547,7 +544,7 @@ La plataforma nueva actúa como orquestador y el runtime actual sigue siendo el 
 - credenciales de nube
 - `rclone.conf`
 - SSH keys para SCP
-- certificados mTLS
+- secretos HMAC de workers
 - basic auth local
 - secretos de sesión interna
 

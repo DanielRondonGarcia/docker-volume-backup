@@ -586,70 +586,34 @@
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       if (addWorkerState.step === "form") {
-        let tlsEnabled = false;
-        try {
-          const resp = await fetch("/api/v1/config/public");
-          if (resp.ok) {
-            const cfg = await resp.json();
-            tlsEnabled = cfg.tls_enabled === true;
-          }
-        } catch (_) {}
-        if (tlsEnabled) {
-          overlay.innerHTML = `
-            <div class="modal">
-              <div class="modal-header"><h3>Agregar worker (mTLS)</h3><button class="close" id="modalClose">&times;</button></div>
-              <div class="modal-body">
-                <div class="helper">El Control Plane tiene TLS habilitado. Genera un token de enrolamiento para registrar un nuevo worker. El token se usa una sola vez y expira automaticamente.</div>
-                <div class="field-row">
-                  <div class="field"><label for="awName">Nombre del worker</label><input id="awName" placeholder="worker-prod-01" value="worker" /></div>
-                  <div class="field"><label for="awHost">Host</label><input id="awHost" placeholder="srv-prod-01" value="unknown-host" /></div>
-                  <div class="field"><label for="awTtl">TTL (minutos)</label><input id="awTtl" type="number" value="60" /></div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn primary sm" id="awGenerate">Generar token</button>
-                  <button class="btn ghost sm" id="awCancel">Cancelar</button>
-                </div>
-                <div class="alert" id="awError"></div>
+        overlay.innerHTML = `
+          <div class="modal">
+            <div class="modal-header"><h3>Agregar worker con HMAC</h3><button class="close" id="modalClose" aria-label="Cerrar">&times;</button></div>
+            <div class="modal-body">
+              <div class="alert warning" role="alert"><strong>Bootstrap desde cero.</strong> No hay migracion ni registro abierto. Genera un secreto HMAC de un solo uso y provisiona una credencial nueva.</div><div class="helper">El secreto no se muestra: usa el boton de copia, guardalo en un gestor de secretos y entregalo al worker solo durante el primer arranque.</div>
+              <div class="field-row">
+                <div class="field"><label for="awName">Nombre del worker</label><input id="awName" name="worker_name" autocomplete="off" placeholder="worker-prod-01" value="worker" /></div>
+                <div class="field"><label for="awHost">Host</label><input id="awHost" name="worker_host" autocomplete="off" placeholder="srv-prod-01" value="unknown-host" /></div>
+                <div class="field"><label for="awTtl">TTL (minutos)</label><input id="awTtl" name="enrollment_ttl" type="number" min="1" value="60" /></div>
               </div>
-            </div>
-          `;
-          document.getElementById("modalClose").addEventListener("click", closeAddWorkerModal);
-          document.getElementById("awCancel").addEventListener("click", closeAddWorkerModal);
-          overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAddWorkerModal(); });
-          document.getElementById("awGenerate").addEventListener("click", generateEnrollment);
-        } else {
-          overlay.innerHTML = `
-            <div class="modal">
-              <div class="modal-header"><h3>Agregar worker</h3><button class="close" id="modalClose">&times;</button></div>
-              <div class="modal-body">
-                <div class="helper">El worker se registrara automaticamente al arrancar con el nombre y host que definas aqui. No se requiere token ni TLS.</div>
-                <div class="field-row">
-                  <div class="field"><label for="awName">Nombre del worker</label><input id="awName" placeholder="worker-prod-01" value="worker" /></div>
-                  <div class="field"><label for="awHost">Host</label><input id="awHost" placeholder="srv-prod-01" value="unknown-host" /></div>
-                </div>
-                <div class="btn-row">
-                  <button class="btn primary sm" id="awGenerate">Generar comandos</button>
-                  <button class="btn ghost sm" id="awCancel">Cancelar</button>
-                </div>
+              <div class="btn-row">
+                <button class="btn primary sm" id="awGenerate">Generar credencial</button>
+                <button class="btn ghost sm" id="awCancel">Cancelar</button>
               </div>
+              <div class="alert" id="awError" role="alert" aria-live="polite"></div>
             </div>
-          `;
-          document.getElementById("modalClose").addEventListener("click", closeAddWorkerModal);
-          document.getElementById("awCancel").addEventListener("click", closeAddWorkerModal);
-          overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAddWorkerModal(); });
-          document.getElementById("awGenerate").addEventListener("click", () => {
-            const name = document.getElementById("awName").value.trim() || "worker";
-            const host_name = document.getElementById("awHost").value.trim() || "unknown-host";
-            addWorkerState.enrollment = { name, host_name, worker_id: null, token: null, expires_at: null, ca_certificate_pem: null };
-            addWorkerState.tlsEnabled = false;
-            addWorkerState.step = "commands";
-            renderAddWorkerModal();
-          });
-        }
+          </div>
+        `;
+        document.getElementById("modalClose").addEventListener("click", closeAddWorkerModal);
+        document.getElementById("awCancel").addEventListener("click", closeAddWorkerModal);
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAddWorkerModal(); });
+        document.getElementById("awGenerate").addEventListener("click", generateEnrollment);
       } else if (addWorkerState.step === "commands") {
         renderAddWorkerCommands();
       }
     }
+
+    function createEnrollmentSecret() { return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
 
     async function generateEnrollment() {
       const errorBox = document.getElementById("awError");
@@ -659,20 +623,13 @@
       const ttl_minutes = parseInt(document.getElementById("awTtl").value) || 60;
       const genBtn = document.getElementById("awGenerate");
       await withBtnLoading(genBtn, async () => {
-        const enrollment = await apiPost("/api/v1/admin/worker-enrollments", { name, host_name, ttl_minutes });
-        addWorkerState.enrollment = enrollment;
-        addWorkerState.tlsEnabled = true;
+        const secret = createEnrollmentSecret();
+        const enrollment = await apiPost("/api/v1/admin/worker-enrollments", { name, host_name, ttl_minutes, secret });
+        addWorkerState.enrollment = { ...enrollment, name, host_name, secret };
         addWorkerState.step = "commands";
         renderAddWorkerModal();
       }, "Generando...").catch((error) => {
-        if (error.message.includes("TLS manager")) {
-          addWorkerState.enrollment = { name, host_name, worker_id: "—", token: null, expires_at: null, ca_certificate_pem: null };
-          addWorkerState.tlsEnabled = false;
-          addWorkerState.step = "commands";
-          renderAddWorkerModal();
-        } else {
-          errorBox.textContent = `Error generando token: ${error.message}`;
-        }
+        errorBox.textContent = `Error generando credencial: ${error.message}`;
       });
     }
 
@@ -681,7 +638,6 @@
       if (!overlay) return;
       const e = addWorkerState.enrollment;
       if (!e) return;
-      const tlsEnabled = addWorkerState.tlsEnabled !== false;
       let cpUrl = "";
       try {
         const resp = await fetch("/api/v1/config/public");
@@ -696,34 +652,10 @@
         const cpProto = window.location.protocol || "http:";
         cpUrl = `${cpProto}//${cpHost}${cpPort ? ":" + cpPort : ""}`;
       }
-      const token = e.token || "";
       const workerId = e.worker_id || "";
-      const caPem = (e.ca_certificate_pem || "").replace(/\n/g, "\\n");
       const wName = e.name || "worker";
       const wHost = e.host_name || "unknown-host";
-
-      const enrollEnv = tlsEnabled ? `
-      WORKER_ENROLLMENT_TOKEN: ${token}
-      WORKER_ENROLLMENT_CA_PEM: "${caPem}"
-      WORKER_TLS_DIR: /data/tls
-      WORKER_TLS_CA_FILE: /data/tls/ca.pem
-      WORKER_TLS_CERT_FILE: /data/tls/cert.pem
-      WORKER_TLS_KEY_FILE: /data/tls/key.pem` : "";
-
-      const enrollRunEnv = tlsEnabled ? ` \\
-  -e WORKER_ENROLLMENT_TOKEN="${token}" \\
-  -e WORKER_ENROLLMENT_CA_PEM="${caPem}" \\
-  -e WORKER_TLS_DIR="/data/tls" \\
-  -e WORKER_TLS_CA_FILE="/data/tls/ca.pem" \\
-  -e WORKER_TLS_CERT_FILE="/data/tls/cert.pem" \\
-  -e WORKER_TLS_KEY_FILE="/data/tls/key.pem"` : "";
-
-      const enrollVol = tlsEnabled ? `
-      - worker_tls:/data/tls` : "";
-      const enrollVolRun = tlsEnabled ? ` -v ${wName}-tls:/data/tls` : "";
-      const enrollVolName = tlsEnabled ? `
-volumes:
-  worker_tls:` : "";
+      const tokenEnv = "${WORKER_ENROLLMENT_TOKEN:?set-before-start}";
 
       const composeYml = `services:
   worker:
@@ -736,44 +668,34 @@ volumes:
       WORKER_VERSION: ghcr
       WORKER_RUN_ONCE: "false"
       WORKER_POLL_INTERVAL_SECONDS: "15"
-      WORKER_HEALTH_PORT: "8081"${enrollEnv}
+      WORKER_ENROLLMENT_TOKEN: "${tokenEnv}"
+      WORKER_CREDENTIAL_FILE: /data/worker_credentials.json
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock${enrollVol}
+      - /var/run/docker.sock:/var/run/docker.sock
+      - worker_state:/data
     healthcheck:
       test: ["CMD","curl","-fsS","http://127.0.0.1:8081/healthz"]
       interval: 15s
       timeout: 5s
-      retries: 5${enrollVolName}`;
+      retries: 5
 
-      const dockerRun = `docker run -d --name ${wName} \\
-  --restart unless-stopped \\
-  -v /var/run/docker.sock:/var/run/docker.sock${enrollVolRun} \\
-  -e CONTROL_PLANE_URL="${cpUrl}" \\
-  -e WORKER_NAME="${wName}" \\
-  -e WORKER_HOST_NAME="${wHost}" \\
-  -e WORKER_VERSION="ghcr" \\
-  -e WORKER_RUN_ONCE="false" \\
-  -e WORKER_POLL_INTERVAL_SECONDS="15" \\
-  -e WORKER_HEALTH_PORT="8081"${enrollRunEnv} \\
-  ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest`;
+volumes:
+  worker_state:`;
 
       const composeCmd = `# Guarda este archivo como docker-compose.yml y ejecuta:
 docker compose up -d
 
-# El worker se auto-registrara al arrancar.`;
-
-      const tlsNote = tlsEnabled
-        ? `<div class="card compact"><div class="eyebrow">Worker ID</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(workerId)}</div><div class="meta">Token expira: ${escapeHtml(fmtDate(e.expires_at))}</div></div>`
-        : "";
+# El worker usa HMAC y guarda la credencial en /data.`;
 
       overlay.innerHTML = `
         <div class="modal">
           <div class="modal-header">
             <h3>Comandos para desplegar el worker</h3>
-            <button class="close" id="modalClose">&times;</button>
+            <button class="close" id="modalClose" aria-label="Cerrar">&times;</button>
           </div>
           <div class="modal-body">
-            ${tlsNote}
+            <div class="alert warning" role="alert"><strong>HTTP no es confidencial.</strong> En redes privadas locales es el valor por defecto. HMAC autentica las solicitudes del worker, pero no cifra el trafico ni autentica las respuestas del Control Plane; usa HTTPS para redes remotas o confidenciales.</div>
+            <div class="card compact"><div class="eyebrow">Credencial HMAC lista</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">Worker ID: ${escapeHtml(workerId)}</div><div class="meta">Expira: ${escapeHtml(fmtDate(e.expires_at))}. El secreto no se muestra ni se incluye en los comandos.</div><button class="btn ghost sm" id="copyEnrollmentSecret">Copiar secreto de enrolamiento</button><div class="support">Guardalo en un gestor de secretos y elimina WORKER_ENROLLMENT_TOKEN después del primer arranque; conserva el archivo 0600.</div></div>
             <div class="card compact">
               <div class="eyebrow">URL del Control Plane en los comandos</div>
               <div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(cpUrl)}</div>
@@ -781,14 +703,13 @@ docker compose up -d
             </div>
             <div class="tabs">
               <button class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
-              <button class="tab ${addWorkerState.activeTab === "run" ? "active" : ""}" data-tab="run">docker run</button>
             </div>
             <div id="tabContent"></div>
             <div class="btn-row">
               <button class="btn primary sm" id="awDone">Listo</button>
               <button class="btn ghost sm" id="awBack">Volver</button>
             </div>
-            <div class="helper">${tlsEnabled ? "El token se usa una sola vez al arrancar el worker. Si necesitas re-enrolar, genera uno nuevo." : ""}</div>
+            <div class="helper">El secreto de enrolamiento se usa una sola vez. Si necesitas re-enrolar, genera una credencial nueva.</div>
           </div>
         </div>
       `;
@@ -797,6 +718,9 @@ docker compose up -d
       document.getElementById("awBack").addEventListener("click", () => { addWorkerState.step = "form"; renderAddWorkerModal(); });
       overlay.addEventListener("click", (e2) => { if (e2.target === overlay) closeAddWorkerModal(); });
 
+      const copySecretBtn = document.getElementById("copyEnrollmentSecret");
+      if (copySecretBtn) copySecretBtn.addEventListener("click", () => navigator.clipboard?.writeText(e.secret).then(() => copySecretBtn.textContent = "Secreto copiado").catch(() => {}));
+
       const tabs = overlay.querySelectorAll(".tab");
       tabs.forEach(tab => tab.addEventListener("click", () => {
         addWorkerState.activeTab = tab.dataset.tab;
@@ -804,10 +728,7 @@ docker compose up -d
       }));
 
       const tabContent = document.getElementById("tabContent");
-      let code = "";
-      let label = "";
-      if (addWorkerState.activeTab === "compose") { code = composeYml; label = "docker-compose.yml"; }
-      else if (addWorkerState.activeTab === "run") { code = dockerRun; label = "docker run"; }
+       const code = composeYml;
       tabContent.innerHTML = `
         <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>
       `;
@@ -1838,7 +1759,11 @@ docker compose up -d
       const container = document.getElementById("logContainer");
       if (!container) return;
       const lines = job.log_lines || [];
-      if (!lines.length) { container.innerHTML = `<div class="log-line info">Esperando logs del worker...</div>`; return; }
+      if (!lines.length) {
+        const terminal = ["succeeded", "failed", "canceled", "cancelled"].includes(job.status);
+        container.innerHTML = `<div class="log-line info">${terminal ? "Sin logs disponibles para esta ejecución." : "Esperando logs del worker..."}</div>`;
+        return;
+      }
       container.innerHTML = lines.map(line => {
         const lower = line.toLowerCase();
         let cls = "info";
@@ -3018,7 +2943,7 @@ docker compose up -d
         const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings] = await Promise.all([
           apiGet("/api/v1/workers"),
           apiGet("/api/v1/targets"),
-          apiGet("/api/v1/jobs"),
+          apiGet(currentLogJobId ? "/api/v1/jobs?include_logs=true" : "/api/v1/jobs"),
           apiGet("/api/v1/storage-profiles"),
           apiGet("/api/v1/retention-policies"),
           apiGet("/api/v1/secrets").catch(() => ({ items: [] })),

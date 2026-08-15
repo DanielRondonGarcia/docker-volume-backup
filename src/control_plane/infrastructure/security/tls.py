@@ -57,70 +57,12 @@ class TLSMaterialManager:
     def get_ca_certificate_path(self) -> str:
         return str(self.ca_cert_path)
 
-    def get_server_certificate_fingerprint(self) -> str:
-        certificate = x509.load_pem_x509_certificate(self.server_cert_path.read_bytes())
-        return certificate.fingerprint(hashes.SHA256()).hex()
-
-    def build_server_ssl_context(self, require_client_cert: bool) -> ssl.SSLContext:
+    def build_server_ssl_context(self) -> ssl.SSLContext:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=str(self.server_cert_path), keyfile=str(self.server_key_path))
         context.load_verify_locations(cafile=str(self.ca_cert_path))
-        context.verify_mode = ssl.CERT_OPTIONAL if require_client_cert else ssl.CERT_NONE
+        context.verify_mode = ssl.CERT_NONE
         return context
-
-    def sign_worker_csr(self, csr_pem: str, worker_id: str, name: str, host_name: str, validity_days: int = 365) -> dict:
-        ca_key = serialization.load_pem_private_key(self.ca_key_path.read_bytes(), password=None)
-        ca_cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
-        csr = x509.load_pem_x509_csr(csr_pem.encode("utf-8"))
-        sans = self._worker_sans(worker_id=worker_id, name=name, host_name=host_name)
-        now = _utcnow()
-        ca_subject_key = ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
-        certificate = (
-            x509.CertificateBuilder()
-            .subject_name(csr.subject if len(csr.subject) else self._worker_subject(worker_id, name, host_name))
-            .issuer_name(ca_cert.subject)
-            .public_key(csr.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now - timedelta(minutes=5))
-            .not_valid_after(now + timedelta(days=validity_days))
-            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-            .add_extension(x509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
-            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_subject_key), critical=False)
-            .add_extension(
-                x509.KeyUsage(
-                    digital_signature=True,
-                    content_commitment=False,
-                    key_encipherment=True,
-                    data_encipherment=False,
-                    key_agreement=False,
-                    key_cert_sign=False,
-                    crl_sign=False,
-                    encipher_only=False,
-                    decipher_only=False,
-                ),
-                critical=True,
-            )
-            .add_extension(
-                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
-                critical=False,
-            )
-            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
-            .sign(private_key=ca_key, algorithm=hashes.SHA256())
-        )
-        cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode("utf-8")
-        return {
-            "certificate_pem": cert_pem,
-            "ca_certificate_pem": self.get_ca_certificate_pem(),
-            "certificate_fingerprint": certificate.fingerprint(hashes.SHA256()).hex(),
-        }
-
-    @staticmethod
-    def fingerprint_from_peer_certificate(peer_certificate_der: bytes | None) -> str | None:
-        if not peer_certificate_der:
-            return None
-        _require_cryptography()
-        certificate = x509.load_der_x509_certificate(peer_certificate_der)
-        return certificate.fingerprint(hashes.SHA256()).hex()
 
     @classmethod
     def from_runtime(cls, base_dir: str, server_hostnames: Iterable[str]):
@@ -237,24 +179,3 @@ class TLSMaterialManager:
             )
         )
         self.server_cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-
-    @staticmethod
-    def _worker_subject(worker_id: str, name: str, host_name: str) -> x509.Name:
-        return x509.Name(
-            [
-                x509.NameAttribute(NameOID.COMMON_NAME, worker_id),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "docker-volume-backup-worker"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, name or host_name or worker_id),
-            ]
-        )
-
-    @staticmethod
-    def _worker_sans(worker_id: str, name: str, host_name: str):
-        names = _normalize_hostnames([worker_id, name, host_name])
-        sans = []
-        for value in names:
-            try:
-                sans.append(x509.IPAddress(ipaddress.ip_address(value)))
-            except ValueError:
-                sans.append(x509.DNSName(value))
-        return sans

@@ -1,5 +1,4 @@
 import threading
-import time
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -8,47 +7,64 @@ from src.control_plane.application.services.control_plane_service import Control
 logger = logging.getLogger(__name__)
 
 
-def _parse_cron_field(expr: str, min_val: int, max_val: int) -> set:
-    result = set()
-    for part in expr.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        step = 1
+def _parse_cron_field(expr: str, min_val: int, max_val: int) -> set[int]:
+    result: set[int] = set()
+    for raw_part in expr.split(","):
+        part = raw_part.strip()
+        if not part or part.count("/") > 1:
+            raise ValueError("invalid cron field")
         if "/" in part:
-            base, step_str = part.split("/", 1)
-            step = int(step_str)
+            base, step_text = part.split("/", 1)
+            step = int(step_text)
+            if step <= 0:
+                raise ValueError("cron step must be positive")
         else:
-            base = part
+            base, step = part, 1
+
         if base == "*":
             lo, hi = min_val, max_val
-        elif "-" in base:
-            lo_str, hi_str = base.split("-", 1)
-            lo, hi = int(lo_str), int(hi_str)
+        elif base.count("-") == 1:
+            lo_text, hi_text = base.split("-", 1)
+            lo, hi = int(lo_text), int(hi_text)
         else:
-            lo = hi = int(base)
-        for v in range(lo, hi + 1, step):
-            result.add(v)
+            lo = int(base)
+            hi = max_val if "/" in part else lo
+        if lo < min_val or hi > max_val or lo > hi:
+            raise ValueError("cron field value out of range")
+        result.update(range(lo, hi + 1, step))
+
+    if not result:
+        raise ValueError("empty cron field")
     return result
 
 
 def cron_matches(expr: str, dt: datetime) -> bool:
-    fields = expr.split()
-    if len(fields) != 5:
+    if not isinstance(expr, str):
         return False
-    minute = _parse_cron_field(fields[0], 0, 59)
-    hour = _parse_cron_field(fields[1], 0, 23)
-    dom = _parse_cron_field(fields[2], 1, 31)
-    month = _parse_cron_field(fields[3], 1, 12)
-    dow = _parse_cron_field(fields[4], 0, 6)
-    cron_dow = {d % 7 for d in dow}
-    return (
-        dt.minute in minute
-        and dt.hour in hour
-        and dt.day in dom
-        and dt.month in month
-        and dt.weekday() in cron_dow
-    )
+    try:
+        fields = expr.split()
+        if len(fields) != 5:
+            return False
+        minute = _parse_cron_field(fields[0], 0, 59)
+        hour = _parse_cron_field(fields[1], 0, 23)
+        dom = _parse_cron_field(fields[2], 1, 31)
+        month = _parse_cron_field(fields[3], 1, 12)
+        cron_dow = {day % 7 for day in _parse_cron_field(fields[4], 0, 7)}
+        dom_matches = dt.day in dom
+        dow_matches = ((dt.weekday() + 1) % 7) in cron_dow
+        dom_unrestricted = dom == set(range(1, 32))
+        dow_unrestricted = cron_dow == set(range(0, 7))
+        if not dom_unrestricted and not dow_unrestricted:
+            day_matches = dom_matches or dow_matches
+        elif not dom_unrestricted:
+            day_matches = dom_matches
+        elif not dow_unrestricted:
+            day_matches = dow_matches
+        else:
+            day_matches = True
+        return dt.minute in minute and dt.hour in hour and dt.month in month and day_matches
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
 
 
 class SchedulerService:
@@ -97,6 +113,10 @@ class SchedulerService:
                 if cron_matches(cron, now):
                     last = self._last_check.get(target.id)
                     if last and (now - last) < timedelta(minutes=1):
+                        continue
+                    if self._service.has_active_backup_for_target(target.id):
+                        logger.info("Skipping scheduled backup for target %s: backup already pending or active", target.id)
+                        self._last_check[target.id] = now
                         continue
                     self._last_check[target.id] = now
                     source = "target cron" if target.cron_expression else "global cron"

@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from src.app.domain.models import BackupConfig, RestoreCandidate, RestoreConfig
@@ -9,22 +10,44 @@ from src.app.application.ports.ports import StoragePort
 
 logger = logging.getLogger(__name__)
 
+class StorageUploadError(RuntimeError):
+    def __init__(self, failures: list[str], successes: list[str]):
+        self.failures = failures
+        self.successes = successes
+        details = "; ".join(failures)
+        completed = ", ".join(successes) or "none"
+        super().__init__(
+            f"Upload incomplete; successful destinations: {completed}; failed destinations: {details}"
+        )
+
 class MultiStorageAdapter(StoragePort):
     def upload(self, file_path: str, config: BackupConfig) -> None:
+        destinations = []
         if config.aws_s3_bucket:
-            self._upload_s3(file_path, config.aws_s3_bucket)
-        
+            destinations.append((f"s3://{config.aws_s3_bucket}", lambda: self._upload_s3(file_path, config.aws_s3_bucket)))
         if config.aws_glacier_vault:
-            self._upload_glacier(file_path, config.aws_glacier_vault)
-            
+            destinations.append((f"glacier://{config.aws_glacier_vault}", lambda: self._upload_glacier(file_path, config.aws_glacier_vault)))
         if config.scp_host:
-            self._upload_scp(file_path, config)
-            
+            destinations.append((f"scp://{config.scp_host}", lambda: self._upload_scp(file_path, config)))
         if config.rclone_remote:
-            self._upload_rclone(file_path, config.rclone_remote)
+            destinations.append((f"rclone://{config.rclone_remote}", lambda: self._upload_rclone(file_path, config.rclone_remote)))
+        if config.local_archive_path:
+            destinations.append((f"local:{config.local_archive_path}", lambda: self._archive_local(file_path, config.local_archive_path)))
 
-        if config.local_archive_path and os.path.exists(config.local_archive_path):
-            self._archive_local(file_path, config.local_archive_path)
+        failures = []
+        successes = []
+        for destination, upload in destinations:
+            try:
+                upload()
+                successes.append(destination)
+            except Exception as e:
+                logger.error("Upload to %s failed: %s", destination, e)
+                failures.append(f"{destination}: {e}")
+
+        if failures or not destinations:
+            if not destinations:
+                failures.append("no configured upload destination")
+            raise StorageUploadError(failures, successes)
 
     def cleanup(self, file_path: str) -> None:
         if os.path.exists(file_path):
@@ -67,16 +90,12 @@ class MultiStorageAdapter(StoragePort):
     def download_restore_candidate(self, candidate: RestoreCandidate, config: RestoreConfig) -> str:
         source = candidate.source
         if source.startswith("s3://"):
-            destination = os.path.join("/tmp", os.path.basename(source))
-            subprocess.run(["aws", "s3", "cp", "--only-show-errors", source, destination], check=True)
-            return destination
+            return self._download_to_temp(["aws", "s3", "cp", "--only-show-errors", source])
         if source.startswith("scp://"):
             return self._download_scp(source, config)
         if source.startswith("rclone://"):
             remote_path = source.removeprefix("rclone://")
-            destination = os.path.join("/tmp", os.path.basename(remote_path))
-            subprocess.run(["rclone", "copyto", remote_path, destination], check=True)
-            return destination
+            return self._download_to_temp(["rclone", "copyto", remote_path])
         if config.backup_strategy == "restic":
             return source or "latest"
         return source
@@ -185,53 +204,47 @@ class MultiStorageAdapter(StoragePort):
 
     def _download_scp(self, source: str, config: RestoreConfig) -> str:
         remote = source.removeprefix("scp://")
-        destination = os.path.join("/tmp", os.path.basename(remote))
-        subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-i", "/ssh/id_rsa", remote, destination], check=True)
-        return destination
+        return self._download_to_temp(["scp", "-o", "StrictHostKeyChecking=no", "-i", "/ssh/id_rsa", remote])
+
+    def _download_to_temp(self, command: list[str]) -> str:
+        suffix = Path(command[-1]).suffix
+        descriptor, destination = tempfile.mkstemp(prefix="restore-download-", suffix=suffix)
+        os.close(descriptor)
+        try:
+            subprocess.run(command + [destination], check=True)
+            return destination
+        except Exception:
+            try:
+                os.remove(destination)
+            except OSError as cleanup_error:
+                logger.error("Failed to clean restore download %s: %s", destination, cleanup_error)
+            raise
 
     def _upload_s3(self, file_path: str, bucket: str):
-        try:
-            logger.info(f"Uploading to S3 bucket: {bucket}")
-            cmd = ["aws", "s3", "cp", "--only-show-errors", file_path, f"s3://{bucket}/"]
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            logger.error(f"S3 upload failed: {e}")
+        logger.info(f"Uploading to S3 bucket: {bucket}")
+        cmd = ["aws", "s3", "cp", "--only-show-errors", file_path, f"s3://{bucket}/"]
+        subprocess.run(cmd, check=True)
 
     def _upload_glacier(self, file_path: str, vault: str):
-        try:
-            logger.info(f"Uploading to Glacier vault: {vault}")
-            cmd = ["aws", "glacier", "upload-archive", "--account-id", "-", "--vault-name", vault, "--body", file_path]
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            logger.error(f"Glacier upload failed: {e}")
+        logger.info(f"Uploading to Glacier vault: {vault}")
+        cmd = ["aws", "glacier", "upload-archive", "--account-id", "-", "--vault-name", vault, "--body", file_path]
+        subprocess.run(cmd, check=True)
 
     def _upload_scp(self, file_path: str, config: BackupConfig):
-        try:
-            logger.info(f"Uploading via SCP to {config.scp_host}")
-            ssh_key = "/ssh/id_rsa"
-            user = config.scp_user or "root"
-            host = config.scp_host
-            remote_dir = config.scp_directory or "/tmp"
-            
-            cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-i", ssh_key, file_path, f"{user}@{host}:{remote_dir}"]
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            logger.error(f"SCP upload failed: {e}")
+        logger.info(f"Uploading via SCP to {config.scp_host}")
+        ssh_key = "/ssh/id_rsa"
+        user = config.scp_user or "root"
+        host = config.scp_host
+        remote_dir = config.scp_directory or "/tmp"
+        cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-i", ssh_key, file_path, f"{user}@{host}:{remote_dir}"]
+        subprocess.run(cmd, check=True)
 
     def _upload_rclone(self, file_path: str, remote: str):
-        try:
-            logger.info(f"Uploading via Rclone to {remote}")
-            # Assume remote is configured or passed as "remote:path"
-            # If config.rclone_remote is just remote name, we might need path.
-            # Assuming config.rclone_remote includes path like "myremote:/backups"
-            cmd = ["rclone", "copy", file_path, remote]
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            logger.error(f"Rclone upload failed: {e}")
+        logger.info(f"Uploading via Rclone to {remote}")
+        # Assume config.rclone_remote includes a destination such as "remote:/backups".
+        cmd = ["rclone", "copy", file_path, remote]
+        subprocess.run(cmd, check=True)
 
     def _archive_local(self, file_path: str, archive_path: str):
-        try:
-            logger.info(f"Archiving locally to {archive_path}")
-            shutil.copy2(file_path, archive_path)
-        except Exception as e:
-            logger.error(f"Local archive failed: {e}")
+        logger.info(f"Archiving locally to {archive_path}")
+        shutil.copy2(file_path, archive_path)

@@ -12,11 +12,6 @@ class WorkerAgentConfig:
     worker_id: Optional[str] = None
     backup_runtime_image: str = "ghcr.io/danielrondongarcia/docker-volume-backup"
     enrollment_token: Optional[str] = None
-    enrollment_ca_pem: Optional[str] = None
-    tls_dir: str = ".worker_tls"
-    tls_ca_file: Optional[str] = None
-    tls_cert_file: Optional[str] = None
-    tls_key_file: Optional[str] = None
 
 
 @dataclass

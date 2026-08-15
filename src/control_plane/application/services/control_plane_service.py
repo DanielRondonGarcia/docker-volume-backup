@@ -1,11 +1,9 @@
 import copy
-import hashlib
+import hmac
 import json
 import re
-import secrets
 import time
 from datetime import datetime
-from datetime import timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -19,7 +17,6 @@ from src.control_plane.application.ports.ports import (
     StorageProfileRepository,
     TargetStatsRepository,
     TargetRepository,
-    WorkerEnrollmentRepository,
     WorkerRepository,
 )
 from src.control_plane.domain.models import (
@@ -33,7 +30,6 @@ from src.control_plane.domain.models import (
     SnapshotRecord,
     StorageProfileRecord,
     TargetStatsRecord,
-    WorkerEnrollmentRecord,
     WorkerRecord,
     WorkerStatus,
     utcnow,
@@ -54,9 +50,7 @@ class ControlPlaneService:
         snapshot_repository: SnapshotRepository,
         retention_policy_repository: RetentionPolicyRepository,
         target_stats_repository: TargetStatsRepository,
-        worker_enrollment_repository: WorkerEnrollmentRepository,
         secret_codec,
-        tls_manager=None,
         settings_repository: Optional[SettingsRepository] = None,
     ):
         self.worker_repository = worker_repository
@@ -68,9 +62,7 @@ class ControlPlaneService:
         self.snapshot_repository = snapshot_repository
         self.retention_policy_repository = retention_policy_repository
         self.target_stats_repository = target_stats_repository
-        self.worker_enrollment_repository = worker_enrollment_repository
         self.secret_codec = secret_codec
-        self.tls_manager = tls_manager
         self.settings_repository = settings_repository
 
     def register_worker(
@@ -80,7 +72,6 @@ class ControlPlaneService:
         version: str = "dev",
         labels: Optional[Dict[str, str]] = None,
         worker_id: Optional[str] = None,
-        certificate_fingerprint: Optional[str] = None,
     ) -> WorkerRecord:
         existing = None
         if worker_id:
@@ -92,7 +83,6 @@ class ControlPlaneService:
             existing.version = version
             existing.labels = labels or existing.labels or {}
             existing.status = WorkerStatus.ONLINE
-            existing.certificate_fingerprint = certificate_fingerprint
             existing.last_seen_at = utcnow()
             existing.updated_at = utcnow()
             return self.worker_repository.save(existing)
@@ -103,7 +93,6 @@ class ControlPlaneService:
             labels=labels or {},
             id=worker_id or str(uuid4()),
             status=WorkerStatus.ONLINE,
-            certificate_fingerprint=certificate_fingerprint,
             last_seen_at=utcnow(),
         )
         return self.worker_repository.save(worker)
@@ -128,83 +117,6 @@ class ControlPlaneService:
 
     def get_worker(self, worker_id: str) -> WorkerRecord:
         return self._require_worker(worker_id)
-
-    def create_worker_enrollment(
-        self,
-        name: str,
-        host_name: str,
-        labels: Optional[Dict[str, str]] = None,
-        ttl_minutes: int = 30,
-    ) -> Dict[str, Any]:
-        if ttl_minutes <= 0:
-            raise ValueError("ttl_minutes must be greater than zero")
-        if self.tls_manager is None:
-            raise RuntimeError("TLS manager is not configured")
-
-        worker_id = str(uuid4())
-        raw_token = secrets.token_urlsafe(32)
-        enrollment = WorkerEnrollmentRecord(
-            worker_id=worker_id,
-            token_hash=self._hash_token(raw_token),
-            name=name,
-            host_name=host_name,
-            labels=labels or {},
-            expires_at=utcnow() + timedelta(minutes=ttl_minutes),
-        )
-        self.worker_enrollment_repository.save(enrollment)
-        return {
-            "enrollment_id": enrollment.id,
-            "worker_id": worker_id,
-            "token": raw_token,
-            "expires_at": enrollment.expires_at,
-            "ca_certificate_pem": self.tls_manager.get_ca_certificate_pem(),
-            "server_certificate_fingerprint": self.tls_manager.get_server_certificate_fingerprint(),
-        }
-
-    def list_worker_enrollments(self) -> List[WorkerEnrollmentRecord]:
-        return self.worker_enrollment_repository.list()
-
-    def enroll_worker_certificate(
-        self,
-        token: str,
-        csr_pem: str,
-        version: str = "dev",
-        labels: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        if self.tls_manager is None:
-            raise RuntimeError("TLS manager is not configured")
-        enrollment = self._require_valid_enrollment(token)
-        signed = self.tls_manager.sign_worker_csr(
-            csr_pem=csr_pem,
-            worker_id=enrollment.worker_id,
-            name=enrollment.name,
-            host_name=enrollment.host_name,
-        )
-        worker = WorkerRecord(
-            id=enrollment.worker_id,
-            name=enrollment.name,
-            host_name=enrollment.host_name,
-            version=version,
-            labels=dict(enrollment.labels),
-            status=WorkerStatus.PENDING,
-            certificate_fingerprint=signed["certificate_fingerprint"],
-        )
-        if labels:
-            worker.labels.update(labels)
-        existing = self.worker_repository.get(enrollment.worker_id)
-        if existing is not None:
-            worker.created_at = existing.created_at
-            worker.last_seen_at = existing.last_seen_at
-        self.worker_repository.save(worker)
-        enrollment.used_at = utcnow()
-        self.worker_enrollment_repository.save(enrollment)
-        return {
-            "worker": worker,
-            "worker_id": worker.id,
-            "certificate_pem": signed["certificate_pem"],
-            "ca_certificate_pem": signed["ca_certificate_pem"],
-            "certificate_fingerprint": signed["certificate_fingerprint"],
-        }
 
     def sync_inventory(self, worker_id: str, inventory: Dict[str, Any]) -> InventorySnapshot:
         worker = self._require_worker(worker_id)
@@ -401,6 +313,14 @@ class ControlPlaneService:
             trigger=trigger,
         )
 
+    def has_active_backup_for_target(self, target_id: str) -> bool:
+        return any(
+            job.target_id == target_id
+            and job.command == "backup.run"
+            and JobStatus.normalize(job.status) in (JobStatus.PENDING, JobStatus.IN_PROGRESS)
+            for job in self.job_repository.list()
+        )
+
     def dispatch_snapshot_sync_for_target(self, target_id: str, requested_by: str = "system") -> JobRecord:
         target = self._require_target(target_id)
         payload = self._build_snapshot_list_payload(target)
@@ -427,24 +347,28 @@ class ControlPlaneService:
         result = self._wait_for_job_completion(job.id, timeout_seconds=60)
         job_status = result.get("status")
         logs = result.get("logs", "") or ""
-        if job_status == "failed" or job_status == "cancelled":
+        result_summary = result.get("result_summary") or {}
+        if job_status == "failed" or job_status == JobStatus.CANCELED:
             error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
             return {"entries": [], "job_id": job.id, "error": f"restic ls failed: {error_msg}"}
         if job_status == "timeout":
             return {"entries": [], "job_id": job.id, "error": "restic ls timed out (60s)"}
-        entries = []
-        try:
-            parsed = json.loads(logs)
-            entries = parsed if isinstance(parsed, list) else [parsed]
-        except json.JSONDecodeError:
-            for line in logs.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        if "entries" in result_summary:
+            entries = result_summary.get("entries") or []
+        else:
+            entries = []
+            try:
+                parsed = json.loads(logs)
+                entries = parsed if isinstance(parsed, list) else [parsed]
+            except json.JSONDecodeError:
+                for line in logs.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
         return {"entries": entries, "job_id": job.id}
 
     def dispatch_snapshot_dump(self, target_id: str, snapshot_id: str, path: str) -> Dict[str, Any]:
@@ -563,6 +487,7 @@ class ControlPlaneService:
         volumes = self._normalize_runtime_volumes(volumes, target)
         if target.volume_targets and "BACKUP_SOURCES" not in environment:
             environment["BACKUP_SOURCES"] = " ".join(self._normalized_backup_sources(volumes))
+        environment["BACKUP_STOP_CONTAINERS"] = "true" if target.backup_mode == "cold" else "false"
         if target.backup_mode == "cold":
             environment.setdefault("BACKUP_CUSTOM_LABEL", f"control-plane.target={target.id}")
 
@@ -990,14 +915,7 @@ class ControlPlaneService:
 
     def fetch_jobs_for_worker(self, worker_id: str) -> List[JobRecord]:
         self._require_worker(worker_id)
-        jobs = self.job_repository.list_pending_for_worker(worker_id)
-        for job in jobs:
-            if job.status == JobStatus.PENDING:
-                job.status = JobStatus.IN_PROGRESS
-                job.started_at = utcnow()
-                job.updated_at = utcnow()
-                self.job_repository.save(job)
-        return jobs
+        return self.job_repository.claim_pending_for_worker(worker_id)
 
     def update_job_status(
         self,
@@ -1006,9 +924,24 @@ class ControlPlaneService:
         status: str,
         result_summary: Optional[Dict[str, Any]] = None,
         log_lines: Optional[List[str]] = None,
+        lease_token: Optional[str] = None,
     ) -> JobRecord:
         self._require_worker(worker_id)
         job = self._require_job(job_id)
+        if job.owner_worker_id != worker_id:
+            raise ValueError(f"worker '{worker_id}' does not own job '{job_id}'")
+        job.status = JobStatus.normalize(job.status)
+        if job.status == JobStatus.CANCELED:
+            raise ValueError(f"job '{job_id}' is canceled")
+        if job.status != JobStatus.IN_PROGRESS:
+            raise ValueError(f"job '{job_id}' is not in progress (current status: {job.status})")
+        if not isinstance(lease_token, str) or not hmac.compare_digest(job.lease_token or "", lease_token):
+            raise ValueError(f"job '{job_id}' lease token is invalid or stale")
+        if not job.lease_expires_at or job.lease_expires_at <= utcnow():
+            raise ValueError(f"job '{job_id}' lease has expired")
+        status = JobStatus.normalize(status)
+        if status not in (JobStatus.SUCCEEDED, JobStatus.FAILED):
+            raise ValueError(f"job '{job_id}' cannot be completed with status: {status}")
         job.status = status
         job.updated_at = utcnow()
         if result_summary is not None:
@@ -1048,11 +981,13 @@ class ControlPlaneService:
         job = self.job_repository.get(job_id)
         if not job:
             raise ValueError(f"job '{job_id}' not found")
-        if job.status not in ("pending", "in_progress"):
+        job.status = JobStatus.normalize(job.status)
+        if job.status not in (JobStatus.PENDING, JobStatus.IN_PROGRESS):
             raise ValueError(f"job '{job_id}' cannot be cancelled (current status: {job.status})")
-        job.status = "cancelled"
+        job.status = JobStatus.CANCELED
+        job.updated_at = utcnow()
         if not job.finished_at:
-            job.finished_at = datetime.utcnow()
+            job.finished_at = utcnow()
         self.job_repository.save(job)
         return job
 
@@ -1113,16 +1048,6 @@ class ControlPlaneService:
             raise ValueError(f"worker not found: {worker_id}")
         return worker
 
-    def _require_valid_enrollment(self, token: str) -> WorkerEnrollmentRecord:
-        enrollment = self.worker_enrollment_repository.get_by_token_hash(self._hash_token(token))
-        if enrollment is None:
-            raise ValueError("invalid enrollment token")
-        if enrollment.used_at is not None:
-            raise ValueError("enrollment token already used")
-        if enrollment.expires_at < utcnow():
-            raise ValueError("enrollment token expired")
-        return enrollment
-
     def _require_target(self, target_id: str) -> BackupTargetRecord:
         target = self.target_repository.get(target_id)
         if target is None:
@@ -1133,7 +1058,7 @@ class ControlPlaneService:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             job = self.job_repository.get(job_id)
-            if job and job.status in ("succeeded", "failed", "cancelled"):
+            if job and job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELED):
                 return {
                     "status": job.status,
                     "logs": "\n".join(job.log_lines or []),
@@ -1226,10 +1151,6 @@ class ControlPlaneService:
         content = self.secret_codec.decrypt(secret.ciphertext)
         section_headers = re.findall(r"(?m)^\s*\[([^\]\r\n]+)\]\s*$", content or "")
         return section_headers[0] if section_headers else None
-
-    @staticmethod
-    def _hash_token(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _sync_snapshots_from_result(self, target_id: str, worker_id: str, result_summary: Dict[str, Any]) -> None:
         raw_snapshots = result_summary.get("snapshots") or []

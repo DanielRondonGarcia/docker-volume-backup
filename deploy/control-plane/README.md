@@ -108,34 +108,13 @@ Imagen esperada:
 
 - `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
 
-## Enrolamiento seguro opcional
+## Enrolamiento HMAC y transporte
 
-El stack de ejemplo arranca en HTTP para laboratorio rápido, pero el backend
-soporta un modo seguro inspirado en el emparejamiento tipo Wazuh:
-
-- `CONTROL_PLANE_TLS_ENABLED=true`: genera o reutiliza una CA local bajo
-  `CONTROL_PLANE_TLS_DIR` y publica el CP por HTTPS.
-- `CONTROL_PLANE_WORKER_MTLS_REQUIRED=true`: obliga a que las rutas operativas
-  del worker usen el certificado cliente emitido por el CP.
-- `POST /api/v1/admin/worker-enrollments`: crea un token de un solo uso,
-  asigna `worker_id`, devuelve `ca_certificate_pem` y la huella del certificado
-  servidor.
-- `WORKER_ENROLLMENT_TOKEN`: habilita auto-enrolamiento del worker en el
-  arranque.
-- `WORKER_ENROLLMENT_CA_PEM`: permite hacer bootstrap de la confianza del
-  worker antes de que exista su certificado cliente.
-- `WORKER_TLS_DIR`, `WORKER_TLS_CA_FILE`, `WORKER_TLS_CERT_FILE`,
-  `WORKER_TLS_KEY_FILE`: controlan dónde persistir la identidad TLS local del
-  worker.
-
-Flujo resumido:
-
-1. Un admin crea el enrolamiento desde el Control Plane.
-2. El operador entrega al worker el token y el PEM de la CA.
-3. El worker genera su keypair local, envía CSR a
-   `POST /api/v1/worker-enrollments/sign` y guarda `ca/cert/key`.
-4. A partir de ahí, `heartbeat`, `inventory` y fetch/update de jobs usan mTLS
-   con la huella persistida en el worker del CP.
+Release mayor sin migración: configura desde cero y conserva el `WORKER_ID` explícito.
+La UI genera el secreto HMAC; el CP guarda el digest y el worker persiste el
+archivo `/data/worker_credentials.json` (`0600`). No hay registro abierto ni
+certificados de cliente, CSR o fallback. HTTP local no es confidencial; para
+remoto usa HTTPS server-only con `CONTROL_PLANE_CA_FILE`. Tras cinco fallos termina.
 
 ## Apagado
 
@@ -147,9 +126,5 @@ docker compose -f deploy/control-plane/docker-compose.yml down
 
 - Si `8080` ya está ocupado en el host, publica el stack en otro puerto usando
   `CONTROL_PLANE_PUBLISHED_PORT`.
-- Para que el worker se registre, despliégalo desde `deploy/worker/`. Por
-  defecto se conecta a la red `docker-volume-backup-control-plane_default` de
-  este stack y apunta `CONTROL_PLANE_URL` a `http://control-plane:8080`.
-- Este despliegue está orientado a validación local y laboratorio; `mTLS` ya
-  existe de forma opcional, pero el Compose de referencia no lo activa por
-  defecto.
+- Despliega el worker desde `deploy/worker/`; por defecto usa la red externa y
+  `CONTROL_PLANE_URL=http://control-plane:8080`.

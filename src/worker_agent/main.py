@@ -6,7 +6,6 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
 
@@ -14,7 +13,7 @@ from src.worker_agent.application.services.worker_agent_service import WorkerAge
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
-from src.worker_agent.infrastructure.security.tls import WorkerTLSIdentityManager
+from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -71,6 +70,12 @@ class WorkerHealthState:
             self._snapshot.last_error = error
             self._snapshot.status = "degraded" if self._snapshot.registered else "starting"
 
+    def record_not_ready(self, error: str):
+        with self._lock:
+            self._snapshot.control_plane_reachable = False
+            self._snapshot.last_error = error
+            self._snapshot.status = "not_ready"
+
     def record_loop_completed(self):
         with self._lock:
             self._snapshot.last_loop_completed_at = _utcnow()
@@ -78,7 +83,7 @@ class WorkerHealthState:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             payload = asdict(self._snapshot)
-        payload["ok"] = True
+        payload["ok"] = self._snapshot.status == "ok"
         payload["note"] = (
             "Worker process is alive; control_plane_reachable only indicates the latest known contact with the Control Plane"
         )
@@ -121,17 +126,7 @@ def _labels_from_env() -> dict:
         return {}
 
 
-def _worker_tls_paths() -> tuple[str, str, str, str]:
-    tls_dir = os.environ.get("WORKER_TLS_DIR", ".worker_tls").strip() or ".worker_tls"
-    tls_root = Path(tls_dir)
-    ca_file = os.environ.get("WORKER_TLS_CA_FILE", str(tls_root / "ca-cert.pem"))
-    cert_file = os.environ.get("WORKER_TLS_CERT_FILE", str(tls_root / "worker-cert.pem"))
-    key_file = os.environ.get("WORKER_TLS_KEY_FILE", str(tls_root / "worker-key.pem"))
-    return tls_dir, ca_file, cert_file, key_file
-
-
 def build_service() -> WorkerAgentService:
-    tls_dir, tls_ca_file, tls_cert_file, tls_key_file = _worker_tls_paths()
     def _resolve_version():
         wv = (os.environ.get("WORKER_VERSION") or "").strip()
         av = (os.environ.get("APP_VERSION") or "").strip()
@@ -141,69 +136,31 @@ def build_service() -> WorkerAgentService:
             return av
         return wv or av or "dev"
 
+    credential_file = os.environ.get("WORKER_CREDENTIAL_FILE", ".worker_credentials.json")
+    credential_store = WorkerCredentialStore(credential_file)
+    stored = credential_store.load()
     config = WorkerAgentConfig(
         control_plane_url=os.environ.get("CONTROL_PLANE_URL", "http://127.0.0.1:8080"),
         name=os.environ.get("WORKER_NAME", socket.gethostname()),
         host_name=os.environ.get("WORKER_HOST_NAME", socket.gethostname()),
         version=_resolve_version(),
-        worker_id=os.environ.get("WORKER_ID") or None,
+        worker_id=os.environ.get("WORKER_ID") or (stored.worker_id if stored else None),
         labels=_labels_from_env(),
         backup_runtime_image=os.environ.get(
             "BACKUP_RUNTIME_IMAGE",
             "ghcr.io/danielrondongarcia/docker-volume-backup",
         ),
-        enrollment_token=os.environ.get("WORKER_ENROLLMENT_TOKEN") or None,
-        enrollment_ca_pem=os.environ.get("WORKER_ENROLLMENT_CA_PEM") or None,
-        tls_dir=tls_dir,
-        tls_ca_file=tls_ca_file,
-        tls_cert_file=tls_cert_file,
-        tls_key_file=tls_key_file,
+        enrollment_token=os.environ.get("WORKER_ENROLLMENT_TOKEN") or os.environ.get("WORKER_SECRET") or None,
     )
     client = ControlPlaneClient(
         config.control_plane_url,
-        ca_file=config.tls_ca_file,
-        client_cert_file=config.tls_cert_file,
-        client_key_file=config.tls_key_file,
+        ca_file=os.environ.get("CONTROL_PLANE_CA_FILE") or None,
+        credential_store=credential_store,
+        worker_id=config.worker_id,
+        enrollment_secret=config.enrollment_token,
     )
     docker_runtime = DockerRuntimeAdapter()
     return WorkerAgentService(config, client, docker_runtime)
-
-
-def ensure_worker_enrollment(service: WorkerAgentService) -> None:
-    config = service.config
-    if not config.enrollment_token:
-        return
-    if not config.tls_ca_file or not config.tls_cert_file or not config.tls_key_file:
-        raise RuntimeError("worker TLS file paths are not configured")
-
-    identity = WorkerTLSIdentityManager(
-        tls_dir=config.tls_dir,
-        ca_file=config.tls_ca_file,
-        cert_file=config.tls_cert_file,
-        key_file=config.tls_key_file,
-    )
-    if not Path(config.tls_ca_file).exists():
-        if not config.enrollment_ca_pem:
-            raise RuntimeError("WORKER_ENROLLMENT_CA_PEM is required to bootstrap TLS enrollment")
-        Path(config.tls_ca_file).write_text(config.enrollment_ca_pem, encoding="utf-8")
-    if identity.has_client_certificate():
-        logger.info("Worker TLS identity already present at %s", config.tls_dir)
-        return
-
-    logger.info("Worker enrollment requested; generating CSR for %s", config.name)
-    csr_pem = identity.create_csr(name=config.name, host_name=config.host_name)
-    enrollment = service.control_plane_client.enroll_worker(
-        token=config.enrollment_token,
-        csr_pem=csr_pem,
-        version=config.version,
-        labels=config.labels,
-    )
-    identity.persist_signed_materials(
-        certificate_pem=enrollment["certificate_pem"],
-        ca_certificate_pem=enrollment["ca_certificate_pem"],
-    )
-    config.worker_id = enrollment["worker_id"]
-    logger.info("Worker enrolled successfully with id %s", config.worker_id)
 
 
 def start_health_server(state: WorkerHealthState):
@@ -225,10 +182,10 @@ def start_health_server(state: WorkerHealthState):
 
 def main():
     service = build_service()
-    ensure_worker_enrollment(service)
     run_once = os.environ.get("WORKER_RUN_ONCE", "true").strip().lower() in ("1", "true", "yes", "on")
     poll_interval = int(os.environ.get("WORKER_POLL_INTERVAL_SECONDS", "30"))
     last_logged_worker_id = None
+    attempts = 0
     health_state = WorkerHealthState(
         control_plane_url=service.config.control_plane_url,
         worker_name=service.config.name,
@@ -247,16 +204,20 @@ def main():
             processed = service.poll_once()
             health_state.record_control_plane_success(worker_id=worker_id, processed_jobs=len(processed))
             logger.info("Worker processed %s jobs", len(processed))
+            attempts = 0
         except Exception as exc:
+            attempts += 1
             health_state.record_control_plane_failure(str(exc))
             logger.warning("Worker loop could not reach the Control Plane: %s", exc)
-            if run_once:
-                raise
+            if attempts >= 5:
+                health_state.record_not_ready(str(exc))
+                raise RuntimeError("worker startup failed after 5 attempts") from None
         finally:
             health_state.record_loop_completed()
-        if run_once:
+        if run_once and attempts == 0:
             break
-        time.sleep(poll_interval)
+        if attempts or not run_once:
+            time.sleep(float(os.environ.get("WORKER_STARTUP_RETRY_DELAY_SECONDS", poll_interval)))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import secrets
+from datetime import timedelta, timezone
 from threading import Lock
 from typing import Dict, List, Optional
 
@@ -27,6 +29,7 @@ from src.control_plane.domain.models import (
     TargetStatsRecord,
     WorkerEnrollmentRecord,
     WorkerRecord,
+    utcnow,
 )
 
 
@@ -120,6 +123,7 @@ class InMemoryJobRepository(JobRepository):
 
     def save(self, job: JobRecord) -> JobRecord:
         with self._lock:
+            job.status = JobStatus.normalize(job.status)
             self._items[job.id] = job
         return job
 
@@ -129,11 +133,44 @@ class InMemoryJobRepository(JobRepository):
     def list(self) -> List[JobRecord]:
         return sorted(self._items.values(), key=lambda item: item.submitted_at, reverse=True)
 
-    def list_pending_for_worker(self, worker_id: str) -> List[JobRecord]:
-        return [
-            job for job in self.list()
-            if job.worker_id == worker_id and job.status == JobStatus.PENDING
-        ]
+    def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease duration must be positive")
+        with self._lock:
+            now = utcnow()
+            expires_at = now + timedelta(seconds=lease_duration_seconds)
+            for job in self._items.values():
+                lease_expires_at = job.lease_expires_at
+                if lease_expires_at and lease_expires_at.tzinfo:
+                    lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+                if (
+                    job.worker_id == worker_id
+                    and job.status == JobStatus.IN_PROGRESS
+                    and lease_expires_at
+                    and lease_expires_at <= now
+                ):
+                    job.status = JobStatus.PENDING
+                    job.owner_worker_id = None
+                    job.lease_token = None
+                    job.lease_issued_at = None
+                    job.lease_expires_at = None
+                    job.started_at = None
+                    job.finished_at = None
+                    job.updated_at = now
+            claimed = []
+            for job in sorted(self._items.values(), key=lambda item: item.submitted_at):
+                if job.worker_id != worker_id or job.status != JobStatus.PENDING:
+                    continue
+                job.status = JobStatus.IN_PROGRESS
+                job.owner_worker_id = worker_id
+                job.lease_token = secrets.token_urlsafe(32)
+                job.lease_issued_at = now
+                job.lease_expires_at = expires_at
+                job.attempt_count = (job.attempt_count or 0) + 1
+                job.started_at = now
+                job.updated_at = now
+                claimed.append(job)
+            return claimed
 
 
 class InMemoryStorageProfileRepository(StorageProfileRepository):

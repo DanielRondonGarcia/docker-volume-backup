@@ -30,6 +30,7 @@ class ContainerConfig:
     pre_exec_label: str = "docker-volume-backup.exec-pre-backup"
     post_exec_label: str = "docker-volume-backup.exec-post-backup"
     custom_label: Optional[str] = None
+    stop_containers: bool = True
 
 @dataclass
 class BackupResult:

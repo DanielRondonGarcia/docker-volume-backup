@@ -30,68 +30,106 @@ class BackupService:
 
     def execute_backup(self) -> BackupResult:
         logger.info("Backup starting")
-        
-        # 1. Stop containers
-        stop_labels = self._get_filter_labels(self.container_config.stop_label)
-        containers_to_stop = self.container_port.get_containers_by_labels(stop_labels)
+        result: Optional[BackupResult] = None
         stopped_containers = []
-        if containers_to_stop:
-            logger.info(f"Stopping containers: {containers_to_stop}")
-            stopped_containers = self.container_port.stop_containers(containers_to_stop)
-        
-        # 2. Pre-exec commands
-        pre_exec_labels = self._get_filter_labels(self.container_config.pre_exec_label)
-        pre_exec_containers = self.container_port.get_containers_by_labels(pre_exec_labels)
-        for container_id in pre_exec_containers:
-            cmd = self.container_port.get_label_value(container_id, self.container_config.pre_exec_label)
-            if cmd:
-                logger.info(f"Pre-exec command for {container_id}: {cmd}")
-                self.container_port.exec_command(container_id, cmd)
+        try:
+            # 1. Stop containers
+            if self.container_config.stop_containers:
+                stop_labels = self._get_filter_labels(self.container_config.stop_label)
+                containers_to_stop = self.container_port.get_containers_by_labels(stop_labels)
+                if containers_to_stop:
+                    logger.info(f"Stopping containers: {containers_to_stop}")
+                    stopped_containers = self.container_port.stop_containers(containers_to_stop)
 
-        # 2.5 Global Pre-backup command
-        if self.backup_config.pre_backup_command:
-            logger.info(f"Running global pre-backup command: {self.backup_config.pre_backup_command}")
-            # This should probably be executed via os.system or subprocess, or a port if we want to be strict.
-            # But since it's a shell command, maybe a ShellPort? Or just subprocess here as it's not "domain logic" per se but orchestration.
-            import subprocess
-            subprocess.run(self.backup_config.pre_backup_command, shell=True, check=True)
+            # 2. Pre-exec commands
+            pre_exec_labels = self._get_filter_labels(self.container_config.pre_exec_label)
+            pre_exec_containers = self.container_port.get_containers_by_labels(pre_exec_labels)
+            for container_id in pre_exec_containers:
+                cmd = self.container_port.get_label_value(container_id, self.container_config.pre_exec_label)
+                if cmd:
+                    logger.info(f"Pre-exec command for {container_id}: {cmd}")
+                    self.container_port.exec_command(container_id, cmd)
 
-        # 3. Perform Backup Strategy
-        logger.info("Performing backup strategy")
-        result = self.backup_strategy.perform_backup(self.backup_config)
+            # 2.5 Global Pre-backup command
+            if self.backup_config.pre_backup_command:
+                logger.info(f"Running global pre-backup command: {self.backup_config.pre_backup_command}")
+                import subprocess
+                subprocess.run(self.backup_config.pre_backup_command, shell=True, check=True)
 
-        # 3.5 Global Post-backup command
-        if self.backup_config.post_backup_command:
-            logger.info(f"Running global post-backup command: {self.backup_config.post_backup_command}")
-            import subprocess
-            subprocess.run(self.backup_config.post_backup_command, shell=True, check=True)
+            # 3. Perform Backup Strategy
+            logger.info("Performing backup strategy")
+            result = self.backup_strategy.perform_backup(self.backup_config)
 
-        # 4. Post-exec commands
-        post_exec_labels = self._get_filter_labels(self.container_config.post_exec_label)
-        post_exec_containers = self.container_port.get_containers_by_labels(post_exec_labels)
-        for container_id in post_exec_containers:
-            cmd = self.container_port.get_label_value(container_id, self.container_config.post_exec_label)
-            if cmd:
-                logger.info(f"Post-exec command for {container_id}: {cmd}")
-                self.container_port.exec_command(container_id, cmd)
+            # 3.5 Global Post-backup command
+            if self.backup_config.post_backup_command:
+                logger.info(f"Running global post-backup command: {self.backup_config.post_backup_command}")
+                import subprocess
+                subprocess.run(self.backup_config.post_backup_command, shell=True, check=True)
 
-        # 5. Start containers
-        if stopped_containers:
-            logger.info(f"Starting containers: {stopped_containers}")
-            self.container_port.start_containers(stopped_containers)
+            # 4. Post-exec commands
+            post_exec_labels = self._get_filter_labels(self.container_config.post_exec_label)
+            post_exec_containers = self.container_port.get_containers_by_labels(post_exec_labels)
+            for container_id in post_exec_containers:
+                cmd = self.container_port.get_label_value(container_id, self.container_config.post_exec_label)
+                if cmd:
+                    logger.info(f"Post-exec command for {container_id}: {cmd}")
+                    self.container_port.exec_command(container_id, cmd)
+        except Exception as e:
+            logger.error(f"Backup failed before upload: {e}")
+            if result is None:
+                result = BackupResult(
+                    timestamp=datetime.now(), duration=0, size=0, success=False, error=str(e)
+                )
+            else:
+                result.success = False
+                result.error = f"{result.error}; {e}" if result.error else str(e)
+        finally:
+            if stopped_containers:
+                logger.info(f"Starting containers: {stopped_containers}")
+                try:
+                    self.container_port.start_containers(stopped_containers)
+                except Exception as e:
+                    restart_error = f"Container restart failed for {stopped_containers}: {e}"
+                    logger.error(restart_error)
+                    if result is None:
+                        result = BackupResult(
+                            timestamp=datetime.now(), duration=0, size=0, success=False, error=restart_error
+                        )
+                    else:
+                        result.success = False
+                        result.error = f"{result.error}; {restart_error}" if result.error else restart_error
 
-        # 6. Upload
+        if result is None:
+            result = BackupResult(
+                timestamp=datetime.now(), duration=0, size=0, success=False,
+                error="Backup did not produce a result"
+            )
+
+        # 5. Upload; cleanup is only safe after every configured destination succeeds.
         if result.success and result.artifact_path:
             logger.info(f"Uploading artifact: {result.artifact_path}")
             try:
-                self.storage_port.upload(result.artifact_path, self.backup_config)
-                self.storage_port.cleanup(result.artifact_path)
+                upload_result = self.storage_port.upload(result.artifact_path, self.backup_config)
+                if upload_result is False:
+                    raise RuntimeError("storage adapter returned an explicit upload failure")
             except Exception as e:
-                logger.error(f"Upload failed: {e}")
                 result.success = False
-                result.error = str(e)
+                result.error = (
+                    f"Upload failed; local artifact retained at {result.artifact_path}: {e}"
+                )
+                logger.error(result.error)
+            else:
+                try:
+                    self.storage_port.cleanup(result.artifact_path)
+                except Exception as e:
+                    result.success = False
+                    result.error = (
+                        f"Upload succeeded but local artifact cleanup failed; artifact retained at "
+                        f"{result.artifact_path}: {e}"
+                    )
+                    logger.error(result.error)
 
-        # 7. Metrics
+        # 6. Metrics
         logger.info("Sending metrics")
         self.notifier_port.send_metrics(result)
         

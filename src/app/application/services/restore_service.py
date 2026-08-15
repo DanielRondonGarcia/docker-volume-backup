@@ -161,6 +161,9 @@ class RestoreService:
         logger.warning("FORCE OVERWRITE enabled: target contents will be replaced before restore")
         candidate = RestoreCandidate(plan.source or "", self.restore_config.backup_strategy)
         stopped_containers: List[str] = []
+        downloaded_path: Optional[str] = None
+        cleanup_error = None
+        restart_error = None
         try:
             if self.restore_config.stop_containers:
                 if plan.affected_containers:
@@ -174,11 +177,28 @@ class RestoreService:
 
             downloaded_path = self.storage_port.download_restore_candidate(candidate, self.restore_config)
             result = self.restore_strategy.restore(downloaded_path, self.restore_config)
+        except Exception as e:
+            result = self._failure(f"Restore failed: {e}")
         finally:
+            if downloaded_path and candidate.source.startswith(("s3://", "scp://", "rclone://")):
+                try:
+                    self.storage_port.cleanup(downloaded_path)
+                except Exception as e:
+                    cleanup_error = f"Restore download cleanup failed for {downloaded_path}: {e}"
+                    logger.error(cleanup_error)
             if stopped_containers:
                 logger.info(f"Cold restore: restarting {len(stopped_containers)} container(s): {stopped_containers}")
-                self.container_port.start_containers(stopped_containers)
-                logger.info("Cold restore: containers restarted")
+                try:
+                    self.container_port.start_containers(stopped_containers)
+                    logger.info("Cold restore: containers restarted")
+                except Exception as e:
+                    restart_error = f"Cold restore container restart failed for {stopped_containers}: {e}"
+                    logger.error(restart_error)
+
+        lifecycle_errors = [error for error in (cleanup_error, restart_error) if error]
+        if lifecycle_errors:
+            result.success = False
+            result.error = "; ".join([error for error in (result.error, *lifecycle_errors) if error])
 
         result.duration = time.time() - started_at
         result.source = plan.source

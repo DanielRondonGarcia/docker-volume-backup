@@ -22,6 +22,10 @@ class JobStatus:
     FAILED = "failed"
     CANCELED = "canceled"
 
+    @classmethod
+    def normalize(cls, status: str) -> str:
+        return cls.CANCELED if status == "cancelled" else status
+
 
 @dataclass
 class WorkerRecord:
@@ -31,7 +35,6 @@ class WorkerRecord:
     labels: Dict[str, str] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
     status: str = WorkerStatus.PENDING
-    certificate_fingerprint: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     last_seen_at: Optional[datetime] = None
@@ -160,6 +163,11 @@ class JobRecord:
     trigger: str = "manual"
     id: str = field(default_factory=lambda: str(uuid4()))
     status: str = JobStatus.PENDING
+    owner_worker_id: Optional[str] = None
+    lease_token: Optional[str] = None
+    lease_issued_at: Optional[datetime] = None
+    lease_expires_at: Optional[datetime] = None
+    attempt_count: int = 0
     result_summary: Optional[Dict[str, Any]] = None
     log_lines: List[str] = field(default_factory=list)
     submitted_at: datetime = field(default_factory=utcnow)

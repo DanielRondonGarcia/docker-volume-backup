@@ -94,7 +94,7 @@ class JobRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_pending_for_worker(self, worker_id: str) -> List[JobRecord]:
+    def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
         raise NotImplementedError
 
 

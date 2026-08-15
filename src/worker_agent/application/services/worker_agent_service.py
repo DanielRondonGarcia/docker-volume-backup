@@ -1,6 +1,7 @@
 import base64
+import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from src.control_plane.domain.models import JobStatus
 from src.worker_agent.domain.models import WorkerAgentConfig, WorkerJobExecutionResult
@@ -22,7 +23,7 @@ class WorkerAgentService:
         self.docker_runtime = docker_runtime
 
     def ensure_registered(self) -> str:
-        if self.config.worker_id:
+        if self.config.worker_id and self.control_plane_client.credential_store and self.control_plane_client.credential_store.load():
             return self.config.worker_id
         response = self.control_plane_client.register_worker(
             name=self.config.name,
@@ -31,7 +32,7 @@ class WorkerAgentService:
             labels=self.config.labels,
             worker_id=self.config.worker_id,
         )
-        self.config.worker_id = response["id"]
+        self.config.worker_id = response["worker_id"]
         return self.config.worker_id
 
     def send_heartbeat(self):
@@ -41,6 +42,42 @@ class WorkerAgentService:
             version=self.config.version,
             labels=self.config.labels,
         )
+
+    @staticmethod
+    def _parse_snapshot_ls_entries(logs: str) -> List[Dict[str, Any]]:
+        if not isinstance(logs, str) or not logs:
+            return []
+
+        decoder = json.JSONDecoder()
+        parsed_values: List[Any] = []
+        offset = 0
+        while offset < len(logs):
+            while offset < len(logs) and logs[offset].isspace():
+                offset += 1
+            if offset >= len(logs):
+                break
+            try:
+                value, end = decoder.raw_decode(logs, offset)
+            except json.JSONDecodeError:
+                newline = logs.find("\n", offset)
+                if newline == -1:
+                    break
+                offset = newline + 1
+                continue
+            parsed_values.append(value)
+            offset = end
+
+        candidates: List[Dict[str, Any]] = []
+        for value in parsed_values:
+            if isinstance(value, list):
+                candidates.extend(item for item in value if isinstance(item, dict))
+            elif isinstance(value, dict):
+                candidates.append(value)
+        return [
+            entry
+            for entry in candidates
+            if entry.get("struct_type") == "node" or entry.get("type") in ("file", "dir")
+        ]
 
     def sync_inventory(self):
         worker_id = self.ensure_registered()
@@ -59,6 +96,7 @@ class WorkerAgentService:
                 status=execution.status,
                 result_summary=execution.result_summary,
                 log_lines=execution.log_lines,
+                lease_token=job["lease_token"],
             )
             results.append(updated)
         return results
@@ -141,12 +179,14 @@ class WorkerAgentService:
             if command == "snapshot.ls":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self.docker_runtime.run_runtime_job(image=image, payload=payload)
+                entries = self._parse_snapshot_ls_entries(summary.get("logs", ""))
                 combined_logs = (summary.get("logs", "") + "\n" + summary.get("stderr", "")).strip()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED,
                     result_summary={
                         "status_code": summary.get("status_code"),
                         "target_id": payload.get("target_id"),
+                        "entries": entries,
                     },
                     log_lines=combined_logs.splitlines()[-1000:],
                 )

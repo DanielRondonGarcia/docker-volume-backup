@@ -1,19 +1,60 @@
 name: docker-volume-backup-worker-ghcr
 
-# Variante del stack del Worker usando imagenes publicadas en GHCR.
-# Anade aqui los servicios de tu aplicacion con sus volumenes; el worker
-# los descubrira y los reportara al Control Plane.
+# Variante del stack del Worker usando imagenes publicadas en GHCR. Mantiene
+# la misma forma de servicios y volumenes demo que la variante local.
 
 services:
   # ------------------------------------------------------------------
-  # Servicio de ejemplo: reemplaza/renombra por los servicios reales
-  # de tu stack. Sus volumenes seran detectados por el worker.
+  # Servicios demo: sus volumenes seran detectados por el worker y quedaran
+  # disponibles para seleccionar al crear un target.
   # ------------------------------------------------------------------
   demo-app:
     image: nginx:alpine
     restart: unless-stopped
     volumes:
-      - demo_app_data:/usr/share/nginx/html
+      - demo_nginx_html:/usr/share/nginx/html
+      - demo_nginx_cache:/var/cache/nginx
+    labels:
+      docker-volume-backup.stop-during-backup: "true"
+
+  demo-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${DEMO_POSTGRES_DB:-demo_db}"
+      POSTGRES_USER: "${DEMO_POSTGRES_USER:-demo_user}"
+      POSTGRES_PASSWORD: "${DEMO_POSTGRES_PASSWORD:-demo-only-password}"
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+    labels:
+      docker-volume-backup.stop-during-backup: "true"
+
+  demo-redis:
+    image: redis:7-alpine
+    user: "0:0"
+    working_dir: /var/lib/redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--dir", "/var/lib/redis"]
+    volumes:
+      - demo_redis_data:/var/lib/redis
+    labels:
+      docker-volume-backup.stop-during-backup: "true"
+
+  demo-files:
+    image: alpine:3.20
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf '%s\n' 'Docker volume backup demo' > /demo-files/README.txt
+        printf '%s\n' 'sample file A' > /demo-files/sample-a.txt
+        printf '%s\n' 'sample file B' > /demo-files/sample-b.txt
+        exec tail -f /dev/null
+    volumes:
+      - demo_files_data:/demo-files
+    labels:
+      docker-volume-backup.stop-during-backup: "true"
 
   # ------------------------------------------------------------------
   # Worker Agent: consume la imagen publicada en GHCR.
@@ -22,15 +63,33 @@ services:
     image: ${WORKER_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}
     restart: unless-stopped
     environment:
+      # HTTP is trusted-network default; set CONTROL_PLANE_CA_FILE for server HTTPS.
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
       WORKER_NAME: ${WORKER_NAME:-worker-ghcr}
       WORKER_HOST_NAME: ${WORKER_HOST_NAME:-worker-ghcr}
+      WORKER_ENROLLMENT_TOKEN: ${WORKER_ENROLLMENT_TOKEN:-}
+      WORKER_CREDENTIAL_FILE: /data/worker_credentials.json
       WORKER_RUN_ONCE: "false"
       WORKER_POLL_INTERVAL_SECONDS: "15"
       WORKER_HEALTH_PORT: "8081"
-      BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}
+      BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup:latest}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp:/tmp
+      - worker_state:/data
+    networks:
+      - default
+      - control-plane
 
 volumes:
-  demo_app_data:
+  demo_nginx_html:
+  demo_nginx_cache:
+  demo_postgres_data:
+  demo_redis_data:
+  demo_files_data:
+  worker_state:
+
+networks:
+  control-plane:
+    name: docker-volume-backup-control-plane_default
+    external: true

@@ -4,6 +4,11 @@ Esta guía cubre el despliegue y la operación de `control_plane` + `worker_agen
 con persistencia SQLite. Para un inicio rápido en 3 comandos, consulta el
 [README principal](../README.md).
 
+## 0. Reset de la release mayor
+
+No hay migración: elimina los volúmenes anteriores y configura desde cero;
+conserva el `WORKER_ID` explícito.
+
 ## 1. Despliegue con Docker
 
 El repositorio separa el despliegue del Control Plane y del Worker en dos
@@ -48,6 +53,9 @@ curl -c cp-cookie.txt -X POST http://127.0.0.1:18080/api/v1/auth/login `
 ```
 
 ### Arrancar el Worker + servicios a backupear
+
+Genera en la UI una credencial HMAC, guarda el secreto y expón
+`WORKER_ENROLLMENT_TOKEN` solo una vez; el worker lo guarda (`0600`).
 
 Edita `deploy/worker/docker-compose.yml` para añadir tus servicios con sus
 volúmenes (el archivo incluye un servicio `demo-app` de ejemplo). Luego:
@@ -526,61 +534,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/workers/<worker_id>/jobs `
 curl http://127.0.0.1:8080/api/v1/jobs
 ```
 
-## 7. Enrolamiento TLS
+## 7. Enrolamiento HMAC y transporte
 
-Variables adicionales para enrolamiento seguro:
-
-- `CONTROL_PLANE_TLS_ENABLED`
-- `CONTROL_PLANE_TLS_DIR`
-- `CONTROL_PLANE_WORKER_MTLS_REQUIRED`
-- `WORKER_ENROLLMENT_TOKEN`
-- `WORKER_ENROLLMENT_CA_PEM`
-- `WORKER_TLS_DIR`
-- `WORKER_TLS_CA_FILE`
-- `WORKER_TLS_CERT_FILE`
-- `WORKER_TLS_KEY_FILE`
-
-Arranque seguro del Control Plane:
-
-```powershell
-$env:CONTROL_PLANE_PORT="18443"
-$env:CONTROL_PLANE_TLS_ENABLED="true"
-$env:CONTROL_PLANE_WORKER_MTLS_REQUIRED="true"
-$env:CONTROL_PLANE_TLS_DIR="tmp/control-plane-tls"
-python -m src.control_plane.main
-```
-
-Crear un enrolamiento desde una sesión admin ya autenticada:
-
-```powershell
-curl -b cp-cookie.txt -X POST https://127.0.0.1:18443/api/v1/admin/worker-enrollments `
-  --cacert tmp/control-plane-tls/ca-cert.pem `
-  -H "Content-Type: application/json" `
-  -d "{\"name\":\"worker-lab\",\"host_name\":\"host-lab\",\"ttl_minutes\":30,\"labels\":{\"env\":\"lab\"}}"
-```
-
-La respuesta devuelve:
-
-- `worker_id`
-- `token`
-- `ca_certificate_pem`
-- `server_certificate_fingerprint`
-
-Arranque del worker con auto-enrolamiento:
-
-```powershell
-$env:CONTROL_PLANE_URL="https://127.0.0.1:18443"
-$env:WORKER_ENROLLMENT_TOKEN="<token>"
-$env:WORKER_ENROLLMENT_CA_PEM=(Get-Content -Raw "tmp/control-plane-tls/ca-cert.pem")
-$env:WORKER_TLS_DIR="tmp/worker-tls"
-$env:WORKER_HEALTH_PORT="8081"
-python -m src.worker_agent.main
-```
-
-Comportamiento esperado:
-
-- si el worker no tiene identidad TLS local, genera su llave privada y CSR,
-- el CP firma el certificado cliente y liga su huella al `worker_id`,
-- el worker guarda `ca-cert.pem`, `worker-cert.pem` y `worker-key.pem` en
-  `WORKER_TLS_DIR`,
-- los siguientes `heartbeat`, `inventory` y operaciones de jobs usan mTLS.
+HMAC usa secreto de un solo uso, digest en CP y archivo `0600`; no hay
+URLs/logs con secretos, registro abierto, certificados de cliente, CSR, huellas
+ni fallback. Variables: `WORKER_ENROLLMENT_TOKEN`, `WORKER_CREDENTIAL_FILE`,
+`WORKER_ID`, `CONTROL_PLANE_URL` y `CONTROL_PLANE_CA_FILE` para HTTPS server-only.
+HTTP local no es confidencial; tras cinco fallos el worker termina.

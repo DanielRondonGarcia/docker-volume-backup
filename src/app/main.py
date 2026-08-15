@@ -133,7 +133,8 @@ def main():
     )
 
     container_config = ContainerConfig(
-        custom_label=os.environ.get("BACKUP_CUSTOM_LABEL")
+        custom_label=os.environ.get("BACKUP_CUSTOM_LABEL"),
+        stop_containers=_env_bool("BACKUP_STOP_CONTAINERS", True),
     )
 
     # Adapters

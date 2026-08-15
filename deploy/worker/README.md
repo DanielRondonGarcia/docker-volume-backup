@@ -1,184 +1,112 @@
-# Worker + Servicios a Backupear
+# Worker + demo de volúmenes
 
-Este directorio contiene el despliegue del **Worker Agent** junto con los
-servicios que se quieren backupear.
-
+Este directorio despliega el **Worker Agent** junto con cuatro servicios demo.
 El Control Plane se despliega por separado desde `deploy/control-plane/`.
 
-## Filosofía
+## Qué incluye
 
-El worker se ejecuta en el mismo Compose project que los servicios a los que
-se les hará backup. Esto permite que:
+Al levantar cualquiera de los dos Compose, el worker y los cuatro servicios demo
+quedan en el mismo Compose project. El worker los descubre mediante las labels de
+Docker Compose y reporta sus volúmenes al Control Plane.
 
-- el worker detecte automáticamente el compose project vía las labels
-  `com.docker.compose.project` de los contenedores,
-- el worker reporte al Control Plane el nombre del proyecto, sus volúmenes
-  y si tiene acceso al daemon de Docker,
-- al crear un target en la UI solo necesites seleccionar el worker y el
-  compose project; los `volume_targets` y `runtime_volumes` se derivan
-  automáticamente del inventario.
+| Servicio | Imagen | Volúmenes nombrados | Propósito |
+| --- | --- | --- | --- |
+| `demo-app` | `nginx:alpine` | `demo_nginx_html:/usr/share/nginx/html`; `demo_nginx_cache:/var/cache/nginx` | HTML y caché de nginx; se publica en `8082` solo en el Compose local |
+| `demo-postgres` | `postgres:16-alpine` | `demo_postgres_data:/var/lib/postgresql/data` | Datos persistentes de una base demo |
+| `demo-redis` | `redis:7-alpine` | `demo_redis_data:/var/lib/redis` | Persistencia AOF de Redis |
+| `demo-files` | `alpine:3.20` | `demo_files_data:/demo-files` | Volumen sencillo con archivos deterministas para probar selección y backup |
 
-No se requiere `network_mode` porque el backup es solo de archivos.
+Los nombres de servicios y volúmenes son equivalentes en `docker-compose.yml` y
+`docker-compose.ghcr.yml`, por lo que el inventario es comparable entre la
+variante local y la de GHCR. El volumen `worker_state` conserva las credenciales
+y el estado del worker; no es parte de los datos demo.
 
-## Conexión con el Control Plane
+Cada ruta de montaje aparece en el inventario como un `volume_target`
+seleccionable. La UI muestra la ruta y, cuando está disponible, el nombre Docker
+del volumen. En este demo, Redis aparece en `/var/lib/redis`, `demo-files` en
+`/demo-files` y el estado del worker en `/data`.
 
-El Compose del Worker se conecta por defecto a la red externa
-`docker-volume-backup-control-plane_default`, que es la red que crea el
-Compose del Control Plane. Gracias a esto, el Worker puede alcanzar al CP por
-el nombre del servicio `control-plane` sin necesidad de exponer el puerto del
-CP al host.
+Los servicios demo tienen la label
+`docker-volume-backup.stop-during-backup: "true"`, para que los backups fríos
+puedan detenerlos y volverlos a iniciar.
 
-Por eso el valor por defecto de `CONTROL_PLANE_URL` es:
+`demo-redis` usa root únicamente para que el entrypoint oficial repare los
+permisos iniciales del volumen; después Redis se ejecuta como el usuario
+`redis`. Es un comportamiento de bootstrap exclusivo de este demo.
 
-```
-http://control-plane:8080
-```
+## Conexión y arranque
 
-Este es el valor recomendado cuando ambos stacks corren en el mismo host de
-Docker. **No** uses `http://host.docker.internal:18080` salvo que el CP esté en
-otro host o no puedas compartir la red entre Composes.
-
-Si el Control Plane está en otro host o puerto, ajusta `CONTROL_PLANE_URL`:
+El worker usa por defecto la red externa
+`docker-volume-backup-control-plane_default` y alcanza el CP mediante
+`http://control-plane:8080`. Levanta primero el Control Plane. Después configura
+el token HMAC de enrolamiento en el entorno y levanta una variante:
 
 ```powershell
-$env:CONTROL_PLANE_URL="http://192.168.1.10:18080"
+$env:WORKER_ENROLLMENT_TOKEN="<token-de-enrolamiento>"
 docker compose -f deploy/worker/docker-compose.yml up -d --build
 ```
 
-## Archivos
-
-- `docker-compose.yml`: construye localmente la imagen dedicada de `worker` e
-  incluye un servicio de ejemplo.
-- `docker-compose.ghcr.yml`: consume la imagen publicada en GHCR para `worker`.
-
-## Servicio de ejemplo: bind mount, no volumen nombrado
-
-El servicio `demo-app` (nginx) incluido en el Compose usa un **bind mount**:
-
-```yaml
-volumes:
-  - ./demo-app-data:/usr/share/nginx/html
-```
-
-Esto significa que los datos se guardan en el directorio `./demo-app-data` del
-host, no en un volumen Docker nombrado. El Worker detecta igualmente el
-compose project, pero ten en cuenta que los bind mounts y los volúmenes
-nombrados se reportan de forma distinta en el inventario.
-
-## Cómo añadir tus servicios
-
-Edita `docker-compose.yml` (o `docker-compose.ghcr.yml`) y añade tus servicios
-con sus volúmenes. Ejemplo con un volumen nombrado:
-
-```yaml
-services:
-  mi-app:
-    image: mi-app:latest
-    restart: unless-stopped
-    volumes:
-      - mi_app_data:/var/lib/app
-
-  worker:
-    # ... configuración del worker (ya presente en el archivo)
-```
-
-Y declara el volumen al final del archivo:
-
-```yaml
-volumes:
-  mi_app_data:
-```
-
-El worker descubrirá `mi-app` y su volumen `mi_app_data` como parte del
-compose project y los reportará al Control Plane.
-
-### Bind mount vs volumen nombrado
-
-- **Volumen nombrado** (ej. `mi_app_data:/var/lib/app`): es la forma
-  recomendada. El Worker lo gestiona como un volumen Docker real, lo monta en
-  el contenedor de runtime y hace el backup por archivo.
-- **Bind mount** (ej. `./mis-datos:/var/lib/app`): los datos viven en una ruta
-  del host. El Worker lo reporta en el inventario, pero el montaje en el
-  contenedor de runtime depende de que la ruta del host sea accesible y
-  consistente. Funciona, pero requiere más cuidado en la definición del
-  target.
-
-## Arranque
-
-Primero levanta el Control Plane (ver `deploy/control-plane/README.md`).
-Luego levanta este stack del worker:
+Para usar las imágenes publicadas:
 
 ```powershell
-docker compose -f deploy/worker/docker-compose.yml up -d --build
+docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
 ```
 
-No hace falta definir `CONTROL_PLANE_URL` si el CP corre en el mismo host y su
-Compose ya creó la red `docker-volume-backup-control-plane_default`: el valor
-por defecto `http://control-plane:8080` ya funciona.
+El Compose local conserva `${DEMO_APP_PORT:-8082}:80` para nginx. No se publican
+puertos de host para Postgres, Redis ni `demo-files`.
 
-## Verificación rápida
+La contraseña de Postgres es explícitamente **solo para demo**. El valor por
+defecto es `demo-only-password`; sobrescríbelo sin guardar secretos en el repo:
 
-Healthcheck del worker:
+```powershell
+$env:DEMO_POSTGRES_PASSWORD="otra-clave-solo-para-pruebas"
+```
+
+## Validación rápida
+
+1. Enrola el worker y espera a que aparezca como conectado en el Control Plane.
+2. Consulta `GET /api/v1/workers/{id}/inventory` para comprobar que aparecen los
+   cuatro contenedores demo, el Compose project y sus `volume_targets`.
+
+   ```powershell
+   curl -b cp-cookie.txt "http://127.0.0.1:18080/api/v1/workers/$WORKER_ID/inventory"
+   ```
+
+3. Abre **Targets**, crea o edita un target para ese Compose project y selecciona
+   solo algunos destinos: por ejemplo `/var/lib/redis` de `demo-redis`,
+   `/demo-files` de `demo-files` o `/data` de `worker_state`. El selector usa
+   rutas de montaje, no nombres Docker de volumen; no selecciones todos por
+   defecto si estás probando la selección parcial.
+4. Verifica que el target conserva únicamente los `volume_targets` elegidos.
+
+Comprobaciones básicas del worker:
 
 ```powershell
 docker compose -f deploy/worker/docker-compose.yml ps
 docker compose -f deploy/worker/docker-compose.yml logs --tail=20 worker
 ```
 
-El `healthcheck` del contenedor worker valida que el endpoint local `/healthz`
-responda. Ese endpoint devuelve además si el último contacto con el Control
-Plane fue exitoso:
+El endpoint `/healthz` informa `status=ok` cuando el último contacto con el CP
+fue exitoso y `status=degraded` cuando el proceso sigue vivo pero falló ese
+contacto.
 
-- `status=ok`: el worker está vivo y alcanzó al CP en el último ciclo.
-- `status=degraded`: el worker sigue vivo, pero no logró contactar al CP en el
-  último intento.
+## Volúmenes y apagado
 
-Un estado degradado no implica que el proceso haya muerto; sirve como
-observabilidad adicional.
+Los volúmenes nombrados (`demo_*`) son la forma recomendada para este ejemplo:
+el worker puede montarlos en el runtime y hacer backup por archivo. Un bind mount
+también puede descubrirse, pero depende de que la ruta del host sea accesible y
+consistente; el demo actual usa únicamente volúmenes nombrados.
 
-Confirmar que el worker se registró en el CP:
-
-```powershell
-curl -b cp-cookie.txt http://127.0.0.1:18080/api/v1/workers
-```
-
-Confirmar el inventario reportado por el worker (incluye este compose project
-con sus volúmenes):
-
-```powershell
-# $WORKER_ID se obtiene del endpoint /api/v1/workers
-curl -b cp-cookie.txt http://127.0.0.1:18080/api/v1/workers/$WORKER_ID/inventory
-```
-
-## Uso con imágenes publicadas en GHCR
-
-```powershell
-docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
-```
-
-Imagen esperada:
-
-- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
-
-## Apagado
+Para detener el stack sin borrar datos:
 
 ```powershell
 docker compose -f deploy/worker/docker-compose.yml down
 ```
 
-Para borrar también los volúmenes del stack (incluido el volumen de ejemplo
-`demo_app_data`):
+Mientras pruebas el inventario y la selección, **evita `docker compose down -v`**:
+ese comando borra `demo_nginx_*`, `demo_postgres_data`, `demo_redis_data`,
+`demo_files_data` y `worker_state`.
 
-```powershell
-docker compose -f deploy/worker/docker-compose.yml down -v
-```
-
-## Notas
-
-- El worker depende de acceso real a `docker.sock`; si el host no expone ese
-  socket, el inventario y la ejecución de runtimes no funcionarán.
-- El `worker` puede reportar `control_plane_reachable=false` en `/healthz` y
-  seguir ejecutándose; esto indica degradación de conectividad, no
-  necesariamente caída del proceso.
-- El servicio `demo-app` es solo un ejemplo; reemplázalo o elimínalo según tu
-  caso.
+Si el Control Plane está en otro host o puerto, ajusta `CONTROL_PLANE_URL`, por
+ejemplo `http://192.168.1.10:18080`. El worker requiere acceso real a
+`/var/run/docker.sock` para descubrir contenedores y volúmenes.

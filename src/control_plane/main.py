@@ -27,7 +27,6 @@ from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryStorageProfileRepository,
     InMemoryTargetStatsRepository,
     InMemoryTargetRepository,
-    InMemoryWorkerEnrollmentRepository,
     InMemoryWorkerRepository,
 )
 from src.control_plane.infrastructure.repositories.sqlite import (
@@ -40,11 +39,11 @@ from src.control_plane.infrastructure.repositories.sqlite import (
     SQLiteStorageProfileRepository,
     SQLiteTargetStatsRepository,
     SQLiteTargetRepository,
-    SQLiteWorkerEnrollmentRepository,
     SQLiteWorkerRepository,
 )
 from src.control_plane.infrastructure.security.secret_codec import SecretCodec
 from src.control_plane.infrastructure.security.tls import TLSMaterialManager
+from src.control_plane.infrastructure.security.worker_auth import WorkerAuthState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -91,14 +90,13 @@ def _build_tls_manager():
 
 def _build_service() -> ControlPlaneService:
     repository_mode = os.environ.get("CONTROL_PLANE_REPOSITORY", "sqlite").strip().lower()
-    tls_manager = _build_tls_manager()
     codec = SecretCodec.from_runtime(
         key_file_path=os.environ.get("CONTROL_PLANE_KEY_FILE", ".control_plane.key"),
         env_key=os.environ.get("CONTROL_PLANE_MASTER_KEY"),
     )
     if repository_mode == "memory":
         logger.info("Using in-memory repositories for Control Plane")
-        return ControlPlaneService(
+        service = ControlPlaneService(
             worker_repository=InMemoryWorkerRepository(),
             inventory_repository=InMemoryInventoryRepository(),
             target_repository=InMemoryTargetRepository(),
@@ -108,15 +106,16 @@ def _build_service() -> ControlPlaneService:
             snapshot_repository=InMemorySnapshotRepository(),
             retention_policy_repository=InMemoryRetentionPolicyRepository(),
             target_stats_repository=InMemoryTargetStatsRepository(),
-            worker_enrollment_repository=InMemoryWorkerEnrollmentRepository(),
             secret_codec=codec,
-            tls_manager=tls_manager,
             settings_repository=InMemorySettingsRepository(),
         )
+        service.worker_auth = WorkerAuthState()
+        return service
 
     database_path = os.environ.get("CONTROL_PLANE_DB_PATH", "control_plane.db")
     logger.info("Using SQLite repositories for Control Plane at %s", database_path)
-    return ControlPlaneService(
+    worker_auth = WorkerAuthState(database_path)
+    service = ControlPlaneService(
         worker_repository=SQLiteWorkerRepository(database_path),
         inventory_repository=SQLiteInventoryRepository(database_path),
         target_repository=SQLiteTargetRepository(database_path),
@@ -126,18 +125,17 @@ def _build_service() -> ControlPlaneService:
         snapshot_repository=SQLiteSnapshotRepository(database_path),
         retention_policy_repository=SQLiteRetentionPolicyRepository(database_path),
         target_stats_repository=SQLiteTargetStatsRepository(database_path),
-        worker_enrollment_repository=SQLiteWorkerEnrollmentRepository(database_path),
         secret_codec=codec,
-        tls_manager=tls_manager,
         settings_repository=SQLiteSettingsRepository(database_path),
     )
+    service.worker_auth = worker_auth
+    return service
 
 @dataclass
 class ControlPlaneApplication:
     auth_service: AuthService
     control_plane_service: ControlPlaneService
     tls_manager: TLSMaterialManager | None = None
-    worker_mtls_required: bool = False
     scheduler: "SchedulerService | None" = None
 
 
@@ -158,12 +156,12 @@ class ControlPlaneHTTPSServer((NativeThreadingHTTPSServer or ThreadingHTTPServer
             )
             self.application = application
             self.socket.context.load_verify_locations(cafile=tls_manager.get_ca_certificate_path())
-            self.socket.context.verify_mode = ssl.CERT_OPTIONAL if application.worker_mtls_required else ssl.CERT_NONE
+            self.socket.context.verify_mode = ssl.CERT_NONE
             return
 
         super().__init__(server_address, RequestHandlerClass, bind_and_activate=False)
         self.application = application
-        context = tls_manager.build_server_ssl_context(require_client_cert=application.worker_mtls_required)
+        context = tls_manager.build_server_ssl_context()
         self.socket = context.wrap_socket(self.socket, server_side=True)
         self.server_bind()
         self.server_activate()
@@ -178,8 +176,8 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _control_plane_service(self) -> ControlPlaneService:
         return self.server.application.control_plane_service
 
-    def _tls_manager(self) -> TLSMaterialManager | None:
-        return self.server.application.tls_manager
+    def _worker_auth(self) -> WorkerAuthState:
+        return self._control_plane_service().worker_auth
 
     def do_GET(self):
         self._handle_get_request(head_only=False)
@@ -331,15 +329,6 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     },
                     head_only=head_only,
                 )
-            if path == "/api/v1/admin/worker-enrollments":
-                if not self._require_auth(ROLE_ADMIN, head_only=head_only, api_mode=True):
-                    return
-                return self._write_json(
-                    200,
-                    {"items": _to_jsonable(self._control_plane_service().list_worker_enrollments())},
-                    head_only=head_only,
-                )
-
             parts = self._path_parts(path)
             if len(parts) == 4 and parts[:3] == ["api", "v1", "jobs"]:
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
@@ -385,6 +374,8 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self._read_json_body()
         try:
+            if path in ("/api/v1/workers/register", "/api/v1/worker-enrollments/sign"):
+                return self._write_json(404, {"error": "legacy worker trust path is unsupported"})
             if path == "/api/v1/auth/login":
                 username = body.get("username", "")
                 password = body.get("password", "")
@@ -452,36 +443,31 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/admin/worker-enrollments":
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
                     return
-                enrollment = self._control_plane_service().create_worker_enrollment(
+                enrollment = self._worker_auth().create_enrollment(
                     name=body.get("name") or "worker",
                     host_name=body.get("host_name") or "unknown-host",
                     labels=body.get("labels") or {},
+                    secret=body.get("secret"),
+                    worker_id=body.get("worker_id"),
                     ttl_minutes=int(body.get("ttl_minutes") or 30),
                 )
                 return self._write_json(201, _to_jsonable(enrollment))
-            if path == "/api/v1/worker-enrollments/sign":
-                result = self._control_plane_service().enroll_worker_certificate(
-                    token=body.get("token", ""),
-                    csr_pem=body.get("csr_pem", ""),
-                    version=body.get("version") or "dev",
-                    labels=body.get("labels") or {},
-                )
-                return self._write_json(201, _to_jsonable(result))
-            if path == "/api/v1/workers/register":
-                requested_worker_id = body.get("worker_id")
-                if self.server.application.worker_mtls_required and not requested_worker_id:
-                    return self._write_json(400, {"error": "worker_id is required when mTLS is enabled"})
-                if requested_worker_id and not self._require_worker_identity(requested_worker_id):
-                    return
+            if path == "/api/v1/worker-enrollments/complete":
+                result = self._worker_auth().complete(body.get("secret", ""), body.get("version") or "1", body.get("labels"))
                 worker = self._control_plane_service().register_worker(
-                    name=body.get("name") or "worker",
-                    host_name=body.get("host_name") or "unknown-host",
-                    version=body.get("version") or "dev",
-                    labels=body.get("labels") or {},
-                    worker_id=requested_worker_id,
-                    certificate_fingerprint=self._peer_certificate_fingerprint(),
+                    name=result["name"], host_name=result["host_name"], labels=result["labels"], worker_id=result["worker_id"]
                 )
-                return self._write_json(201, _to_jsonable(worker))
+                return self._write_json(201, {"worker_id": worker.id, "credential_version": result["credential_version"]})
+            parts = self._path_parts(path)
+            if len(parts) == 6 and parts[:4] == ["api", "v1", "admin", "workers"]:
+                if not self._require_auth(ROLE_ADMIN, api_mode=True):
+                    return
+                if parts[5] == "rotate":
+                    self._control_plane_service().get_worker(parts[4])
+                    return self._write_json(200, self._worker_auth().rotate(parts[4], body.get("secret", "")))
+                if parts[5] == "revoke":
+                    self._control_plane_service().get_worker(parts[4])
+                    return self._write_json(200, self._worker_auth().revoke(parts[4], body.get("version")))
 
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
@@ -648,6 +634,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     status=body["status"],
                     result_summary=body.get("result_summary"),
                     log_lines=body.get("log_lines"),
+                    lease_token=body.get("lease_token"),
                 )
                 return self._write_json(200, _to_jsonable(job))
 
@@ -848,8 +835,11 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _read_json_body(self):
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
+            self._raw_body = b""
             return {}
-        raw = self.rfile.read(content_length).decode("utf-8")
+        raw_bytes = self.rfile.read(content_length)
+        self._raw_body = raw_bytes
+        raw = raw_bytes.decode("utf-8")
         return json.loads(raw) if raw else {}
 
     def _write_json(self, status_code: int, payload, head_only: bool = False, extra_headers: dict | None = None):
@@ -943,26 +933,16 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _path_parts(path: str):
         return [part for part in path.strip("/").split("/") if part]
 
-    def _peer_certificate_fingerprint(self) -> str | None:
-        tls_manager = self._tls_manager()
-        if tls_manager is None:
-            return None
-        peer_certificate = getattr(self.connection, "getpeercert", lambda **kwargs: None)(binary_form=True)
-        return tls_manager.fingerprint_from_peer_certificate(peer_certificate)
-
     def _require_worker_identity(self, worker_id: str) -> bool:
-        if not self.server.application.worker_mtls_required:
-            return True
-        fingerprint = self._peer_certificate_fingerprint()
-        if not fingerprint:
-            self._write_json(401, {"error": "worker client certificate required"})
-            return False
-        worker = self._control_plane_service().get_worker(worker_id)
-        if not worker.certificate_fingerprint:
-            self._write_json(403, {"error": "worker has no enrolled certificate"})
-            return False
-        if worker.certificate_fingerprint != fingerprint:
-            self._write_json(403, {"error": "worker certificate fingerprint mismatch"})
+        try:
+            self._worker_auth().authenticate(
+                worker_id, self.command, self.path, getattr(self, "_raw_body", b""),
+                self.headers.get("X-Worker-Timestamp", ""), self.headers.get("X-Worker-Nonce", ""),
+                self.headers.get("X-Worker-ID", ""), self.headers.get("X-Worker-Credential-Version", ""),
+                self.headers.get("X-Worker-Signature", ""),
+            )
+        except (ValueError, RuntimeError) as exc:
+            self._write_json(401, {"error": str(exc), "code": "worker_auth_failed"})
             return False
         return True
 
@@ -974,8 +954,7 @@ def build_application() -> ControlPlaneApplication:
     app = ControlPlaneApplication(
         auth_service=AuthService.from_runtime(),
         control_plane_service=control_plane_service,
-        tls_manager=control_plane_service.tls_manager,
-        worker_mtls_required=_env_flag("CONTROL_PLANE_WORKER_MTLS_REQUIRED", default=False),
+        tls_manager=_build_tls_manager(),
         scheduler=scheduler,
     )
     return app
@@ -997,6 +976,7 @@ def main():
         logger.info("Control Plane TLS enabled with CA at %s", application.tls_manager.get_ca_certificate_path())
     else:
         server = ControlPlaneHTTPServer((host, port), ControlPlaneRequestHandler, application=application)
+        logger.warning("Control Plane HTTP is non-confidential; use HTTPS for remote or confidential deployments")
     logger.info("Control Plane listening on %s:%s", host, port)
     server.serve_forever()
 

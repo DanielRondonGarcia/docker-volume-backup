@@ -1,6 +1,7 @@
 import json
+import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Dict, List, Optional
 
@@ -30,7 +31,27 @@ from src.control_plane.domain.models import (
     TargetStatsRecord,
     WorkerEnrollmentRecord,
     WorkerRecord,
+    utcnow,
 )
+
+
+class _SQLiteConnection:
+    def __init__(self, database_path: str):
+        self._connection = sqlite3.connect(database_path)
+        self._connection.row_factory = sqlite3.Row
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self._connection
+
+    def __exit__(self, *args):
+        try:
+            return self._connection.__exit__(*args)
+        finally:
+            self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
 
 
 def _dt(value: Optional[str]) -> Optional[datetime]:
@@ -52,9 +73,7 @@ class SQLiteRepositoryBase:
         self._initialize()
 
     def _connect(self):
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+        return _SQLiteConnection(self.database_path)
 
     def _initialize(self):
         with self._connect() as connection:
@@ -67,7 +86,6 @@ class SQLiteRepositoryBase:
                     version TEXT NOT NULL,
                     labels_json TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    certificate_fingerprint TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_seen_at TEXT
@@ -126,6 +144,11 @@ class SQLiteRepositoryBase:
                     target_id TEXT,
                     trigger TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    owner_worker_id TEXT,
+                    lease_token TEXT,
+                    lease_issued_at TEXT,
+                    lease_expires_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
                     result_summary_json TEXT,
                     log_lines_json TEXT NOT NULL,
                     submitted_at TEXT NOT NULL,
@@ -205,7 +228,6 @@ class SQLiteRepositoryBase:
                 );
                 """
             )
-            self._ensure_column(connection, "workers", "certificate_fingerprint", "TEXT")
             self._ensure_column(connection, "settings", "rclone_conf_secret_id", "TEXT")
             self._ensure_column(connection, "settings", "global_cron_expression", "TEXT")
             self._ensure_column(connection, "settings", "control_plane_public_url", "TEXT NOT NULL DEFAULT ''")
@@ -225,8 +247,8 @@ class SQLiteWorkerRepository(SQLiteRepositoryBase, WorkerRepository):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO workers (
-                    id, name, host_name, version, labels_json, status, certificate_fingerprint, created_at, updated_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, name, host_name, version, labels_json, status, created_at, updated_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     worker.id,
@@ -235,7 +257,6 @@ class SQLiteWorkerRepository(SQLiteRepositoryBase, WorkerRepository):
                     worker.version,
                     json.dumps(worker.labels),
                     worker.status,
-                    worker.certificate_fingerprint,
                     worker.created_at.isoformat(),
                     worker.updated_at.isoformat(),
                     worker.last_seen_at.isoformat() if worker.last_seen_at else None,
@@ -267,12 +288,10 @@ class SQLiteWorkerRepository(SQLiteRepositoryBase, WorkerRepository):
             version=row["version"],
             labels=_json_load(row["labels_json"], {}),
             status=row["status"],
-            certificate_fingerprint=row["certificate_fingerprint"],
             created_at=_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
             last_seen_at=_dt(row["last_seen_at"]),
         )
-
 
 class SQLiteWorkerEnrollmentRepository(SQLiteRepositoryBase, WorkerEnrollmentRepository):
     def save(self, enrollment: WorkerEnrollmentRecord) -> WorkerEnrollmentRecord:
@@ -450,8 +469,9 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                 """
                 INSERT OR REPLACE INTO jobs (
                     id, worker_id, command, payload_json, requested_by, target_id, trigger, status,
+                    owner_worker_id, lease_token, lease_issued_at, lease_expires_at, attempt_count,
                     result_summary_json, log_lines_json, submitted_at, started_at, finished_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -461,7 +481,12 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                     job.requested_by,
                     job.target_id,
                     job.trigger,
-                    job.status,
+                    JobStatus.normalize(job.status),
+                    job.owner_worker_id,
+                    job.lease_token,
+                    job.lease_issued_at.isoformat() if job.lease_issued_at else None,
+                    job.lease_expires_at.isoformat() if job.lease_expires_at else None,
+                    job.attempt_count,
                     json.dumps(job.result_summary) if job.result_summary is not None else None,
                     json.dumps(job.log_lines),
                     job.submitted_at.isoformat(),
@@ -470,6 +495,7 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                     job.updated_at.isoformat(),
                 ),
             )
+            job.status = JobStatus.normalize(job.status)
         return job
 
     def get(self, job_id: str) -> Optional[JobRecord]:
@@ -482,17 +508,89 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             rows = connection.execute("SELECT * FROM jobs ORDER BY submitted_at DESC").fetchall()
         return [self._row_to_job(row) for row in rows]
 
-    def list_pending_for_worker(self, worker_id: str) -> List[JobRecord]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM jobs
-                WHERE worker_id = ? AND status = ?
-                ORDER BY submitted_at ASC
-                """,
-                (worker_id, JobStatus.PENDING),
-            ).fetchall()
-        return [self._row_to_job(row) for row in rows]
+    def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease duration must be positive")
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    """
+                    SELECT id, lease_expires_at FROM jobs
+                    WHERE worker_id = ? AND status = ? AND lease_expires_at IS NOT NULL
+                    """,
+                    (worker_id, JobStatus.IN_PROGRESS),
+                ).fetchall()
+                now = utcnow()
+                for row in rows:
+                    lease_expires_at = _dt(row["lease_expires_at"])
+                    if lease_expires_at and lease_expires_at.tzinfo:
+                        lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    if lease_expires_at and lease_expires_at <= now:
+                        connection.execute(
+                            """
+                            UPDATE jobs
+                            SET status = ?, owner_worker_id = NULL, lease_token = NULL,
+                                lease_issued_at = NULL, lease_expires_at = NULL,
+                                started_at = NULL, finished_at = NULL, updated_at = ?
+                            WHERE id = ? AND status = ?
+                            """,
+                            (JobStatus.PENDING, now.isoformat(), row["id"], JobStatus.IN_PROGRESS),
+                        )
+                rows = connection.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE worker_id = ? AND status = ?
+                    ORDER BY submitted_at ASC
+                    """,
+                    (worker_id, JobStatus.PENDING),
+                ).fetchall()
+                expires_at = now + timedelta(seconds=lease_duration_seconds)
+                claimed = []
+                for row in rows:
+                    lease_token = secrets.token_urlsafe(32)
+                    attempt_count = (row["attempt_count"] or 0) + 1
+                    updated = connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?, owner_worker_id = ?, lease_token = ?,
+                            lease_issued_at = ?, lease_expires_at = ?, attempt_count = ?,
+                            started_at = ?, updated_at = ?
+                        WHERE id = ? AND status = ?
+                        """,
+                        (
+                            JobStatus.IN_PROGRESS,
+                            worker_id,
+                            lease_token,
+                            now.isoformat(),
+                            expires_at.isoformat(),
+                            attempt_count,
+                            now.isoformat(),
+                            now.isoformat(),
+                            row["id"],
+                            JobStatus.PENDING,
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        continue
+                    job = self._row_to_job(row)
+                    job.status = JobStatus.IN_PROGRESS
+                    job.owner_worker_id = worker_id
+                    job.lease_token = lease_token
+                    job.lease_issued_at = now
+                    job.lease_expires_at = expires_at
+                    job.attempt_count = attempt_count
+                    job.started_at = now
+                    job.updated_at = now
+                    claimed.append(job)
+                connection.commit()
+                return claimed
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:
@@ -504,7 +602,12 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             requested_by=row["requested_by"],
             target_id=row["target_id"],
             trigger=row["trigger"],
-            status=row["status"],
+            status=JobStatus.normalize(row["status"]),
+            owner_worker_id=row["owner_worker_id"],
+            lease_token=row["lease_token"],
+            lease_issued_at=_dt(row["lease_issued_at"]),
+            lease_expires_at=_dt(row["lease_expires_at"]),
+            attempt_count=row["attempt_count"] or 0,
             result_summary=_json_load(row["result_summary_json"], None),
             log_lines=_json_load(row["log_lines_json"], []),
             submitted_at=_dt(row["submitted_at"]) or datetime.utcnow(),
