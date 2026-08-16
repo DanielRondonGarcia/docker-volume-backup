@@ -185,3 +185,78 @@ class SettingsRecord:
     control_plane_public_url: str = ""
     id: str = "default"
     updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SnapshotReadRequest:
+    """Typed interactive snapshot read request (schema version 1)."""
+
+    snapshot_id: str
+    path: str
+    operation: str
+    schema_version: int = 1
+    request_id: str = field(default_factory=lambda: str(uuid4()))
+    target_id: Optional[str] = None
+    max_entries: Optional[int] = None
+
+
+@dataclass
+class SnapshotReadResponse:
+    """Typed interactive snapshot read response (schema version 1)."""
+
+    request_id: str
+    job_id: str
+    status: str
+    source: str = "restic"
+    cache_hit: bool = False
+    schema_version: int = 1
+    entries: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+@dataclass
+class CacheGenerationRecord:
+    """Per-target repository cache generation used for invalidation."""
+
+    target_id: str
+    repository_fingerprint: str
+    generation: int = 0
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class IndexStatusRecord:
+    """Per-snapshot eager-index status with bounded entry count."""
+
+    target_id: str
+    snapshot_id: str
+    status: str = "pending"
+    entry_count: int = 0
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SnapshotExplorerConfig:
+    """Feature-flag configuration for the Snapshot Explorer v2 read path."""
+
+    no_lock: bool = False
+    cache_dir: Optional[str] = None
+    redis_url: Optional[str] = None
+    eager_index: bool = False
+
+    @classmethod
+    def from_env(cls) -> "SnapshotExplorerConfig":
+        import os
+
+        def _flag(name: str, default: bool = False) -> bool:
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
+        return cls(
+            no_lock=_flag("SNAPSHOT_EXPLORER_NO_LOCK"),
+            cache_dir=os.environ.get("SNAPSHOT_EXPLORER_CACHE_DIR") or None,
+            redis_url=os.environ.get("SNAPSHOT_EXPLORER_REDIS_URL") or None,
+            eager_index=_flag("SNAPSHOT_EXPLORER_EAGER_INDEX"),
+        )

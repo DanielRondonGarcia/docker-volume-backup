@@ -35,6 +35,24 @@ sin necesidad de exponer el puerto del CP al host.
 Si el Control Plane está en otro host o puerto, ajusta `CONTROL_PLANE_URL` al
 `host:puerto` publicado del CP.
 
+El Compose del Control Plane incluye el servicio interno `redis` (Redis 7 con
+AOF y volumen `snapshot_explorer_redis`). El Worker usa por defecto
+`redis://redis:6379/0` para cachear únicamente metadatos acotados de Snapshot
+Explorer; Redis no se publica al host. El TTL por defecto es de 86400 segundos
+(24 horas), con un maximo de 86400 y hasta 1000 entradas por target y
+repositorio. El servicio usa `maxmemory 128mb` con `allkeys-lru`, por lo que la
+persistencia AOF no evita la expiracion ni la eviccion. La cache es opcional: si
+Redis falta, no responde o se configura mal, el Worker vuelve a Restic y el
+catalogo del CP continua respaldado por SQLite.
+
+Para desactivarla de forma explícita, define una URL vacía antes de levantar el
+Worker:
+
+```powershell
+$env:SNAPSHOT_EXPLORER_REDIS_URL=""
+docker compose -f deploy/worker/docker-compose.yml up -d --build
+```
+
 ### Arrancar el Control Plane
 
 ```powershell

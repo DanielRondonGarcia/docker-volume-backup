@@ -8,6 +8,143 @@
   <link rel="stylesheet" href="/styles/tokens.css" />
   <link rel="stylesheet" href="/styles/components.css" />
   <link rel="stylesheet" href="/styles/app.css" />
+  <style>
+    .modal-snapshots {
+      width: min(1180px, 96vw);
+      max-width: none;
+      height: min(88vh, 820px);
+      max-height: none;
+      overflow: hidden;
+    }
+    .snapshot-explorer-shell {
+      display: grid;
+      grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
+      min-height: 0;
+      flex: 1;
+    }
+    .snapshot-navigation {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      padding: 16px;
+      border-right: 1px solid var(--border);
+      background: color-mix(in srgb, var(--background) 55%, var(--card));
+    }
+    .snapshot-target-card {
+      padding: 12px;
+      margin-bottom: 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--card);
+    }
+    .snapshot-target-label,
+    .snapshot-section-label {
+      color: var(--muted-foreground);
+      font: 600 10px/1.2 var(--font-mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .snapshot-target-name { margin-top: 6px; font-weight: 700; overflow-wrap: anywhere; }
+    .snapshot-target-id { margin-top: 4px; color: var(--muted-foreground); font: 11px/1.4 var(--font-mono); overflow-wrap: anywhere; }
+    .snapshot-navigation-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .snapshot-refresh-button { min-width: 94px; }
+    .snapshot-refresh-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      flex: 0 0 12px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      opacity: .72;
+      visibility: hidden;
+      animation: snapshot-refresh-spin .7s linear infinite;
+      animation-play-state: paused;
+    }
+    .snapshot-refresh-button[aria-busy="true"] .snapshot-refresh-spinner {
+      visibility: visible;
+      animation-play-state: running;
+    }
+    @keyframes snapshot-refresh-spin { to { transform: rotate(360deg); } }
+    .snapshot-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 0;
+      overflow-y: auto;
+      outline: none;
+    }
+    .snapshot-list:focus-visible,
+    .snapshot-entry-list:focus-visible { box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring); border-radius: var(--radius); }
+    .snapshot-option {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--foreground);
+      text-align: left;
+      cursor: pointer;
+    }
+    .snapshot-option:hover { background: var(--accent); }
+    .snapshot-option:focus-visible { outline: 0; border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+    .snapshot-option[aria-selected="true"] { border-color: color-mix(in srgb, var(--primary) 48%, var(--border)); background: color-mix(in srgb, var(--primary) 12%, var(--card)); }
+    .snapshot-option-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .snapshot-option-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px/1.4 var(--font-mono); }
+    .snapshot-option-date { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+    .snapshot-option-paths { margin-top: 5px; color: var(--muted-foreground); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+    .snapshot-option-actions { display: flex; justify-content: flex-end; margin-top: 7px; }
+    .snapshot-workspace { min-width: 0; min-height: 0; overflow-y: auto; padding: 20px; }
+    .snapshot-workspace-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .snapshot-workspace-title { margin: 0; font-size: 16px; }
+    .snapshot-workspace-subtitle { margin-top: 4px; color: var(--muted-foreground); font-size: 12px; }
+    .snapshot-workspace-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .snapshot-search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .snapshot-search-field { position: relative; flex: 1; min-width: 180px; }
+    .snapshot-search-field input { width: 100%; box-sizing: border-box; padding: 9px 38px 9px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); color: var(--foreground); }
+    .snapshot-search-field input:focus { outline: 0; border-color: var(--ring); box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in srgb, var(--ring) 40%, transparent); }
+    .snapshot-search-clear { position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted-foreground); cursor: pointer; }
+    .snapshot-search-clear:hover { background: var(--accent); color: var(--foreground); }
+    .snapshot-breadcrumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); font: 12px/1.5 var(--font-mono); }
+    .snapshot-breadcrumb { padding: 2px 4px; border: 0; border-radius: 3px; background: transparent; color: var(--primary); cursor: pointer; font: inherit; }
+    .snapshot-breadcrumb:hover { background: var(--accent); }
+    .snapshot-breadcrumb:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+    .snapshot-entry-list { display: flex; flex-direction: column; gap: 6px; outline: none; }
+    .snapshot-entry-option { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); cursor: pointer; }
+    .snapshot-entry-option:hover { border-color: color-mix(in srgb, var(--primary) 42%, var(--border)); background: color-mix(in srgb, var(--accent) 55%, var(--card)); }
+    .snapshot-entry-option:focus-visible { outline: 0; border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+    .snapshot-entry-icon { color: var(--muted-foreground); font-size: 16px; text-align: center; }
+    .snapshot-entry-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.5 var(--font-mono); }
+    .snapshot-entry-meta { color: var(--muted-foreground); font-size: 11px; }
+    .snapshot-entry-action { justify-self: end; }
+     .snapshot-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--muted-foreground); font-size: 12px; }
+     .snapshot-status[hidden] { display: none !important; }
+     .snapshot-status strong { color: var(--foreground); }
+    .snapshot-status[data-state="error"], .snapshot-status[data-state="deleted"], .snapshot-status[data-state="blocked"], .snapshot-status[data-state="oversized"] { border-color: color-mix(in srgb, var(--destructive) 48%, var(--border)); }
+    .snapshot-status[data-state="stale"] { border-color: color-mix(in srgb, var(--warning, #d97706) 48%, var(--border)); }
+    .snapshot-status[data-state="canceled"] { border-color: color-mix(in srgb, var(--muted-foreground) 48%, var(--border)); }
+    .snapshot-status .btn { margin-left: auto; }
+    .snapshot-skeleton-list { display: flex; flex-direction: column; gap: 8px; }
+    .snapshot-skeleton-row { height: 44px; border: 1px solid var(--border); border-radius: var(--radius); background: linear-gradient(90deg, var(--card) 25%, var(--muted) 50%, var(--card) 75%); background-size: 200% 100%; animation: snapshot-skeleton 1.2s ease-in-out infinite; }
+    @keyframes snapshot-skeleton { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    .snapshot-empty { padding: 34px 18px; color: var(--muted-foreground); text-align: center; }
+    .snapshot-empty strong { display: block; margin-bottom: 6px; color: var(--foreground); }
+    .snapshot-safe-note { margin-top: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; }
+    @media (max-width: 760px) {
+      .modal-snapshots { width: 100%; height: 92vh; }
+      .snapshot-explorer-shell { grid-template-columns: 1fr; grid-template-rows: minmax(170px, 34%) minmax(0, 1fr); }
+      .snapshot-navigation { padding: 12px; border-right: 0; border-bottom: 1px solid var(--border); }
+      .snapshot-target-card { margin-bottom: 10px; padding: 9px 10px; }
+      .snapshot-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); overflow-y: auto; }
+      .snapshot-workspace { padding: 14px; }
+      .snapshot-workspace-header { flex-direction: column; }
+      .snapshot-workspace-actions { justify-content: flex-start; }
+      .snapshot-entry-option { grid-template-columns: 24px minmax(0, 1fr); }
+      .snapshot-entry-action { grid-column: 2; justify-self: start; }
+    }
+  </style>
 </head>
 <body>
   <div id="appLoader" class="app-loader">
@@ -114,18 +251,29 @@
       return `<span class="cmd-badge ${m.cls}"><span class="cmd-badge-icon">${m.icon}</span>${escapeHtml(m.label)}</span>`;
     }
 
-    async function apiGet(path) {
-      const resp = await fetch(path);
+    async function apiGet(path, options = {}) {
+      const resp = await fetch(path, { ...options, method: "GET" });
       if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
-      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+      if (!resp.ok) {
+        const error = new Error(`${resp.status} ${resp.statusText}`);
+        error.status = resp.status;
+        throw error;
+      }
       return resp.json();
     }
-    async function apiPost(path, body) {
-      const resp = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    async function apiPost(path, body, options = {}) {
+      const resp = await fetch(path, {
+        ...options,
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        body: JSON.stringify(body),
+      });
       if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+        const error = new Error(err.error || `${resp.status} ${resp.statusText}`);
+        error.status = resp.status;
+        throw error;
       }
       return resp.json();
     }
@@ -750,7 +898,10 @@ docker compose up -d
     let targetsTableState = { sortKey: "name", sortDir: "asc", page: 1, pageSize: 25, filters: { name: "", worker: "", compose: "", mode: "", retention: "", cron: "" } };
 
     function renderTargets(content) {
-      const workerOptions = state.workers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+      const eligibleWorkers = (state.workers || []).filter(w => w.status === "online");
+      const workerOptions = eligibleWorkers.length
+        ? eligibleWorkers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("")
+        : '<option value="">-- No hay workers online --</option>';
       const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
       const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)}</option>`).join("");
       const settings = state.settings || {};
@@ -762,8 +913,8 @@ docker compose up -d
           <form id="createTargetForm">
             <div class="form-grid">
               <div class="field"><label for="targetName">Nombre</label><input id="targetName" required /></div>
-              <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${state.workers.length ? "" : "disabled"}>${workerOptions}</select></div>
-              <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${state.workers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
+               <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${eligibleWorkers.length ? "" : "disabled"}>${workerOptions}</select></div>
+               <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${eligibleWorkers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
               <div class="field"><label for="targetBackupMode">Modo</label><select id="targetBackupMode"><option value="hot">hot</option><option value="cold">cold</option></select></div>
               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
@@ -785,8 +936,8 @@ docker compose up -d
                 <div class="field full"><label for="targetRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="targetRestoreDefaults" placeholder="{}">{"layout":"auto"}</textarea></div>
               </div>
             </details>
-            <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${state.workers.length ? "" : "disabled"}>Crear target</button></div>
-            <div class="helper">${state.workers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "Primero registra al menos un worker."}</div>
+             <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${eligibleWorkers.length ? "" : "disabled"}>Crear target</button></div>
+             <div class="helper">${eligibleWorkers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "No hay workers elegibles online. Registra un worker y espera su heartbeat antes de crear un target."}</div>
           </form>
         </div></details>
         <div class="page-header"><div><h2>Targets configurados</h2></div></div>
@@ -1108,393 +1259,1355 @@ docker compose up -d
       }, "Ejecutando...").catch(() => {});
     }
 
+    const SNAPSHOT_CACHE_LIMIT = 8;
+    const SNAPSHOT_PREFETCH_LIMIT = 2;
+    const SNAPSHOT_MAX_ENTRIES = 200;
+    const SNAPSHOT_SEARCH_MIN_LENGTH = 2;
+    const SNAPSHOT_POLL_DELAYS = [150, 300, 500, 800, 1200, 1800, 2600, 3500];
+    const SNAPSHOT_POLL_ATTEMPTS = SNAPSHOT_POLL_DELAYS.length;
+    const SNAPSHOT_POLL_MAX_MS = 90000;
+    const SNAPSHOT_CATALOG_REFRESH_DELAYS = [500, 1000, 2000, 3500, 5000, 7000];
+    const SNAPSHOT_REFRESH_LABEL = "Refrescar lista de snapshots";
+    const SNAPSHOT_REFRESH_BUSY_LABEL = "Sincronizando snapshots...";
+    const SNAPSHOT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+    const SNAPSHOT_MAX_BASE64_LENGTH = Math.ceil(SNAPSHOT_MAX_OUTPUT_BYTES * 4 / 3) + 4;
+    const SNAPSHOT_STATE_LABELS = {
+      loading: "Cargando",
+      indexing: "Indexando",
+      pending: "Pendiente",
+      empty: "Vacio",
+      "no-match": "Sin coincidencias",
+      error: "Error",
+      stale: "Datos en cache",
+      canceled: "Cancelado",
+      deleted: "Eliminado",
+      blocked: "Bloqueado",
+      oversized: "Excede el limite",
+      offline: "Worker no disponible",
+      timeout: "Tiempo agotado",
+      unsupported: "No disponible",
+      ready: "Listo",
+    };
     let snapshotBrowserState = null;
+
+    function createSnapshotBrowserState(target) {
+      return {
+        target,
+        snapshots: [],
+        currentSnapshot: null,
+        currentPath: "/",
+        entries: [],
+        loading: false,
+        view: "list",
+        searchQuery: "",
+        searchActive: false,
+        searchTimer: null,
+        requestSequence: 0,
+        activeRequest: null,
+        catalogRequestSequence: 0,
+        catalogRequest: null,
+        catalogSyncRequest: null,
+        catalogRefreshTimer: null,
+        catalogRefreshActive: false,
+        catalogRefreshToken: 0,
+        prefetchControllers: new Map(),
+        directoryCache: new Map(),
+        catalogStatus: "loading",
+        catalogError: null,
+        notice: null,
+        closed: false,
+        returnFocus: document.activeElement,
+      };
+    }
+
+    function snapshotModalIsOpen() {
+      return Boolean(snapshotBrowserState && !snapshotBrowserState.closed && snapshotBrowserState.overlay && snapshotBrowserState.overlay.classList.contains("open"));
+    }
+
+    function normalizeSnapshotPath(path) {
+      const raw = String(path || "").replace(/\\/g, "/");
+      if (!raw || raw === "/") return "/";
+      const segments = raw.split("/").filter(Boolean);
+      if (segments.some(segment => segment === "..")) throw new Error("Invalid snapshot path");
+      const safeSegments = segments.filter(segment => segment !== ".");
+      return safeSegments.length ? `/${safeSegments.join("/")}` : "/";
+    }
+
+    function legacySnapshotPath(path) {
+      const normalized = normalizeSnapshotPath(path);
+      return normalized === "/" ? "" : normalized.slice(1);
+    }
+
+    function snapshotCacheKey(targetId, snapshotId, path) {
+      return JSON.stringify([String(targetId), String(snapshotId), normalizeSnapshotPath(path)]);
+    }
+
+    function cacheSnapshotDirectory(snapshotId, path, entries) {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      const key = snapshotCacheKey(state.target.id, snapshotId, path);
+      state.directoryCache.delete(key);
+      state.directoryCache.set(key, { entries: entries.slice(0, SNAPSHOT_MAX_ENTRIES), cachedAt: Date.now() });
+      while (state.directoryCache.size > SNAPSHOT_CACHE_LIMIT) {
+        state.directoryCache.delete(state.directoryCache.keys().next().value);
+      }
+    }
+
+    function getCachedSnapshotDirectory(snapshotId, path) {
+      const state = snapshotBrowserState;
+      if (!state) return null;
+      const key = snapshotCacheKey(state.target.id, snapshotId, path);
+      const value = state.directoryCache.get(key);
+      if (!value) return null;
+      state.directoryCache.delete(key);
+      state.directoryCache.set(key, value);
+      return value.entries.slice();
+    }
+
+    function clearSnapshotSearchTimer() {
+      if (snapshotBrowserState && snapshotBrowserState.searchTimer) {
+        clearTimeout(snapshotBrowserState.searchTimer);
+        snapshotBrowserState.searchTimer = null;
+      }
+    }
+
+    function cancelSnapshotJob(jobId) {
+      if (!jobId) return;
+      void apiPost(`/api/v2/jobs/${encodeURIComponent(jobId)}/cancel`, {}).catch(() => {});
+    }
+
+    function abortSnapshotRequest(request) {
+      const state = snapshotBrowserState;
+      if (!request) return;
+      if (!request.controller.signal.aborted) request.controller.abort();
+      if (request.jobId && !request.cancelSent) {
+        request.cancelSent = true;
+        cancelSnapshotJob(request.jobId);
+      }
+      if (state && state.activeRequest === request) state.activeRequest = null;
+    }
+
+    function abortSnapshotPrefetches() {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      for (const item of state.prefetchControllers.values()) {
+        if (!item.request.controller.signal.aborted) item.request.controller.abort();
+        if (item.request.jobId && !item.request.cancelSent) {
+          item.request.cancelSent = true;
+          cancelSnapshotJob(item.request.jobId);
+        }
+      }
+      state.prefetchControllers.clear();
+    }
+
+    function beginSnapshotRequest(kind, snapshotId, path) {
+      const state = snapshotBrowserState;
+      if (!state) return null;
+      abortSnapshotRequest(state.activeRequest);
+      state.requestSequence += 1;
+      const request = {
+        kind,
+        seq: state.requestSequence,
+        targetId: String(state.target.id),
+        snapshotId: snapshotId ? String(snapshotId) : null,
+        path: path ? normalizeSnapshotPath(path) : null,
+        controller: new AbortController(),
+        jobId: null,
+        cancelSent: false,
+      };
+      state.activeRequest = request;
+      return request;
+    }
+
+    function isCurrentSnapshotRequest(request) {
+      const state = snapshotBrowserState;
+      if (!state || state.closed || !request || request.controller.signal.aborted) return false;
+      if (state.requestSequence !== request.seq || String(state.target.id) !== request.targetId) return false;
+      if (request.snapshotId && String(state.currentSnapshot) !== request.snapshotId) return false;
+      if (request.path && normalizeSnapshotPath(state.currentPath) !== request.path) return false;
+      return true;
+    }
+
+    function finishSnapshotRequest(request) {
+      if (snapshotBrowserState && snapshotBrowserState.activeRequest === request) snapshotBrowserState.activeRequest = null;
+    }
+
+    function abortSnapshotCatalogRequest() {
+      const state = snapshotBrowserState;
+      if (!state || !state.catalogRequest) return;
+      const request = state.catalogRequest;
+      if (!request.controller.signal.aborted) request.controller.abort();
+      if (state.catalogRequest === request) state.catalogRequest = null;
+    }
+
+    function abortSnapshotCatalogSync() {
+      const state = snapshotBrowserState;
+      if (!state || !state.catalogSyncRequest) return;
+      const request = state.catalogSyncRequest;
+      if (!request.controller.signal.aborted) request.controller.abort();
+      if (state.catalogSyncRequest === request) state.catalogSyncRequest = null;
+    }
+
+    function beginSnapshotCatalogSyncRequest() {
+      const state = snapshotBrowserState;
+      if (!state || state.closed || state.catalogSyncRequest) return null;
+      const request = {
+        kind: "catalog-sync",
+        targetId: String(state.target.id),
+        controller: new AbortController(),
+        jobId: null,
+      };
+      state.catalogSyncRequest = request;
+      return request;
+    }
+
+    function isCurrentSnapshotCatalogSyncRequest(request) {
+      const state = snapshotBrowserState;
+      return Boolean(
+        state
+        && !state.closed
+        && request
+        && !request.controller.signal.aborted
+        && state.catalogSyncRequest === request
+        && String(state.target.id) === request.targetId
+      );
+    }
+
+    function finishSnapshotCatalogSyncRequest(request) {
+      if (snapshotBrowserState && snapshotBrowserState.catalogSyncRequest === request) snapshotBrowserState.catalogSyncRequest = null;
+    }
+
+    function setSnapshotCatalogRefreshBusy(busy, request = null) {
+      const state = snapshotBrowserState;
+      if (!state || (request && state.catalogSyncRequest !== request)) return;
+      const isBusy = Boolean(busy);
+      const navigation = state.navigationElement;
+      if (!navigation) return;
+      navigation.querySelectorAll("[data-snapshot-refresh]").forEach(button => {
+        button.classList.add("snapshot-refresh-button");
+        if (!button.querySelector("[data-snapshot-refresh-spinner]")) {
+          button.innerHTML = `<span class="snapshot-refresh-spinner" data-snapshot-refresh-spinner aria-hidden="true"></span><span>Refrescar</span>`;
+        }
+        button.disabled = isBusy;
+        button.setAttribute("aria-busy", isBusy ? "true" : "false");
+        button.setAttribute("aria-label", isBusy ? SNAPSHOT_REFRESH_BUSY_LABEL : SNAPSHOT_REFRESH_LABEL);
+        button.title = isBusy ? SNAPSHOT_REFRESH_BUSY_LABEL : SNAPSHOT_REFRESH_LABEL;
+        button.dataset.snapshotRefreshState = isBusy ? "busy" : "idle";
+      });
+    }
+
+    function beginSnapshotCatalogRequest() {
+      const state = snapshotBrowserState;
+      if (!state) return null;
+      abortSnapshotCatalogRequest();
+      state.catalogRequestSequence += 1;
+      const request = {
+        kind: "catalog",
+        seq: state.catalogRequestSequence,
+        targetId: String(state.target.id),
+        controller: new AbortController(),
+      };
+      state.catalogRequest = request;
+      return request;
+    }
+
+    function isCurrentSnapshotCatalogRequest(request) {
+      const state = snapshotBrowserState;
+      return Boolean(
+        state
+        && !state.closed
+        && request
+        && !request.controller.signal.aborted
+        && state.catalogRequest === request
+        && String(state.target.id) === request.targetId
+      );
+    }
+
+    function finishSnapshotCatalogRequest(request) {
+      if (snapshotBrowserState && snapshotBrowserState.catalogRequest === request) snapshotBrowserState.catalogRequest = null;
+    }
+
+    function stopSnapshotCatalogRefresh() {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      state.catalogRefreshToken += 1;
+      state.catalogRefreshActive = false;
+      if (state.catalogRefreshTimer) clearTimeout(state.catalogRefreshTimer);
+      state.catalogRefreshTimer = null;
+    }
+
+    function scheduleSnapshotCatalogRefreshAfterBackup(job) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotModalIsOpen() || !job || job.command !== "backup.run") return;
+      if (!["succeeded", "success"].includes(String(job.status || "").toLowerCase())) return;
+      if (String(job.target_id) !== String(state.target.id)) return;
+      if (state.catalogRefreshActive || state.catalogRefreshTimer) return;
+
+      state.catalogRefreshActive = true;
+      const token = ++state.catalogRefreshToken;
+      let attempt = 0;
+      const refresh = async () => {
+        const current = snapshotBrowserState;
+        if (
+          !current
+          || current.closed
+          || current.catalogRefreshToken !== token
+          || !snapshotModalIsOpen()
+          || String(current.target.id) !== String(job.target_id)
+        ) {
+          if (current && current.catalogRefreshToken === token) current.catalogRefreshActive = false;
+          return;
+        }
+        current.catalogRefreshTimer = null;
+        try {
+          const result = await loadSnapshotsList(current.target, { background: true });
+          if (result && result.changed) {
+            current.catalogRefreshActive = false;
+            return;
+          }
+        } catch (error) {
+          // The next bounded catalog-only attempt may observe the follow-up sync.
+        }
+        if (
+          !snapshotBrowserState
+          || snapshotBrowserState.closed
+          || snapshotBrowserState.catalogRefreshToken !== token
+          || !snapshotModalIsOpen()
+        ) {
+          if (snapshotBrowserState && snapshotBrowserState.catalogRefreshToken === token) snapshotBrowserState.catalogRefreshActive = false;
+          return;
+        }
+        attempt += 1;
+        if (attempt >= SNAPSHOT_CATALOG_REFRESH_DELAYS.length) {
+          snapshotBrowserState.catalogRefreshActive = false;
+          return;
+        }
+        snapshotBrowserState.catalogRefreshTimer = setTimeout(refresh, SNAPSHOT_CATALOG_REFRESH_DELAYS[attempt]);
+      };
+      state.catalogRefreshTimer = setTimeout(refresh, SNAPSHOT_CATALOG_REFRESH_DELAYS[0]);
+    }
+
+    function invalidateSnapshotRequest(showCanceled) {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      const request = state.activeRequest;
+      if (request) {
+        state.requestSequence += 1;
+        abortSnapshotRequest(request);
+        if (showCanceled && !state.closed) {
+          state.loading = false;
+          state.notice = { kind: "canceled", message: "La operacion fue cancelada.", retry: true };
+          renderCurrentSnapshotBrowser(false);
+        }
+      }
+    }
+
+    function isSnapshotAbortError(error) {
+      return Boolean(error && (error.name === "AbortError" || error.code === 20));
+    }
+
+    function unsupportedSnapshotResponse(message) {
+      const error = new Error(message || "Unsupported snapshot API response");
+      error.code = "unsupported-v2";
+      return error;
+    }
+
+    function isUnsupportedSnapshotError(error) {
+      if (!error) return false;
+      if (error.code === "unsupported-v2") return true;
+      return [404, 405, 501].includes(error.status) || /unsupported|not found|schema/i.test(error.message || "");
+    }
+
+    function snapshotStatus(result) {
+      return String((result && result.status) || "").toLowerCase().replace(/-/g, "_");
+    }
+
+    function isSnapshotTerminalStatus(status) {
+      return ["succeeded", "success", "failed", "error", "canceled", "cancelled", "deleted", "missing"].includes(status);
+    }
+
+    function normalizeSnapshotContract(result) {
+      if (!result || typeof result !== "object") return null;
+      const summary = result.result_summary && typeof result.result_summary === "object" ? result.result_summary : {};
+      const normalized = { ...result };
+      if (!Array.isArray(normalized.entries) && Array.isArray(summary.entries)) normalized.entries = summary.entries;
+      if (typeof normalized.b64_content !== "string" && typeof summary.b64_content === "string") normalized.b64_content = summary.b64_content;
+      if (!normalized.error && typeof summary.error === "string") normalized.error = summary.error;
+      return normalized;
+    }
+
+    function isSnapshotContract(result) {
+      const normalized = normalizeSnapshotContract(result);
+      if (!normalized) return false;
+      return Array.isArray(normalized.entries)
+        || typeof normalized.job_id === "string"
+        || ["pending", "queued", "running", "in_progress", "succeeded", "success", "failed", "error", "canceled", "cancelled"].includes(snapshotStatus(normalized));
+    }
+
+    function waitForSnapshotPoll(delay, signal) {
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        const timer = setTimeout(resolve, delay);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        }, { once: true });
+      });
+    }
+
+    async function pollSnapshotJob(request, initialResult) {
+      let result = normalizeSnapshotContract(initialResult);
+      request.jobId = result.job_id || request.jobId;
+      if (!request.jobId) return result;
+      if (isSnapshotTerminalStatus(snapshotStatus(result))) return result;
+      const deadline = Date.now() + SNAPSHOT_POLL_MAX_MS;
+      let attempt = 0;
+      let useLegacyJobPolling = false;
+      while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        const delay = SNAPSHOT_POLL_DELAYS[Math.min(attempt, SNAPSHOT_POLL_ATTEMPTS - 1)];
+        await waitForSnapshotPoll(Math.min(delay, remaining), request.controller.signal);
+        if (Date.now() >= deadline) break;
+        let polled;
+        if (useLegacyJobPolling) {
+          polled = await apiGet(`/api/v1/jobs/${encodeURIComponent(request.jobId)}`, { signal: request.controller.signal });
+        } else {
+          try {
+            polled = await apiGet(`/api/v2/jobs/${encodeURIComponent(request.jobId)}`, { signal: request.controller.signal });
+          } catch (error) {
+            if (!isUnsupportedSnapshotError(error)) throw error;
+            useLegacyJobPolling = true;
+            polled = await apiGet(`/api/v1/jobs/${encodeURIComponent(request.jobId)}`, { signal: request.controller.signal });
+          }
+        }
+        if (!isSnapshotContract(polled)) throw unsupportedSnapshotResponse("Unsupported snapshot job response");
+        result = normalizeSnapshotContract(polled);
+        if (isSnapshotTerminalStatus(snapshotStatus(result))) return result;
+        attempt += 1;
+      }
+      const timeout = new Error("La operacion sigue indexando despues del limite de espera.");
+      timeout.code = "snapshot-poll-timeout";
+      throw timeout;
+    }
+
+    async function requestSnapshotOperation(request, operation, payload, legacyFallback) {
+      try {
+        const result = await apiPost(`/api/v2/targets/${encodeURIComponent(request.targetId)}/${operation}`, payload, { signal: request.controller.signal });
+        if (!isSnapshotContract(result)) throw unsupportedSnapshotResponse("Unsupported snapshot response");
+        request.jobId = result.job_id || null;
+        return await pollSnapshotJob(request, result);
+      } catch (error) {
+        if (isSnapshotAbortError(error) || request.controller.signal.aborted) throw error;
+        if (!legacyFallback || !isUnsupportedSnapshotError(error)) throw error;
+        if (request.jobId) {
+          cancelSnapshotJob(request.jobId);
+          request.jobId = null;
+        }
+        return await legacyFallback(request.controller.signal);
+      }
+    }
+
+    async function legacyBrowseSnapshot(request) {
+      const result = await apiPost(`/api/v1/targets/${encodeURIComponent(request.targetId)}/snapshot-ls`, {
+        snapshot_id: request.snapshotId,
+        path: legacySnapshotPath(request.path),
+      }, { signal: request.controller.signal });
+      return {
+        schema_version: 1,
+        status: result && result.error ? "failed" : "succeeded",
+        source: "legacy",
+        entries: Array.isArray(result && result.entries) ? result.entries : [],
+        error: result && result.error ? String(result.error) : null,
+      };
+    }
+
+    async function legacyDumpSnapshot(request) {
+      const result = await apiPost(`/api/v1/targets/${encodeURIComponent(request.targetId)}/snapshot-dump`, {
+        snapshot_id: request.snapshotId,
+        path: legacySnapshotPath(request.path),
+      }, { signal: request.controller.signal });
+      return {
+        schema_version: 1,
+        status: result && result.success ? "succeeded" : "failed",
+        source: "legacy",
+        b64_content: result && typeof result.b64_content === "string" ? result.b64_content : "",
+        error: result && result.error ? String(result.error) : null,
+      };
+    }
+
+    function getSnapshotCatalogItems(payload) {
+      if (!payload || typeof payload !== "object") return null;
+      if (Array.isArray(payload.items)) return payload.items;
+      if (Array.isArray(payload.entries)) return payload.entries;
+      return null;
+    }
+
+    function snapshotCatalogStatus(payload) {
+      const status = snapshotStatus(payload);
+      if (["pending", "queued", "running", "in_progress", "indexing"].includes(status)) return "indexing";
+      return "ready";
+    }
+
+    function snapshotItemId(item) {
+      return String((item && (item.snapshot_id || item.id)) || "");
+    }
+
+    function formatSnapshotBytes(value) {
+      const size = Number(value);
+      if (!Number.isFinite(size) || size < 0) return "";
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+      return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+    }
+
+    function normalizeSnapshotEntry(entry) {
+      if (!entry || typeof entry !== "object" || !entry.path) return null;
+      let path;
+      try { path = normalizeSnapshotPath(entry.path); } catch (error) { return null; }
+      if (path === "/") return null;
+      const type = String(entry.type || entry.kind || "").toLowerCase();
+      const isDir = type === "dir" || type === "directory" || entry.is_dir === true || entry.kind === "directory";
+      const rawSize = entry.size_bytes !== undefined ? entry.size_bytes : entry.size;
+      const numericSize = Number(rawSize);
+      const size = Number.isFinite(numericSize) && numericSize >= 0 ? numericSize : null;
+      return {
+        path,
+        name: path.split("/").pop() || path,
+        isDir,
+        size,
+      };
+    }
+
+    function normalizeSnapshotEntries(entries) {
+      if (!Array.isArray(entries)) return [];
+      return entries.slice(0, SNAPSHOT_MAX_ENTRIES).map(normalizeSnapshotEntry).filter(Boolean);
+    }
+
+    function isImmediateSnapshotChild(path, parentPath) {
+      const normalizedPath = normalizeSnapshotPath(path);
+      const normalizedParent = normalizeSnapshotPath(parentPath);
+      const parent = normalizedPath.slice(0, normalizedPath.lastIndexOf("/")) || "/";
+      return parent === normalizedParent;
+    }
+
+    function filterSnapshotEntries(entries, path, searchQuery) {
+      const normalizedPath = normalizeSnapshotPath(path);
+      const normalizedEntries = normalizeSnapshotEntries(entries);
+      if (searchQuery) {
+        const query = searchQuery.toLowerCase();
+        return normalizedEntries.filter(entry => entry.path.toLowerCase().includes(query) || entry.name.toLowerCase().includes(query));
+      }
+      return normalizedEntries.filter(entry => isImmediateSnapshotChild(entry.path, normalizedPath));
+    }
+
+    function renderSnapshotState(kind, message, options = {}) {
+      const label = SNAPSHOT_STATE_LABELS[kind] || kind;
+      const role = ["error", "deleted", "blocked", "oversized"].includes(kind) ? "alert" : "status";
+      const retry = options.retry ? `<button type="button" class="btn ghost xs" data-snapshot-retry>Reintentar</button>` : "";
+      const cancel = options.cancel ? `<button type="button" class="btn ghost xs" data-snapshot-cancel>Cancelar</button>` : "";
+      return `<div class="snapshot-status" data-state="${escapeHtml(kind)}" role="${role}" aria-live="polite"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(message)}</span>${retry}${cancel}</div>`;
+    }
+
+    function renderSnapshotList() {
+      const state = snapshotBrowserState;
+      const list = document.getElementById("snapshotList");
+      if (!state || !list) return;
+      const snapshots = Array.isArray(state.snapshots) ? state.snapshots : [];
+      const syncBusy = Boolean(state.catalogSyncRequest);
+      let status = "";
+      if (state.catalogStatus === "loading" && snapshots.length === 0) {
+        list.innerHTML = `<div class="snapshot-skeleton-list" aria-hidden="true">${[1, 2, 3, 4].map(() => `<div class="snapshot-skeleton-row"></div>`).join("")}</div>`;
+        setSnapshotCatalogRefreshBusy(syncBusy);
+        return;
+      }
+      if (state.catalogError) {
+        const errorKind = ["deleted", "offline", "timeout"].includes(state.catalogStatus) ? state.catalogStatus : "error";
+        status = renderSnapshotState(errorKind, state.catalogError, { retry: true });
+      } else if (state.catalogStatus === "refreshing" || state.catalogStatus === "indexing") {
+        status = renderSnapshotState("stale", state.catalogStatus === "indexing" ? "El indice se esta preparando." : "Actualizando snapshots en segundo plano.");
+      }
+      if (state.catalogError && snapshots.length === 0) {
+        const errorKind = ["deleted", "offline", "timeout"].includes(state.catalogStatus) ? state.catalogStatus : "error";
+        list.innerHTML = `${renderSnapshotState(errorKind, state.catalogError, { retry: true })}`;
+        setSnapshotCatalogRefreshBusy(syncBusy);
+        return;
+      }
+      if (snapshots.length === 0) {
+        list.innerHTML = `${status}<div class="snapshot-empty" data-state="empty"><strong>No hay snapshots disponibles</strong><span>Refresca para comprobar si el indice ya esta listo.</span><button type="button" class="btn ghost xs" data-snapshot-refresh style="margin-top:12px;">Refrescar</button></div>`;
+        setSnapshotCatalogRefreshBusy(syncBusy);
+        return;
+      }
+      list.innerHTML = `${status}${snapshots.map(item => {
+        const id = snapshotItemId(item);
+        const date = item && item.created_at ? fmtDate(item.created_at) : "Fecha no disponible";
+        const paths = Array.isArray(item && item.paths) ? item.paths : [];
+        const pathText = paths.length ? paths.join(", ") : "Todos los paths";
+        const selected = String(state.currentSnapshot || "") === id;
+        return `<div class="snapshot-option" role="option" tabindex="${selected ? "0" : "-1"}" aria-selected="${selected ? "true" : "false"}" data-snapshot-option data-snapshot-id="${escapeHtml(id)}">
+          <div class="snapshot-option-main"><span class="snapshot-option-id">${escapeHtml(id || "Sin ID")}</span><span class="snapshot-option-date">${escapeHtml(date)}</span></div>
+          <div class="snapshot-option-paths">${escapeHtml(pathText)}</div>
+          <div class="snapshot-option-actions"><button type="button" class="btn ghost xs danger" data-snapshot-restore data-snapshot-id="${escapeHtml(id)}" data-snapshot-date="${escapeHtml(date)}">Restaurar</button></div>
+        </div>`;
+      }).join("")}`;
+      const selected = list.querySelector(`[data-snapshot-option][aria-selected="true"]`);
+      if (selected && state.focusSnapshotId === selected.dataset.snapshotId) {
+        state.focusSnapshotId = null;
+        if (document.contains(selected)) selected.focus();
+      }
+      setSnapshotCatalogRefreshBusy(syncBusy);
+    }
+
+    function renderSnapshotWorkspaceIntro() {
+      const state = snapshotBrowserState;
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!state || !workspace) return;
+      if (state.notice && state.notice.kind === "deleted") {
+        workspace.innerHTML = renderSnapshotState("deleted", state.notice.message, { retry: true });
+        return;
+      }
+      const hasSnapshots = state.snapshots.length > 0;
+      const catalogIndexing = state.catalogStatus === "loading" || state.catalogStatus === "indexing";
+      workspace.innerHTML = `
+        <div class="snapshot-empty" data-state="${hasSnapshots ? "empty" : catalogIndexing ? "indexing" : "empty"}">
+          <strong>${hasSnapshots ? "Selecciona un snapshot" : "El catalogo esta vacio"}</strong>
+          <span>${hasSnapshots ? "Elige un snapshot en la izquierda para abrir su raiz." : "Los snapshots solo se consultan dentro del target seleccionado."}</span>
+          <div class="snapshot-safe-note">Los archivos no se muestran como HTML. Solo se permiten descargas acotadas.</div>
+        </div>`;
+    }
+
+    function renderSnapshotWorkspaceLoading(message) {
+      const state = snapshotBrowserState;
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!state || !workspace) return;
+      const snapshotId = state.currentSnapshot || "";
+      const path = normalizeSnapshotPath(state.currentPath || "/");
+      workspace.innerHTML = `
+        <div class="snapshot-workspace-header"><div><h4 class="snapshot-workspace-title">${escapeHtml(snapshotId)}</h4><div class="snapshot-workspace-subtitle">${escapeHtml(path)}</div></div></div>
+        <div class="snapshot-search-row"><div class="snapshot-search-field"><input id="snapshotSearch" type="search" value="${escapeHtml(state.searchQuery)}" placeholder="Buscar en el path actual..." aria-label="Buscar en el snapshot y path actual" autocomplete="off" /><button type="button" class="snapshot-search-clear" aria-label="Limpiar busqueda" data-snapshot-clear-search>&times;</button></div></div>
+        ${renderSnapshotState("indexing", message || "Listando contenido...", { cancel: true })}
+        <div class="snapshot-skeleton-list" aria-hidden="true">${[1, 2, 3, 4, 5].map(() => `<div class="snapshot-skeleton-row"></div>`).join("")}</div>`;
+    }
+
+    function renderCurrentSnapshotBrowser(focusFirst) {
+      const state = snapshotBrowserState;
+      if (!state || !state.currentSnapshot || state.view !== "browser") return;
+      if (state.loading) {
+        renderSnapshotWorkspaceLoading(state.searchActive ? "Buscando resultados..." : "Listando contenido...");
+        return;
+      }
+      renderSnapshotBrowser(state.currentSnapshot, state.currentPath, state.entries, { focusFirst: focusFirst !== false });
+    }
+
+    function renderSnapshotBrowser(snapshotId, path, entries, options = {}) {
+      const state = snapshotBrowserState;
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!state || !workspace) return;
+      const normalizedPath = normalizeSnapshotPath(path);
+      const visibleEntries = filterSnapshotEntries(entries, normalizedPath, state.searchActive ? state.searchQuery : "");
+      visibleEntries.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
+      const pathParts = normalizedPath === "/" ? [] : normalizedPath.slice(1).split("/").filter(Boolean);
+      const breadcrumbs = [`<button type="button" class="snapshot-breadcrumb" data-breadcrumb-path="/" aria-label="Abrir la raiz del snapshot">Raiz</button>`];
+      let accumulated = "/";
+      for (const part of pathParts) {
+        accumulated = normalizeSnapshotPath(`${accumulated}/${part}`);
+        breadcrumbs.push(`<span aria-hidden="true">/</span><button type="button" class="snapshot-breadcrumb" data-breadcrumb-path="${escapeHtml(accumulated)}" aria-label="Abrir ${escapeHtml(accumulated)}">${escapeHtml(part)}</button>`);
+      }
+      const notice = state.notice || null;
+      const statusMarkup = notice ? renderSnapshotState(notice.kind, notice.message, { retry: notice.retry, cancel: notice.kind === "loading" }) : "";
+      const emptyKind = state.searchActive ? "no-match" : "empty";
+      const emptyMarkup = visibleEntries.length ? "" : `<div class="snapshot-empty" data-state="${emptyKind}"><strong>${escapeHtml(SNAPSHOT_STATE_LABELS[emptyKind])}</strong><span>${state.searchActive ? "Prueba con otra busqueda o limpia el filtro." : "Esta carpeta no contiene entradas visibles."}</span></div>`;
+      const rows = visibleEntries.map(entry => {
+        const sizeText = entry.size === null ? "" : formatSnapshotBytes(entry.size);
+        const tooLarge = !entry.isDir && entry.size !== null && entry.size > SNAPSHOT_MAX_OUTPUT_BYTES;
+        const displayName = state.searchActive ? entry.path : entry.name;
+        const action = entry.isDir
+          ? `<span class="snapshot-entry-meta">Abrir con Enter</span>`
+          : `<button type="button" class="btn ${tooLarge ? "ghost" : "primary"} xs snapshot-entry-action" data-entry-download data-download-path="${escapeHtml(entry.path)}" data-entry-size="${entry.size === null ? "" : escapeHtml(String(entry.size))}" ${tooLarge ? "disabled title=\"El archivo excede el limite de descarga\"" : ""}>${tooLarge ? "Bloqueado" : "Descargar"}</button>`;
+        return `<div class="snapshot-entry-option" role="option" tabindex="-1" aria-selected="false" data-entry-option data-entry-kind="${entry.isDir ? "directory" : "file"}" data-entry-path="${escapeHtml(entry.path)}" aria-label="${escapeHtml(entry.isDir ? `Abrir directorio ${displayName}` : `Descargar archivo ${displayName}`)}">
+          <span class="snapshot-entry-icon" aria-hidden="true">${entry.isDir ? "[+]" : "[file]"}</span>
+          <span><span class="snapshot-entry-name">${escapeHtml(displayName)}${entry.isDir ? "/" : ""}</span>${sizeText ? `<span class="snapshot-entry-meta"> ${escapeHtml(sizeText)}</span>` : ""}</span>
+          ${action}
+        </div>`;
+      }).join("");
+      workspace.innerHTML = `
+        <div class="snapshot-workspace-header"><div><h4 class="snapshot-workspace-title">Snapshot <code>${escapeHtml(snapshotId)}</code></h4><div class="snapshot-workspace-subtitle">Path POSIX: <code>${escapeHtml(normalizedPath)}</code></div></div><div class="snapshot-workspace-actions"><button type="button" class="btn ghost xs" data-snapshot-refresh-browser>Refrescar</button></div></div>
+        <div class="snapshot-search-row"><div class="snapshot-search-field"><input id="snapshotSearch" type="search" value="${escapeHtml(state.searchQuery)}" placeholder="Buscar en el path actual..." aria-label="Buscar en el snapshot y path actual" autocomplete="off" /><button type="button" class="snapshot-search-clear" aria-label="Limpiar busqueda" data-snapshot-clear-search>&times;</button></div><span class="snapshot-entry-meta">Minimo ${SNAPSHOT_SEARCH_MIN_LENGTH} caracteres</span></div>
+        ${statusMarkup}
+        <div class="snapshot-breadcrumbs" aria-label="Ruta del snapshot">${breadcrumbs.join("")}</div>
+        <div class="snapshot-entry-list" id="snapshotEntryList" role="listbox" aria-label="Entradas de ${escapeHtml(normalizedPath)}" tabindex="0" aria-busy="false">${rows || emptyMarkup}</div>
+        <div class="snapshot-safe-note">Los contenidos de archivos nunca se renderizan. Descargas limitadas a ${formatSnapshotBytes(SNAPSHOT_MAX_OUTPUT_BYTES)}; los archivos mayores se bloquean.</div>`;
+      if (options.focusFirst !== false) {
+        const first = workspace.querySelector("[data-entry-option]") || workspace.querySelector("#snapshotSearch");
+        if (first && document.contains(first) && snapshotModalIsOpen()) first.focus();
+      }
+    }
+
+    function selectSnapshot(snapshotId) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotId) return;
+      const selectedId = String(snapshotId);
+      abortSnapshotPrefetches();
+      clearSnapshotSearchTimer();
+      invalidateSnapshotRequest(false);
+      state.currentSnapshot = selectedId;
+      state.currentPath = "/";
+      state.entries = [];
+      state.searchQuery = "";
+      state.searchActive = false;
+      state.view = "browser";
+      state.notice = null;
+      renderSnapshotList();
+      browseSnapshot(selectedId, "/");
+    }
+
+    function moveSnapshotFocus(container, selector, key) {
+      const options = Array.from(container.querySelectorAll(selector));
+      if (!options.length) return;
+      const currentIndex = options.indexOf(document.activeElement);
+      let nextIndex = currentIndex;
+      if (key === "ArrowDown" || key === "ArrowRight") nextIndex = currentIndex < 0 ? 0 : Math.min(options.length - 1, currentIndex + 1);
+      if (key === "ArrowUp" || key === "ArrowLeft") nextIndex = currentIndex < 0 ? options.length - 1 : Math.max(0, currentIndex - 1);
+      if (key === "Home") nextIndex = 0;
+      if (key === "End") nextIndex = options.length - 1;
+      if (nextIndex !== currentIndex && options[nextIndex] && document.contains(options[nextIndex])) {
+        options[nextIndex].focus();
+      }
+    }
+
+    function activateSnapshotEntry(option) {
+      if (!option || !snapshotBrowserState) return;
+      const path = option.dataset.entryPath;
+      if (option.dataset.entryKind === "directory" && path) {
+        browseSnapshot(snapshotBrowserState.currentSnapshot, path);
+      }
+    }
+
+    function retrySnapshotAction() {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      state.notice = null;
+      if (!state.currentSnapshot) {
+        loadSnapshotsList(state.target);
+      } else if (state.searchActive && state.searchQuery.length >= SNAPSHOT_SEARCH_MIN_LENGTH) {
+        searchSnapshot(state.currentSnapshot, state.currentPath, state.searchQuery);
+      } else {
+        browseSnapshot(state.currentSnapshot, state.currentPath);
+      }
+    }
+
+    function scheduleSnapshotSearch(value) {
+      const state = snapshotBrowserState;
+      if (!state || !state.currentSnapshot) return;
+      clearSnapshotSearchTimer();
+      state.searchQuery = String(value || "").trim();
+      state.notice = null;
+      if (!state.searchQuery) {
+        state.searchActive = false;
+        browseSnapshot(state.currentSnapshot, state.currentPath);
+        return;
+      }
+      invalidateSnapshotRequest(false);
+      if (state.searchQuery.length < SNAPSHOT_SEARCH_MIN_LENGTH) {
+        state.searchActive = false;
+        state.loading = false;
+        state.notice = { kind: "pending", message: `Escribe al menos ${SNAPSHOT_SEARCH_MIN_LENGTH} caracteres para buscar.` };
+        renderCurrentSnapshotBrowser(false);
+        return;
+      }
+      state.searchActive = true;
+      state.searchTimer = setTimeout(() => {
+        state.searchTimer = null;
+        searchSnapshot(state.currentSnapshot, state.currentPath, state.searchQuery);
+      }, 250);
+    }
+
+    function handleSnapshotNavigationClick(event) {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      const refresh = event.target.closest("[data-snapshot-refresh]");
+      if (refresh) { void refreshSnapshotCatalog(); return; }
+      const retry = event.target.closest("[data-snapshot-retry]");
+      if (retry) { void refreshSnapshotCatalog(); return; }
+      const restore = event.target.closest("[data-snapshot-restore]");
+      if (restore) {
+        openRestoreFromSnapshotModal(restore.dataset.snapshotId, restore.dataset.snapshotDate);
+        return;
+      }
+      const option = event.target.closest("[data-snapshot-option]");
+      if (option && !event.target.closest("[data-snapshot-restore]")) selectSnapshot(option.dataset.snapshotId);
+    }
+
+    function handleSnapshotNavigationKeydown(event) {
+      const list = event.currentTarget;
+      if (event.target.closest("[data-snapshot-restore]")) return;
+      const option = event.target.closest("[data-snapshot-option]");
+      if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        event.preventDefault();
+        moveSnapshotFocus(list, "[data-snapshot-option]", event.key);
+        return;
+      }
+      if (option && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        selectSnapshot(option.dataset.snapshotId);
+      }
+    }
+
+    function handleSnapshotWorkspaceClick(event) {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      if (event.target.closest("[data-snapshot-cancel]")) { invalidateSnapshotRequest(true); return; }
+      if (event.target.closest("[data-snapshot-retry]")) { retrySnapshotAction(); return; }
+      if (event.target.closest("[data-snapshot-clear-search]")) {
+        const search = document.getElementById("snapshotSearch");
+        if (search) search.value = "";
+        scheduleSnapshotSearch("");
+        return;
+      }
+      if (event.target.closest("[data-snapshot-refresh-browser]")) {
+        if (state.currentSnapshot) {
+          if (state.searchActive) searchSnapshot(state.currentSnapshot, state.currentPath, state.searchQuery);
+          else browseSnapshot(state.currentSnapshot, state.currentPath);
+        }
+        return;
+      }
+      const breadcrumb = event.target.closest("[data-breadcrumb-path]");
+      if (breadcrumb) { browseSnapshot(state.currentSnapshot, breadcrumb.dataset.breadcrumbPath); return; }
+      const download = event.target.closest("[data-entry-download]");
+      if (download && !download.disabled) {
+        downloadSnapshotFile(state.currentSnapshot, download.dataset.downloadPath, download.dataset.entrySize);
+        return;
+      }
+      const option = event.target.closest("[data-entry-option]");
+      if (option && !event.target.closest("[data-entry-download]")) activateSnapshotEntry(option);
+    }
+
+    function handleSnapshotWorkspaceInput(event) {
+      if (event.target && event.target.id === "snapshotSearch") scheduleSnapshotSearch(event.target.value);
+    }
+
+    function handleSnapshotWorkspaceKeydown(event) {
+      if (event.target.closest("[data-entry-download]")) return;
+      const option = event.target.closest("[data-entry-option]");
+      const list = document.getElementById("snapshotEntryList");
+      if (option && list && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        event.preventDefault();
+        moveSnapshotFocus(list, "[data-entry-option]", event.key);
+        return;
+      }
+      if (option && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        if (option.dataset.entryKind === "directory") activateSnapshotEntry(option);
+        else downloadSnapshotFile(snapshotBrowserState.currentSnapshot, option.dataset.entryPath, option.dataset.entrySize);
+        return;
+      }
+      if (event.target && event.target.id === "snapshotSearch" && event.key === "Enter") {
+        const query = event.target.value.trim();
+        if (query.length >= SNAPSHOT_SEARCH_MIN_LENGTH) {
+          clearSnapshotSearchTimer();
+          searchSnapshot(snapshotBrowserState.currentSnapshot, snapshotBrowserState.currentPath, query);
+        }
+      }
+    }
+
+    function bindSnapshotModalEvents() {
+      const state = snapshotBrowserState;
+      const navigation = document.getElementById("snapshotNavigation");
+      const list = document.getElementById("snapshotList");
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!state || !navigation || !list || !workspace) return;
+      state.navigationElement = navigation;
+      state.listElement = list;
+      state.workspaceElement = workspace;
+      navigation.addEventListener("click", handleSnapshotNavigationClick);
+      list.addEventListener("keydown", handleSnapshotNavigationKeydown);
+      workspace.addEventListener("click", handleSnapshotWorkspaceClick);
+      workspace.addEventListener("input", handleSnapshotWorkspaceInput);
+      workspace.addEventListener("keydown", handleSnapshotWorkspaceKeydown);
+    }
+
+    function renderSnapshotModalFrame() {
+      const state = snapshotBrowserState;
+      const overlay = state && state.overlay;
+      if (!state || !overlay) return;
+      overlay.innerHTML = `
+        <div class="modal modal-snapshots" role="dialog" aria-modal="true" aria-labelledby="snapshotExplorerTitle" tabindex="-1">
+          <div class="modal-header">
+            <div><h3 id="snapshotExplorerTitle">Snapshots de ${escapeHtml(state.target.name)}</h3><div class="subtitle" style="font-size:12px; color:var(--muted-foreground); margin-top:2px;">Explora contenido inmutable del target seleccionado</div></div>
+            <button type="button" class="close" data-snapshot-close aria-label="Cerrar Snapshot Explorer">&times;</button>
+          </div>
+          <div class="snapshot-explorer-shell">
+            <aside class="snapshot-navigation" id="snapshotNavigation" aria-label="Target y snapshots">
+              <div class="snapshot-target-card"><div class="snapshot-target-label">Target seleccionado</div><div class="snapshot-target-name">${escapeHtml(state.target.name || "Sin nombre")}</div><div class="snapshot-target-id">${escapeHtml(state.target.id || "")}</div></div>
+               <div class="snapshot-navigation-header"><span class="snapshot-section-label">Snapshots</span><button type="button" class="btn ghost xs snapshot-refresh-button" data-snapshot-refresh data-snapshot-refresh-state="idle" aria-busy="false" aria-label="Refrescar lista de snapshots" title="Refrescar lista de snapshots"><span class="snapshot-refresh-spinner" data-snapshot-refresh-spinner aria-hidden="true"></span><span>Refrescar</span></button></div>
+              <div class="snapshot-list" id="snapshotList" role="listbox" aria-label="Snapshots disponibles" tabindex="0" aria-busy="false"></div>
+            </aside>
+            <section class="snapshot-workspace" id="snapshotWorkspace" aria-label="Contenido del snapshot" aria-live="polite"></section>
+          </div>
+        </div>`;
+      bindSnapshotModalEvents();
+      renderSnapshotList();
+      if (state.currentSnapshot && state.view === "browser") {
+        if (state.loading) renderSnapshotWorkspaceLoading(state.searchActive ? "Buscando resultados..." : "Listando contenido...");
+        else renderSnapshotBrowser(state.currentSnapshot, state.currentPath, state.entries, { focusFirst: false });
+      } else {
+        renderSnapshotWorkspaceIntro();
+      }
+    }
 
     async function openSnapshotsModal(target) {
       const overlay = document.getElementById("modalOverlay");
-      if (!overlay) return;
-      snapshotBrowserState = { target, snapshots: [], currentSnapshot: null, currentPath: "", entries: [], loading: false };
-      overlay.innerHTML = `
-        <div class="modal modal-snapshots" style="display:flex; flex-direction:column;">
-          <div class="modal-header">
-            <div><h3>Snapshots de ${escapeHtml(target.name)}</h3><div class="subtitle" style="font-size:12px; color:var(--muted-foreground); margin-top:2px;">Explora y descarga contenido de snapshots restic</div></div>
-            <button class="close" id="snapClose" title="Cerrar">&times;</button>
-          </div>
-          <div id="snapContent" style="flex:1; overflow-y:auto; padding:20px; min-height:300px;"></div>
-        </div>
-      `;
+      if (!overlay || !target) return;
+      if (snapshotBrowserState) closeSnapshotsModal();
+      snapshotBrowserState = createSnapshotBrowserState(target);
+      snapshotBrowserState.overlay = overlay;
+      snapshotBrowserState.onOverlayClick = event => {
+        if (event.target === overlay || event.target.closest("[data-snapshot-close]")) closeSnapshotsModal();
+      };
+      snapshotBrowserState.onOverlayKeydown = event => {
+        if (event.key === "Escape") { event.preventDefault(); closeSnapshotsModal(); }
+      };
+      overlay.addEventListener("click", snapshotBrowserState.onOverlayClick);
+      overlay.addEventListener("keydown", snapshotBrowserState.onOverlayKeydown);
+      renderSnapshotModalFrame();
       overlay.classList.add("open");
-      document.getElementById("snapClose").addEventListener("click", () => { overlay.classList.remove("open"); overlay.innerHTML = ""; });
-      await loadSnapshotsList(target);
+      const closeButton = overlay.querySelector("[data-snapshot-close]");
+      if (closeButton && document.contains(closeButton)) closeButton.focus();
+      void loadSnapshotsList(target).then(() => {
+        if (snapshotBrowserState && !snapshotBrowserState.closed && String(snapshotBrowserState.target.id) === String(target.id)) {
+          void refreshSnapshotCatalog();
+        }
+      });
     }
 
-    async function loadSnapshotsList(target, opts) {
-      const content = document.getElementById("snapContent");
-      if (!content) return;
-      const skipSync = opts && opts.skipSync;
+    function closeSnapshotsModal() {
+      const state = snapshotBrowserState;
+      if (!state) return;
+      state.closed = true;
+      clearSnapshotSearchTimer();
+      stopSnapshotCatalogRefresh();
+      abortSnapshotCatalogRequest();
+      abortSnapshotCatalogSync();
+      setSnapshotCatalogRefreshBusy(false);
+      state.requestSequence += 1;
+      abortSnapshotRequest(state.activeRequest);
+      abortSnapshotPrefetches();
+      if (state.overlay) {
+        if (state.onOverlayClick) state.overlay.removeEventListener("click", state.onOverlayClick);
+        if (state.onOverlayKeydown) state.overlay.removeEventListener("keydown", state.onOverlayKeydown);
+        state.overlay.classList.remove("open");
+        state.overlay.innerHTML = "";
+      }
+      const returnFocus = state.returnFocus;
+      snapshotBrowserState = null;
+      if (returnFocus && typeof returnFocus.focus === "function" && document.contains(returnFocus)) returnFocus.focus();
+    }
+
+    async function loadSnapshotsList(target, options = {}) {
+      const state = snapshotBrowserState;
+      if (!state || state.closed || String(state.target.id) !== String(target.id)) return;
+      if (options.background !== true) stopSnapshotCatalogRefresh();
+      const request = beginSnapshotCatalogRequest();
+      if (!request) return;
+      state.catalogError = null;
+      state.catalogStatus = state.snapshots.length ? "refreshing" : "loading";
+      renderSnapshotList();
+      if (!state.currentSnapshot) renderSnapshotWorkspaceIntro();
+      const previousSnapshotIds = state.snapshots.map(snapshotItemId).join("\n");
       try {
-        const snaps = await apiGet(`/api/v1/targets/${target.id}/snapshots`);
-        snapshotBrowserState.snapshots = snaps.items || [];
-        renderSnapshotsList(content);
-        if (skipSync) return;
-        triggerSnapshotsSync(target);
+        let payload;
+        try {
+          payload = await apiGet(`/api/v2/targets/${encodeURIComponent(target.id)}/snapshots`, { signal: request.controller.signal });
+          if (!getSnapshotCatalogItems(payload)) throw unsupportedSnapshotResponse("Unsupported snapshot catalog response");
+        } catch (error) {
+          if (isSnapshotAbortError(error) || request.controller.signal.aborted) throw error;
+          if (!isUnsupportedSnapshotError(error)) throw error;
+          payload = await apiGet(`/api/v1/targets/${encodeURIComponent(target.id)}/snapshots`, { signal: request.controller.signal });
+          if (!getSnapshotCatalogItems(payload)) throw new Error("Invalid snapshot catalog response");
+        }
+        if (!isCurrentSnapshotCatalogRequest(request)) return;
+        const nextSnapshots = getSnapshotCatalogItems(payload).slice(0, SNAPSHOT_MAX_ENTRIES);
+        const changed = previousSnapshotIds !== nextSnapshots.map(snapshotItemId).join("\n");
+        state.snapshots = nextSnapshots;
+        state.catalogStatus = snapshotCatalogStatus(payload);
+        const stillExists = state.currentSnapshot && state.snapshots.some(item => snapshotItemId(item) === String(state.currentSnapshot));
+        if (state.currentSnapshot && !stillExists) {
+          state.currentSnapshot = null;
+          state.currentPath = "/";
+          state.entries = [];
+          state.view = "list";
+          state.notice = { kind: "deleted", message: "El snapshot seleccionado ya no existe." };
+        }
+        renderSnapshotList();
+        if (!state.currentSnapshot) renderSnapshotWorkspaceIntro();
+        return { changed, status: state.catalogStatus };
       } catch (error) {
-        content.innerHTML = `<div class="snap-error"><strong>Error cargando snapshots:</strong> ${escapeHtml(error.message)}<button class="btn ghost xs" id="snapRefresh">Reintentar</button></div>`;
-        const refreshBtn = document.getElementById("snapRefresh");
-        if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(target));
+        if (isSnapshotAbortError(error) || request.controller.signal.aborted || !isCurrentSnapshotCatalogRequest(request)) return;
+        state.catalogStatus = error.status === 404 ? "deleted" : "error";
+        state.catalogError = error.status === 404 ? "El target o su catalogo ya no existe." : String(error.message || error);
+        renderSnapshotList();
+        if (!state.currentSnapshot) {
+          const workspace = document.getElementById("snapshotWorkspace");
+          if (workspace) workspace.innerHTML = renderSnapshotState(state.catalogStatus, state.catalogError, { retry: true });
+        } else {
+          state.loading = false;
+          state.notice = error.status === 404
+            ? { kind: "deleted", message: "El target o snapshot seleccionado ya no existe.", retry: true }
+            : { kind: "stale", message: "No se pudo actualizar el catalogo; se conserva la vista actual.", retry: true };
+          renderCurrentSnapshotBrowser(false);
+        }
+      } finally {
+        finishSnapshotCatalogRequest(request);
       }
     }
 
-    async function triggerSnapshotsSync(target) {
-      const content = document.getElementById("snapContent");
-      if (!content) return;
-      let banner = content.querySelector("#snapSyncBanner");
-      if (banner) return;
-      const bannerHtml = `<div class="snap-sync-banner" id="snapSyncBanner"><div class="snap-spinner-sm"></div><span id="snapSyncText">Sincronizando con el storage remoto...</span><button class="btn ghost xs" id="snapSyncCancel" style="margin-left:auto;">Ocultar</button></div>`;
-      content.insertAdjacentHTML("afterbegin", bannerHtml);
-      banner = content.querySelector("#snapSyncBanner");
-      const cancelBtn = content.querySelector("#snapSyncCancel");
-      if (cancelBtn) cancelBtn.addEventListener("click", () => { if (banner) banner.remove(); });
+    async function refreshSnapshotCatalog() {
+      const state = snapshotBrowserState;
+      if (!state || state.closed) return;
+      const syncRequest = beginSnapshotCatalogSyncRequest();
+      if (!syncRequest) return;
+      state.catalogError = null;
+      state.catalogStatus = state.snapshots.length ? "refreshing" : "loading";
+      renderSnapshotList();
+      setSnapshotCatalogRefreshBusy(true, syncRequest);
       try {
-        const syncResp = await apiPost(`/api/v1/targets/${target.id}/snapshots-sync`, { requested_by: "ui" });
-        const jobId = syncResp.id;
-        if (!jobId) { if (banner) banner.remove(); return; }
-        const maxAttempts = 150;
-        for (let i = 0; i < maxAttempts; i++) {
-          if (!document.getElementById("snapSyncBanner")) return;
-          await new Promise(r => setTimeout(r, 1000));
-          const syncText = document.getElementById("snapSyncText");
-          if (syncText) syncText.textContent = `Sincronizando con el storage remoto... (${i + 1}/${maxAttempts})`;
-          try {
-            const job = await apiGet(`/api/v1/jobs/${jobId}`);
-            if (job && (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled")) {
-              if (job.status === "succeeded") {
-                if (banner) banner.remove();
-                await loadSnapshotsList(target, { skipSync: true });
-              } else {
-                if (banner) {
-                  const errLines = (job.log_lines || []).filter(l => l.toLowerCase().includes("error") || l.toLowerCase().includes("fail")).slice(-3);
-                  banner.innerHTML = `<div class="snap-sync-error"><strong>Error sincronizando</strong>${errLines.length ? `<pre class="snap-error-log">${escapeHtml(errLines.join("\n"))}</pre>` : ""}<button class="btn ghost xs" id="snapSyncRetry">Reintentar sync</button></div>`;
-                  const retryBtn = document.getElementById("snapSyncRetry");
-                  if (retryBtn) retryBtn.addEventListener("click", () => { banner.remove(); triggerSnapshotsSync(target); });
-                }
-              }
-              return;
-            }
-          } catch (e) {}
+        const syncJob = await apiPost(`/api/v1/targets/${encodeURIComponent(state.target.id)}/snapshots-sync`, { requested_by: "ui" }, { signal: syncRequest.controller.signal });
+        const jobId = syncJob && (syncJob.job_id || syncJob.id);
+        if (!jobId) throw unsupportedSnapshotResponse("Unsupported snapshot sync response");
+        syncRequest.jobId = String(jobId);
+        const syncResult = await pollSnapshotJob(syncRequest, { ...syncJob, job_id: syncRequest.jobId });
+        const syncStatus = snapshotStatus(syncResult);
+        if (!["succeeded", "success"].includes(syncStatus)) {
+          const failure = new Error((syncResult && (syncResult.error || syncResult.result_summary && syncResult.result_summary.error)) || "El worker no pudo sincronizar el catalogo.");
+          failure.status = syncResult && syncResult.status_code;
+          failure.code = syncStatus === "failed" || syncStatus === "error" ? "snapshot-sync-failed" : "snapshot-sync-incomplete";
+          throw failure;
         }
-        if (banner) {
-          const syncText = document.getElementById("snapSyncText");
-          if (syncText) syncText.textContent = "El sync sigue en background. Se actualizaran los snapshots cuando termine.";
-        }
+        if (!isCurrentSnapshotCatalogSyncRequest(syncRequest)) return;
+        await loadSnapshotsList(state.target);
       } catch (error) {
-        if (banner) banner.remove();
+        if (isSnapshotAbortError(error) || syncRequest.controller.signal.aborted) return;
+        const timeout = error && error.code === "snapshot-poll-timeout";
+        const failed = error && ["snapshot-sync-failed", "snapshot-sync-incomplete"].includes(error.code);
+        const offline = !timeout && !failed && (!error || typeof error.status !== "number" || error.status === 0 || [400, 401, 404, 409, 502, 503, 504].includes(error.status));
+        state.catalogStatus = timeout ? "timeout" : offline ? "offline" : "error";
+        state.catalogError = String(error && error.message || error || "No se pudo sincronizar el catalogo.").slice(0, 300);
+        renderSnapshotList();
+        if (!state.currentSnapshot) {
+          const workspace = document.getElementById("snapshotWorkspace");
+          if (workspace) workspace.innerHTML = renderSnapshotState(state.catalogStatus, state.catalogError, { retry: true });
+        } else {
+          state.notice = { kind: state.catalogStatus, message: `No se pudo actualizar el catalogo: ${state.catalogError}`, retry: true };
+          renderCurrentSnapshotBrowser(false);
+        }
+      } finally {
+        setSnapshotCatalogRefreshBusy(false, syncRequest);
+        finishSnapshotCatalogSyncRequest(syncRequest);
       }
     }
 
-    let snapTableState = { sortKey: "created_at", sortDir: "desc", filters: { snapshot_id: "", created_at: "", paths: "" } };
+    function showSnapshotOperationError(request, error) {
+      const state = snapshotBrowserState;
+      if (!state || !isCurrentSnapshotRequest(request)) return;
+      state.loading = false;
+      let kind = "error";
+      let message = String(error && error.message || error || "No se pudo completar la operacion.");
+      if (error && error.code === "snapshot-poll-timeout") kind = "indexing";
+      else if (error && error.status === 404) { kind = "deleted"; message = "El target o snapshot ya no existe."; }
+      state.notice = { kind, message, retry: true };
+      renderCurrentSnapshotBrowser(false);
+    }
 
-    function renderSnapshotsList(content) {
-      const allSnaps = snapshotBrowserState.snapshots;
-      if (!allSnaps || allSnaps.length === 0) {
-        content.innerHTML = `
-          <div style="text-align:center; padding:40px;">
-            <div style="color:var(--muted-foreground); margin-bottom:16px;">No hay snapshots disponibles para este target.</div>
-            <button class="btn ghost xs" id="snapRefresh">Refrescar</button>
-          </div>`;
-        const refreshBtn = document.getElementById("snapRefresh");
-        if (refreshBtn) refreshBtn.addEventListener("click", () => loadSnapshotsList(snapshotBrowserState.target));
+    function showSnapshotResultError(request, result) {
+      const state = snapshotBrowserState;
+      if (!state || !isCurrentSnapshotRequest(request)) return;
+      const status = snapshotStatus(result);
+      if (status === "canceled" || status === "cancelled") {
+        state.notice = { kind: "canceled", message: result.error || "La operacion fue cancelada.", retry: true };
+      } else if (status === "deleted" || status === "missing") {
+        state.notice = { kind: "deleted", message: result.error || "El target o snapshot ya no existe.", retry: true };
+      } else {
+        state.notice = { kind: "error", message: result.error || "El worker no pudo listar el snapshot.", retry: true };
+      }
+      state.loading = false;
+      renderCurrentSnapshotBrowser(false);
+    }
+
+    function isSuccessfulSnapshotResult(result) {
+      const status = snapshotStatus(result);
+      return status === "succeeded" || status === "success" || (!status && !result.error);
+    }
+
+    function isWarmSnapshotResult(result) {
+      const source = String(result && result.source || "").toLowerCase();
+      return Boolean(result && result.cache_hit === true) || ["redis", "local", "memory"].includes(source);
+    }
+
+    async function browseSnapshot(snapshotId, path) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotId) return;
+      let normalizedPath;
+      try { normalizedPath = normalizeSnapshotPath(path); } catch (error) { return; }
+      abortSnapshotPrefetches();
+      clearSnapshotSearchTimer();
+      state.currentSnapshot = String(snapshotId);
+      state.currentPath = normalizedPath;
+      state.searchQuery = "";
+      state.searchActive = false;
+      state.view = "browser";
+      state.loading = true;
+      state.notice = null;
+      const request = beginSnapshotRequest("browse", state.currentSnapshot, normalizedPath);
+      renderSnapshotList();
+      renderSnapshotWorkspaceLoading("Listando contenido...");
+      const cachedEntries = getCachedSnapshotDirectory(state.currentSnapshot, normalizedPath);
+      if (cachedEntries && isCurrentSnapshotRequest(request)) {
+        state.entries = cachedEntries;
+        state.loading = false;
+        state.notice = { kind: "stale", message: "Mostrando datos en cache mientras se actualiza el directorio." };
+        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, cachedEntries, { focusFirst: false });
+      }
+      try {
+        const result = await requestSnapshotOperation(request, "browse", {
+          snapshot_id: state.currentSnapshot,
+          path: normalizedPath,
+          request_id: `ui-${request.seq}`,
+          max_entries: SNAPSHOT_MAX_ENTRIES,
+        }, legacyBrowseSnapshot);
+        if (!isCurrentSnapshotRequest(request)) return;
+        if (!isSuccessfulSnapshotResult(result)) { showSnapshotResultError(request, result); return; }
+        state.entries = Array.isArray(result.entries) ? result.entries.slice(0, SNAPSHOT_MAX_ENTRIES) : [];
+        cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries);
+        state.loading = false;
+        state.notice = null;
+        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, state.entries);
+        if (isWarmSnapshotResult(result)) {
+          prefetchSnapshotDirectories(state.currentSnapshot, normalizedPath, state.entries);
+        }
+      } catch (error) {
+        if (!isSnapshotAbortError(error)) showSnapshotOperationError(request, error);
+      } finally {
+        finishSnapshotRequest(request);
+      }
+    }
+
+    async function searchSnapshot(snapshotId, path, query) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotId || String(query || "").trim().length < SNAPSHOT_SEARCH_MIN_LENGTH) return;
+      const normalizedPath = normalizeSnapshotPath(path);
+      const normalizedQuery = String(query).trim();
+      const matchesCurrentDirectory = String(state.currentSnapshot || "") === String(snapshotId)
+        && normalizeSnapshotPath(state.currentPath) === normalizedPath;
+      const localSource = matchesCurrentDirectory ? state.entries.slice(0, SNAPSHOT_MAX_ENTRIES).filter(entry => {
+        const normalized = normalizeSnapshotEntry(entry);
+        return normalized && (normalized.path === normalizedPath || normalized.path.startsWith(normalizedPath === "/" ? "/" : `${normalizedPath}/`));
+      }) : [];
+      const useLocalSearch = matchesCurrentDirectory && state.entries.length < SNAPSHOT_MAX_ENTRIES;
+      abortSnapshotPrefetches();
+      clearSnapshotSearchTimer();
+      state.currentSnapshot = String(snapshotId);
+      state.currentPath = normalizedPath;
+      state.searchQuery = normalizedQuery;
+      state.searchActive = true;
+      state.view = "browser";
+      state.notice = null;
+      const request = beginSnapshotRequest("search", state.currentSnapshot, normalizedPath);
+      if (useLocalSearch) {
+        const needle = normalizedQuery.toLowerCase();
+        const localResults = localSource.filter(entry => {
+          const normalized = normalizeSnapshotEntry(entry);
+          return normalized && (normalized.path.toLowerCase().includes(needle) || normalized.name.toLowerCase().includes(needle));
+        }).slice(0, SNAPSHOT_MAX_ENTRIES);
+        if (!isCurrentSnapshotRequest(request)) {
+          finishSnapshotRequest(request);
+          return;
+        }
+        state.entries = localResults;
+        state.loading = false;
+        state.notice = localResults.length ? null : { kind: "no-match", message: "No se encontraron entradas para esta busqueda." };
+        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, state.entries);
+        finishSnapshotRequest(request);
         return;
       }
-
-      const renderTable = () => {
-        let snaps = allSnaps.slice();
-        snaps = snaps.filter(s => {
-          const id = (s.snapshot_id || "").toLowerCase();
-          const date = s.created_at ? new Date(s.created_at).toLocaleString().toLowerCase() : "";
-          const paths = (s.paths || []).join(", ").toLowerCase();
-          if (snapTableState.filters.snapshot_id && !id.includes(snapTableState.filters.snapshot_id.toLowerCase())) return false;
-          if (snapTableState.filters.created_at && !date.includes(snapTableState.filters.created_at.toLowerCase())) return false;
-          if (snapTableState.filters.paths && !paths.includes(snapTableState.filters.paths.toLowerCase())) return false;
-          return true;
-        });
-        const dir = snapTableState.sortDir === "asc" ? 1 : -1;
-        snaps.sort((a, b) => {
-          let va, vb;
-          if (snapTableState.sortKey === "created_at") {
-            va = new Date(a.created_at || 0).getTime();
-            vb = new Date(b.created_at || 0).getTime();
-          } else if (snapTableState.sortKey === "snapshot_id") {
-            va = a.snapshot_id || "";
-            vb = b.snapshot_id || "";
-          } else if (snapTableState.sortKey === "paths") {
-            va = (a.paths || []).join(", ");
-            vb = (b.paths || []).join(", ");
+      state.loading = true;
+      renderSnapshotWorkspaceLoading("Buscando resultados...");
+      try {
+        const result = await requestSnapshotOperation(request, "search", {
+          snapshot_id: state.currentSnapshot,
+          path: normalizedPath,
+          query: normalizedQuery,
+          max_entries: SNAPSHOT_MAX_ENTRIES,
+        }, null);
+        if (!isCurrentSnapshotRequest(request)) return;
+        if (!isSuccessfulSnapshotResult(result)) { showSnapshotResultError(request, result); return; }
+        state.entries = Array.isArray(result.entries) ? result.entries.slice(0, SNAPSHOT_MAX_ENTRIES) : [];
+        state.loading = false;
+        state.notice = state.entries.length ? null : { kind: "no-match", message: "No se encontraron entradas para esta busqueda." };
+        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, state.entries);
+      } catch (error) {
+        if (isSnapshotAbortError(error)) return;
+        if (isUnsupportedSnapshotError(error)) {
+          const localResults = localSource.filter(entry => {
+            const normalized = normalizeSnapshotEntry(entry);
+            return normalized && (normalized.path.toLowerCase().includes(normalizedQuery.toLowerCase()) || normalized.name.toLowerCase().includes(normalizedQuery.toLowerCase()));
+          }).slice(0, SNAPSHOT_MAX_ENTRIES);
+          if (isCurrentSnapshotRequest(request)) {
+            state.entries = localResults;
+            state.loading = false;
+            state.notice = { kind: "stale", message: "La busqueda remota no esta disponible; se muestran resultados locales acotados." };
+            renderSnapshotBrowser(state.currentSnapshot, normalizedPath, state.entries);
           }
-          if (va < vb) return -1 * dir;
-          if (va > vb) return 1 * dir;
-          return 0;
-        });
+        } else {
+          showSnapshotOperationError(request, error);
+        }
+      } finally {
+        finishSnapshotRequest(request);
+      }
+    }
 
-        const sortIcon = (key) => {
-          if (snapTableState.sortKey !== key) return " ↕";
-          return snapTableState.sortDir === "asc" ? " ↑" : " ↓";
-        };
-        const sortAttrs = (key) => `data-sort="${key}" style="cursor:pointer; user-select:none;"`;
+    function classifySnapshotDownloadFailure(result) {
+      const text = String(result && result.error || "").toLowerCase();
+      if (result && (result.oversized || result.truncated || /size|large|limit|cap|oversiz|too big|truncat/.test(text))) return "oversized";
+      if (result && result.blocked) return "blocked";
+      return "error";
+    }
 
-        content.innerHTML = `
-          <div style="margin-bottom:16px; font-size:13px; color:var(--muted-foreground);">Selecciona un snapshot para explorar su contenido (${snaps.length} de ${allSnaps.length}):</div>
-          <table class="table datatable" style="font-size:14px;">
-            <thead>
-              <tr>
-                <th ${sortAttrs("snapshot_id")}>ID${sortIcon("snapshot_id")}</th>
-                <th ${sortAttrs("created_at")}>Fecha${sortIcon("created_at")}</th>
-                <th ${sortAttrs("paths")}>Paths${sortIcon("paths")}</th>
-                <th style="width:120px;">Acciones</th>
-              </tr>
-              <tr class="filter-row">
-                <th><input type="text" class="dt-filter" data-col="snapshot_id" placeholder="Filtrar ID..." value="${escapeHtml(snapTableState.filters.snapshot_id)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="created_at" placeholder="Filtrar fecha..." value="${escapeHtml(snapTableState.filters.created_at)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="paths" placeholder="Filtrar paths..." value="${escapeHtml(snapTableState.filters.paths)}" /></th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${snaps.length === 0 ? `<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--muted-foreground);">Sin resultados para los filtros aplicados.</td></tr>` : snaps.map(s => `
-                <tr>
-                  <td class="mono">${escapeHtml(s.snapshot_id || "—")}</td>
-                  <td>${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : "—")}</td>
-                  <td class="mono" style="font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((s.paths || []).join(", ") || "—")}</td>
-                  <td class="action-cell">
-                    <button class="btn primary xs" data-snap="${escapeHtml(s.snapshot_id)}">Explorar</button>
-                    <button class="btn ghost xs danger" data-restore-snap="${escapeHtml(s.snapshot_id)}" data-restore-date="${escapeHtml(s.created_at ? new Date(s.created_at).toLocaleString() : '')}">Restaurar</button>
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        `;
+    function findSnapshotDownloadButton(path) {
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!workspace) return null;
+      return Array.from(workspace.querySelectorAll("[data-entry-download]")).find(button => button.dataset.downloadPath === path) || null;
+    }
 
-        content.querySelectorAll("[data-sort]").forEach(th => {
-          th.addEventListener("click", () => {
-            const key = th.dataset.sort;
-            if (snapTableState.sortKey === key) {
-              snapTableState.sortDir = snapTableState.sortDir === "asc" ? "desc" : "asc";
-            } else {
-              snapTableState.sortKey = key;
-              snapTableState.sortDir = "desc";
-            }
-            renderTable();
-          });
-        });
-        content.querySelectorAll(".dt-filter").forEach(input => {
-          input.addEventListener("input", () => {
-            snapTableState.filters[input.dataset.col] = input.value;
-            renderTable();
-          });
-        });
-        content.querySelectorAll("[data-snap]").forEach(btn => {
-          btn.addEventListener("click", () => browseSnapshot(btn.dataset.snap, ""));
-        });
-        content.querySelectorAll("[data-restore-snap]").forEach(btn => {
-          btn.addEventListener("click", () => openRestoreFromSnapshotModal(btn.dataset.restoreSnap, btn.dataset.restoreDate));
-        });
-      };
+    async function downloadSnapshotFile(snapshotId, filePath, knownSize) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotId || !filePath) return;
+      const normalizedPath = normalizeSnapshotPath(filePath);
+      const numericKnownSize = Number(knownSize);
+      if (Number.isFinite(numericKnownSize) && numericKnownSize > SNAPSHOT_MAX_OUTPUT_BYTES) {
+        state.notice = { kind: "oversized", message: `El archivo excede el limite de ${formatSnapshotBytes(SNAPSHOT_MAX_OUTPUT_BYTES)} y fue bloqueado.`, retry: false };
+        renderCurrentSnapshotBrowser(false);
+        return;
+      }
+      abortSnapshotPrefetches();
+      const request = beginSnapshotRequest("dump", String(snapshotId), state.currentPath);
+      state.loading = true;
+      state.notice = { kind: "loading", message: "Preparando descarga acotada..." };
+      renderCurrentSnapshotBrowser(false);
+      try {
+        const result = await requestSnapshotOperation(request, "dump", {
+          snapshot_id: String(snapshotId),
+          path: normalizedPath,
+          archive: false,
+          max_output_bytes: SNAPSHOT_MAX_OUTPUT_BYTES,
+        }, legacyDumpSnapshot);
+        if (!isCurrentSnapshotRequest(request)) return;
+        const status = snapshotStatus(result);
+        if (status === "canceled" || status === "cancelled") {
+          state.loading = false;
+          state.notice = { kind: "canceled", message: "La descarga fue cancelada.", retry: true };
+          renderCurrentSnapshotBrowser(false);
+          return;
+        }
+        if (!isSuccessfulSnapshotResult(result) || !result.b64_content) {
+          state.loading = false;
+          const kind = classifySnapshotDownloadFailure(result);
+          state.notice = { kind, message: result.error || (kind === "oversized" ? "El archivo excede el limite de descarga." : "La descarga fue bloqueada."), retry: true };
+          renderCurrentSnapshotBrowser(false);
+          return;
+        }
+        if (result.b64_content.length > SNAPSHOT_MAX_BASE64_LENGTH || result.oversized || result.truncated || result.blocked) {
+          state.loading = false;
+          state.notice = { kind: result.blocked && !result.oversized ? "blocked" : "oversized", message: "La respuesta excede el limite seguro de descarga y no se guardo.", retry: true };
+          renderCurrentSnapshotBrowser(false);
+          return;
+        }
+        const binary = atob(result.b64_content);
+        if (binary.length > SNAPSHOT_MAX_OUTPUT_BYTES) throw Object.assign(new Error("El archivo excede el limite de descarga."), { code: "snapshot-oversized" });
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = normalizedPath.split("/").pop() || "download";
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        state.loading = false;
+        state.notice = { kind: "ready", message: "Descarga iniciada. El contenido no se renderiza en el navegador." };
+        renderCurrentSnapshotBrowser(false);
+      } catch (error) {
+        if (!isSnapshotAbortError(error) && isCurrentSnapshotRequest(request)) {
+          state.loading = false;
+          state.notice = { kind: error.code === "snapshot-oversized" ? "oversized" : "error", message: String(error.message || error), retry: true };
+          renderCurrentSnapshotBrowser(false);
+        }
+      } finally {
+        finishSnapshotRequest(request);
+      }
+    }
 
-      renderTable();
+    function prefetchSnapshotDirectories(snapshotId, path, entries) {
+      const state = snapshotBrowserState;
+      if (!state || !snapshotModalIsOpen()) return;
+      const directories = normalizeSnapshotEntries(entries).filter(entry => entry.isDir && isImmediateSnapshotChild(entry.path, path)).slice(0, SNAPSHOT_PREFETCH_LIMIT);
+      for (const directory of directories) {
+        if (state.prefetchControllers.size >= SNAPSHOT_PREFETCH_LIMIT) break;
+        const key = snapshotCacheKey(state.target.id, snapshotId, directory.path);
+        if (state.directoryCache.has(key) || state.prefetchControllers.has(key)) continue;
+        const controller = new AbortController();
+        const request = { kind: "prefetch", seq: state.requestSequence, targetId: String(state.target.id), snapshotId: String(snapshotId), path: directory.path, controller, jobId: null, cancelSent: false };
+        state.prefetchControllers.set(key, { controller, request });
+        requestSnapshotOperation(request, "browse", {
+          snapshot_id: String(snapshotId),
+          path: directory.path,
+          request_id: `prefetch-${request.seq}`,
+          max_entries: SNAPSHOT_MAX_ENTRIES,
+        }, legacyBrowseSnapshot).then(result => {
+          if (controller.signal.aborted || !snapshotModalIsOpen() || !snapshotBrowserState || String(snapshotBrowserState.target.id) !== String(request.targetId)) return;
+          if (isSuccessfulSnapshotResult(result)) cacheSnapshotDirectory(snapshotId, directory.path, Array.isArray(result.entries) ? result.entries : []);
+        }).catch(() => {}).finally(() => {
+          if (snapshotBrowserState) snapshotBrowserState.prefetchControllers.delete(key);
+        });
+      }
     }
 
     function openRestoreFromSnapshotModal(snapshotId, dateStr) {
-      const target = snapshotBrowserState.target;
-      if (!target) return;
-      const overlay = document.getElementById("modalOverlay");
-      const prevHtml = overlay.innerHTML;
+      const state = snapshotBrowserState;
+      if (!state || !state.target || !snapshotId) return;
+      invalidateSnapshotRequest(false);
+      const overlay = state.overlay;
       overlay.innerHTML = `
-        <div class="modal" style="max-width:520px;">
-          <div class="modal-header"><h3>Restaurar desde snapshot</h3><button class="close" id="rsClose">&times;</button></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restoreSnapshotTitle" style="max-width:520px;">
+          <div class="modal-header"><h3 id="restoreSnapshotTitle">Restaurar desde snapshot</h3><button type="button" class="close" id="rsClose" aria-label="Cerrar restauracion">&times;</button></div>
           <div class="modal-body">
-            <div class="restore-snap-info">
-              <div class="field-row">
-                <div class="field"><label>Target</label><div class="info-value">${escapeHtml(target.name)}</div></div>
-                <div class="field"><label>Snapshot</label><div class="info-value mono">${escapeHtml(snapshotId)}</div></div>
-              </div>
-              ${dateStr ? `<div class="field"><label>Fecha del snapshot</label><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}
-            </div>
-            <div class="field">
-              <label for="rsOverwrite">Sobrescribir existentes</label>
-              <select id="rsOverwrite">
-                <option value="false">No sobrescribir archivos existentes</option>
-                <option value="true">Sobrescribir archivos existentes</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="rsMode">Modo de restauracion</label>
-              <select id="rsMode">
-                <option value="cold">Cold restore (apagar servicios asociados)</option>
-                <option value="hot">Hot restore (sin apagar servicios)</option>
-              </select>
-              <div class="helper" style="margin-top:4px;">Cold restore detiene los contenedores del target antes de restaurar y los reinicia al terminar. Hot restore restaura sin detener nada.</div>
-            </div>
-            <div class="restore-warning">
-              <strong>Atencion:</strong> La restauracion reemplazara los datos del volumen con el contenido del snapshot.
-              Asegurate de entender el impacto antes de continuar.
-            </div>
+            <div class="restore-snap-info"><div class="field-row"><div class="field"><label>Target</label><div class="info-value">${escapeHtml(state.target.name)}</div></div><div class="field"><label>Snapshot</label><div class="info-value mono">${escapeHtml(snapshotId)}</div></div></div>${dateStr ? `<div class="field"><label>Fecha del snapshot</label><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}</div>
+            <div class="field"><label for="rsOverwrite">Sobrescribir existentes</label><select id="rsOverwrite"><option value="false">No sobrescribir archivos existentes</option><option value="true">Sobrescribir archivos existentes</option></select></div>
+            <div class="field"><label for="rsMode">Modo de restauracion</label><select id="rsMode"><option value="cold">Cold restore (apagar servicios asociados)</option><option value="hot">Hot restore (sin apagar servicios)</option></select><div class="helper" style="margin-top:4px;">Cold restore detiene los contenedores del target antes de restaurar y los reinicia al terminar. Hot restore restaura sin detener nada.</div></div>
+            <div class="restore-warning"><strong>Atencion:</strong> La restauracion reemplazara los datos del volumen con el contenido del snapshot. Asegurate de entender el impacto antes de continuar.</div>
           </div>
-          <div class="modal-footer">
-            <button class="btn" id="rsCancel">Cancelar</button>
-            <button class="btn primary" id="rsConfirm">Restaurar</button>
-          </div>
-        </div>
-      `;
-      function close() { overlay.classList.remove("open"); overlay.innerHTML = ""; }
-      function backToSnapshots() { overlay.innerHTML = prevHtml; }
-      document.getElementById("rsClose").addEventListener("click", backToSnapshots);
-      document.getElementById("rsCancel").addEventListener("click", backToSnapshots);
-      document.getElementById("rsConfirm").addEventListener("click", (e) => withBtnLoading(e.currentTarget, async () => {
+          <div class="modal-footer"><button type="button" class="btn" id="rsCancel">Cancelar</button><button type="button" class="btn primary" id="rsConfirm">Restaurar</button></div>
+        </div>`;
+      const backToExplorer = () => renderSnapshotModalFrame();
+      document.getElementById("rsClose").addEventListener("click", backToExplorer);
+      document.getElementById("rsCancel").addEventListener("click", backToExplorer);
+      document.getElementById("rsConfirm").addEventListener("click", event => withBtnLoading(event.currentTarget, async () => {
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
         const stopContainers = document.getElementById("rsMode").value === "cold";
-        const job = await apiPost(`/api/v1/targets/${target.id}/restore/run`, {
+        const job = await apiPost(`/api/v1/targets/${encodeURIComponent(state.target.id)}/restore/run`, {
           requested_by: "ui",
           snapshot_id: snapshotId,
           force_overwrite: forceOverwrite,
           stop_containers: stopContainers,
         });
-        close();
-        openLogPanel(job.id, target.id);
+        closeSnapshotsModal();
+        openLogPanel(job.id, state.target.id);
       }, "Restaurando...").catch(() => {}));
-    }
-
-    async function browseSnapshot(snapshotId, path) {
-      const content = document.getElementById("snapContent");
-      if (!content) return;
-      snapshotBrowserState.currentSnapshot = snapshotId;
-      snapshotBrowserState.currentPath = path;
-      content.innerHTML = `<div style="text-align:center; padding:40px; color:var(--muted-foreground);">Listando contenido de ${escapeHtml(path || "/")}...</div>`;
-      try {
-        const result = await apiPost(`/api/v1/targets/${snapshotBrowserState.target.id}/snapshot-ls`, {
-          snapshot_id: snapshotId,
-          path: path,
-        });
-        if (result.error) {
-          content.innerHTML = `<div style="padding:20px; color:var(--destructive);"><strong>Error:</strong> ${escapeHtml(result.error)}</div>`;
-          return;
-        }
-        snapshotBrowserState.entries = result.entries || [];
-        renderSnapshotBrowser(content, snapshotId, path, result.entries || []);
-      } catch (error) {
-        content.innerHTML = `<div style="padding:20px; color:var(--destructive);">Error listando contenido: ${escapeHtml(error.message)}</div>`;
-      }
-    }
-
-    function renderSnapshotBrowser(content, snapshotId, path, entries) {
-      const fileEntries = entries.filter(e => e && (e.struct_type === "node" || e.type === "file" || e.type === "dir"));
-      const dirs = [];
-      const files = [];
-      for (const e of fileEntries) {
-        const isDir = e.type === "dir";
-        const item = { path: e.path || "", name: (e.path || "").split("/").pop() || e.path, isDir };
-        if (isDir) dirs.push(item); else files.push(item);
-      }
-      const pathPrefix = path ? `/${path}` : "";
-      const visibleDirs = dirs.filter(d => {
-        const p = (d.path || "").replace(/^\//, "");
-        if (!path) return p.split("/").filter(Boolean).length === 1;
-        return p.startsWith(path + "/") && p.split("/").filter(Boolean).length === path.split("/").filter(Boolean).length + 1;
-      });
-      const visibleFiles = files.filter(f => {
-        const p = (f.path || "").replace(/^\//, "");
-        if (!path) return p.split("/").filter(Boolean).length === 1;
-        return p.startsWith(path + "/") && p.split("/").filter(Boolean).length === path.split("/").filter(Boolean).length + 1;
-      });
-      visibleDirs.sort((a, b) => a.name.localeCompare(b.name));
-      visibleFiles.sort((a, b) => a.name.localeCompare(b.name));
-      const pathParts = path ? path.split("/").filter(Boolean) : [];
-      const breadcrumbs = ['<a href="#" data-path="" style="color:var(--primary);">raiz</a>'];
-      let acc = "";
-      for (const p of pathParts) {
-        acc = acc ? `${acc}/${p}` : p;
-        breadcrumbs.push(`<span style="color:var(--muted-foreground);">/</span><a href="#" data-path="${escapeHtml(acc)}" style="color:var(--primary);">${escapeHtml(p)}</a>`);
-      }
-      content.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-          <div>
-            <button class="btn ghost xs" id="snapBackToList">← Lista de snapshots</button>
-          </div>
-          <div style="font-size:12px; color:var(--muted-foreground);">Snapshot: <code>${escapeHtml(snapshotId)}</code></div>
-        </div>
-        <div style="margin-bottom:20px; padding:10px 14px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); font-size:14px;">
-          ${breadcrumbs.join(" ")}
-        </div>
-        ${(visibleDirs.length === 0 && visibleFiles.length === 0) ? '<div style="padding:40px; text-align:center; color:var(--muted-foreground);">Carpeta vacia o no se pudo listar.</div>' : `
-        <table class="table" style="font-size:14px;">
-          <thead><tr><th style="width:36px;"></th><th>Nombre</th><th>Tipo</th><th style="width:120px;">Acciones</th></tr></thead>
-          <tbody>
-            ${visibleDirs.map(d => {
-              const relPath = d.path.replace(/^\//, "");
-              return `<tr>
-                <td>📁</td>
-                <td class="mono"><a href="#" data-dir="${escapeHtml(relPath)}" style="color:var(--primary);">${escapeHtml(d.name)}/</a></td>
-                <td>directorio</td>
-                <td><button class="btn ghost xs" data-dir-btn="${escapeHtml(relPath)}">Abrir</button></td>
-              </tr>`;
-            }).join("")}
-            ${visibleFiles.map(f => {
-              const relPath = f.path.replace(/^\//, "");
-              return `<tr>
-                <td>📄</td>
-                <td class="mono">${escapeHtml(f.name)}</td>
-                <td>archivo</td>
-                <td><button class="btn primary xs" data-download="${escapeHtml(relPath)}">Descargar</button></td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>`}
-      `;
-      const backBtn = document.getElementById("snapBackToList");
-      if (backBtn) backBtn.addEventListener("click", () => renderSnapshotsList(content));
-      content.querySelectorAll("[data-dir]").forEach(a => {
-        a.addEventListener("click", (e) => { e.preventDefault(); browseSnapshot(snapshotId, a.dataset.dir); });
-      });
-      content.querySelectorAll("[data-dir-btn]").forEach(btn => {
-        btn.addEventListener("click", () => browseSnapshot(snapshotId, btn.dataset.dirBtn));
-      });
-      content.querySelectorAll("[data-download]").forEach(btn => {
-        btn.addEventListener("click", () => downloadSnapshotFile(snapshotId, btn.dataset.download));
-      });
-    }
-
-    async function downloadSnapshotFile(snapshotId, filePath) {
-      const fileName = filePath.split("/").pop() || "download";
-      try {
-        const btn = document.querySelector(`[data-download="${filePath.replace(/"/g, '&quot;')}"]`);
-        if (btn) { btn.disabled = true; btn.textContent = "Descargando..."; }
-        const result = await apiPost(`/api/v1/targets/${snapshotBrowserState.target.id}/snapshot-dump`, {
-          snapshot_id: snapshotId,
-          path: filePath,
-        });
-        if (btn) { btn.disabled = false; btn.textContent = "Descargar"; }
-        if (!result.success || !result.b64_content) {
-          const errMsg = result.error || "No se pudo obtener el contenido del archivo.";
-          alert(`Error descargando ${fileName}:\n${errMsg.substring(0, 500)}`);
-          return;
-        }
-        const binary = atob(result.b64_content);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const blob = new Blob([bytes], { type: "application/octet-stream" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      } catch (error) {
-        const btn = document.querySelector(`[data-download="${filePath.replace(/"/g, '&quot;')}"]`);
-        if (btn) { btn.disabled = false; btn.textContent = "Descargar"; }
-        alert(`Error descargando ${fileName}: ${error.message}`);
-      }
+      const cancel = document.getElementById("rsCancel");
+      if (cancel && document.contains(cancel)) cancel.focus();
     }
 
     function cronNextRun(cronExpr, fromDate) {
@@ -1614,6 +2727,17 @@ docker compose up -d
       targetModalState = { mode: "edit", target, isEditing: true };
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
+      const eligibleWorkers = (state.workers || []).filter(w => w.status === "online");
+      const currentWorkerId = String(target.worker_id || "");
+      const currentWorker = (state.workers || []).find(w => String(w.id) === currentWorkerId);
+      const currentWorkerEligible = Boolean(currentWorker && currentWorker.status === "online");
+      const currentWorkerOption = currentWorkerEligible || !currentWorkerId
+        ? ""
+        : `<option value="${escapeHtml(currentWorkerId)}" selected disabled>${escapeHtml(currentWorker ? currentWorker.name : currentWorkerId)} — no elegible (${escapeHtml(currentWorker ? currentWorker.status : "no registrado")})</option>`;
+      const workerOptions = `${currentWorkerOption}${eligibleWorkers.map(w => `<option value="${escapeHtml(w.id)}" ${String(w.id) === currentWorkerId ? "selected" : ""}>${escapeHtml(w.name)}</option>`).join("")}`;
+      const workerWarning = currentWorkerEligible
+        ? ""
+        : `<div id="etWorkerWarning" class="form-error" style="display:block;">El worker actual no tiene un heartbeat reciente. Selecciona un worker online para poder guardar y despachar este target. Reasignar no migra volumenes ni inventario automaticamente.</div>`;
       const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.storage_profile_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}" ${r.id === target.retention_policy_id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
       overlay.innerHTML = `
@@ -1626,6 +2750,7 @@ docker compose up -d
             <form id="editTargetForm">
               <div class="form-grid">
                 <div class="field"><label for="etName">Nombre</label><input id="etName" value="${escapeHtml(target.name)}" required /></div>
+                <div class="field"><label for="etWorkerId">Worker</label><select id="etWorkerId" ${eligibleWorkers.length || currentWorkerEligible ? "" : "disabled"}>${workerOptions || '<option value="">-- No hay workers online --</option>'}</select>${workerWarning}<div class="helper">Cambiar el worker solo reasigna el target; no copia volumenes ni inventario entre workers.</div></div>
                 <div class="field"><label for="etBackupMode">Modo</label><select id="etBackupMode"><option value="hot" ${target.backup_mode === "hot" ? "selected" : ""}>hot</option><option value="cold" ${target.backup_mode === "cold" ? "selected" : ""}>cold</option></select></div>
                 <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
                 <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
@@ -1641,8 +2766,9 @@ docker compose up -d
                   <div class="field full"><label for="etRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="etRestoreDefaults">${escapeHtml(JSON.stringify(target.restore_defaults || {}, null, 2))}</textarea></div>
                 </div>
               </details>
+              <div id="etError" class="form-error" style="display:none;"></div>
               <div class="btn-row">
-                <button type="submit" class="btn primary sm">Guardar cambios</button>
+                <button type="submit" class="btn primary sm" id="etSubmit" ${currentWorkerEligible ? "" : "disabled"}>Guardar cambios</button>
                 <button type="button" class="btn ghost sm" id="etCancel">Cancelar</button>
               </div>
             </form>
@@ -1653,24 +2779,49 @@ docker compose up -d
       document.getElementById("modalClose").addEventListener("click", closeTargetModal);
       document.getElementById("etCancel").addEventListener("click", closeTargetModal);
       overlay.addEventListener("click", (e) => { if (e.target === overlay) closeTargetModal(); });
+      const editWorkerSelect = document.getElementById("etWorkerId");
+      const editSubmit = document.getElementById("etSubmit");
+      const editError = document.getElementById("etError");
+      const updateEditWorkerEligibility = () => {
+        const selectedWorker = (state.workers || []).find(w => String(w.id) === String(editWorkerSelect && editWorkerSelect.value));
+        const eligible = Boolean(selectedWorker && selectedWorker.status === "online");
+        if (editSubmit) editSubmit.disabled = !eligible;
+        if (editError && !eligible) {
+          editError.textContent = "Selecciona un worker online para guardar este target.";
+          editError.style.display = "block";
+        } else if (editError && editError.textContent === "Selecciona un worker online para guardar este target.") {
+          editError.textContent = "";
+          editError.style.display = "none";
+        }
+      };
+      if (editWorkerSelect) editWorkerSelect.addEventListener("change", updateEditWorkerEligibility);
+      updateEditWorkerEligibility();
       document.getElementById("editTargetForm").addEventListener("submit", async (e) => {
         e.preventDefault();
-        await withBtnLoading(e.submitter, async () => {
-          await apiPatch(`/api/v1/targets/${target.id}`, {
-            name: document.getElementById("etName").value.trim(),
-            backup_mode: document.getElementById("etBackupMode").value,
-            backup_strategy: document.getElementById("etBackupStrategy").value,
-            runtime_command: emptyToNull(document.getElementById("etRuntimeCommand").value),
-            runtime_environment: parseJsonField("etRuntimeEnvironment", "runtime environment"),
-            storage_profile_id: emptyToNull(document.getElementById("etStorageProfileId").value),
-            retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
-            restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
-            restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
-            cron_expression: emptyToNull(document.getElementById("etCronExpression").value),
-          });
-          closeTargetModal();
-          await refreshAll();
-        }, "Guardando...").catch(() => {});
+        try {
+          await withBtnLoading(e.submitter, async () => {
+            await apiPatch(`/api/v1/targets/${target.id}`, {
+              name: document.getElementById("etName").value.trim(),
+              worker_id: document.getElementById("etWorkerId").value,
+              backup_mode: document.getElementById("etBackupMode").value,
+              backup_strategy: document.getElementById("etBackupStrategy").value,
+              runtime_command: emptyToNull(document.getElementById("etRuntimeCommand").value),
+              runtime_environment: parseJsonField("etRuntimeEnvironment", "runtime environment"),
+              storage_profile_id: emptyToNull(document.getElementById("etStorageProfileId").value),
+              retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
+              restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
+              restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
+              cron_expression: emptyToNull(document.getElementById("etCronExpression").value),
+            });
+            closeTargetModal();
+            await refreshAll();
+          }, "Guardando...");
+        } catch (error) {
+          if (editError) {
+            editError.textContent = `Error guardando target: ${error.message}`;
+            editError.style.display = "block";
+          }
+        }
       });
       const etCronInput = document.getElementById("etCronExpression");
       if (etCronInput) {
@@ -1687,6 +2838,20 @@ docker compose up -d
 
     let jobPollTimer = null;
     let currentLogJobId = null;
+    const LOG_POLL_MAX_FAILURES = 5;
+    const LOG_POLL_FAILURE_WINDOW_MS = 60000;
+
+    function renderLogPollingError(container, message, retryHandler) {
+      if (!container) return;
+      const safeMessage = escapeHtml(String(message || "No se pudo cargar el log.").slice(0, 240));
+      container.innerHTML = `<div class="log-line error">No se pudieron cargar los logs: ${safeMessage}</div>${retryHandler ? '<button type="button" class="btn ghost xs" data-log-poll-retry>Reintentar</button>' : ""}`;
+      const retry = container.querySelector("[data-log-poll-retry]");
+      if (retry && retryHandler) retry.addEventListener("click", retryHandler);
+    }
+
+    function isTerminalJobStatus(status) {
+      return ["succeeded", "failed", "canceled", "cancelled"].includes(String(status || "").toLowerCase());
+    }
 
     function openLogPanel(jobId, targetId) {
       if (jobPollTimer) clearInterval(jobPollTimer);
@@ -1777,15 +2942,34 @@ docker compose up -d
 
     function pollJobLogs(jobId) {
       if (jobPollTimer) clearInterval(jobPollTimer);
+      let failures = 0;
+      let firstFailureAt = 0;
       const fetchJob = async () => {
+        if (currentLogJobId !== jobId) return;
         try {
           const job = await apiGet(`/api/v1/jobs/${jobId}`);
+          failures = 0;
+          firstFailureAt = 0;
           renderJobLogs(job);
-          if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+          if (isTerminalJobStatus(job.status)) {
             if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+            scheduleSnapshotCatalogRefreshAfterBackup(job);
             await refreshAll();
           }
-        } catch (error) { }
+        } catch (error) {
+          failures += 1;
+          if (!firstFailureAt) firstFailureAt = Date.now();
+          const stopped = failures >= LOG_POLL_MAX_FAILURES || Date.now() - firstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS;
+          const container = document.getElementById("logContainer");
+          renderLogPollingError(
+            container,
+            stopped
+              ? "La consulta se detuvo tras varios fallos."
+              : `Reintentando (${failures}/${LOG_POLL_MAX_FAILURES})${error && error.message ? `: ${error.message}` : ""}`,
+            stopped ? () => pollJobLogs(jobId) : null,
+          );
+          if (stopped && jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+        }
       };
       fetchJob();
       jobPollTimer = setInterval(fetchJob, 2000);
@@ -1947,6 +3131,8 @@ docker compose up -d
     let jobsTableState = { sortKey: "started_at", sortDir: "desc", page: 1, pageSize: 25, filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
     let jobsPollTimer = null;
     let jobsPolling = false;
+    let jobsPollFailures = 0;
+    let jobsPollFirstFailureAt = 0;
     let accordionLogJobId = null;
     let accordionLogTimer = null;
     let accordionContentEl = null;
@@ -2005,19 +3191,38 @@ docker compose up -d
 
     function pollAccordionJobLogs(jobId) {
       if (accordionLogTimer) clearInterval(accordionLogTimer);
+      let failures = 0;
+      let firstFailureAt = 0;
       const fetchJobLogs = async () => {
+        if (accordionLogJobId !== jobId) return;
         try {
           const job = await apiGet("/api/v1/jobs/" + jobId);
+          failures = 0;
+          firstFailureAt = 0;
           const updates = (state.jobs || []).map(j => j.id === job.id ? job : j);
           state.jobs = updates;
           const container = accordionContentEl ? accordionContentEl.querySelector("#logContainer") : null;
           if (container) renderJobLogsInto(job, container);
           const pill = accordionContentEl ? accordionContentEl.querySelector(".job-status-pill") : null;
           if (pill) { pill.className = "job-status-pill " + job.status; pill.textContent = job.status; }
-          if (["succeeded", "failed", "cancelled"].includes(job.status)) {
-            if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
-          }
-        } catch (e) {}
+            if (isTerminalJobStatus(job.status)) {
+             if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
+             scheduleSnapshotCatalogRefreshAfterBackup(job);
+           }
+        } catch (error) {
+          failures += 1;
+          if (!firstFailureAt) firstFailureAt = Date.now();
+          const stopped = failures >= LOG_POLL_MAX_FAILURES || Date.now() - firstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS;
+          const container = accordionContentEl ? accordionContentEl.querySelector("#logContainer") : null;
+          renderLogPollingError(
+            container,
+            stopped
+              ? "La consulta se detuvo tras varios fallos."
+              : `Reintentando (${failures}/${LOG_POLL_MAX_FAILURES})${error && error.message ? `: ${error.message}` : ""}`,
+            stopped ? () => pollAccordionJobLogs(jobId) : null,
+          );
+          if (stopped && accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
+        }
       };
       fetchJobLogs();
       accordionLogTimer = setInterval(fetchJobLogs, 3000);
@@ -2040,11 +3245,11 @@ docker compose up -d
     }
 
     function renderJobs(content) {
-      const allJobs = state.jobs || [];
       const targetMap = {};
       (state.targets || []).forEach(t => { targetMap[t.id] = t.name; });
 
       const renderTableBody = () => {
+        const allJobs = state.jobs || [];
         let jobs = allJobs.slice();
         jobs = jobs.filter(j => {
           const id = String(j.id || "").toLowerCase();
@@ -2169,6 +3374,7 @@ docker compose up -d
         content.innerHTML = `
           <div class="page-header"><div><h2>Jobs</h2><div class="subtitle">Historico de jobs de backup/restore</div></div>
           </div>
+          <div id="jobsRefreshNotice" class="snapshot-status jobs-refresh-notice" data-state="error" role="status" aria-live="polite" aria-atomic="true" hidden></div>
           <div class="table-wrap"><div class="sheet"><table class="table datatable">
             <thead>
               <tr>
@@ -2269,6 +3475,34 @@ docker compose up -d
 
     let _jobsRenderTableBody = null;
 
+    function clearJobsRefreshNotice() {
+      const notice = document.getElementById("jobsRefreshNotice");
+      if (!notice) return;
+      notice.hidden = true;
+      notice.innerHTML = "";
+    }
+
+    function renderJobsRefreshNotice(message, retryHandler) {
+      const notice = document.getElementById("jobsRefreshNotice");
+      if (!notice) return;
+      notice.innerHTML = `<span>${escapeHtml(String(message || "").slice(0, 240))}</span>${retryHandler ? '<button type="button" class="btn ghost xs" data-jobs-refresh-retry>Reintentar</button>' : ""}`;
+      notice.hidden = false;
+      const retry = notice.querySelector("[data-jobs-refresh-retry]");
+      if (retry && retryHandler) retry.addEventListener("click", retryHandler);
+    }
+
+    function retryJobsPolling() {
+      jobsPolling = false;
+      if (jobsPollTimer) {
+        clearTimeout(jobsPollTimer);
+        jobsPollTimer = null;
+      }
+      jobsPollFailures = 0;
+      jobsPollFirstFailureAt = 0;
+      clearJobsRefreshNotice();
+      startJobsPolling();
+    }
+
     function startJobsPolling() {
       if (jobsPolling) return;
       jobsPolling = true;
@@ -2276,6 +3510,9 @@ docker compose up -d
         if (!jobsPolling) return;
         try {
           const jobsResp = await apiGet("/api/v1/jobs");
+          jobsPollFailures = 0;
+          jobsPollFirstFailureAt = 0;
+          clearJobsRefreshNotice();
           const newJobs = jobsResp.items || [];
           const oldIds = new Set((state.jobs || []).map(j => j.id));
           const hasNew = newJobs.some(j => !oldIds.has(j.id));
@@ -2292,7 +3529,19 @@ docker compose up -d
             }
           }
         } catch (e) {
-          // ignore polling errors
+          jobsPollFailures += 1;
+          if (!jobsPollFirstFailureAt) jobsPollFirstFailureAt = Date.now();
+          const stopped = jobsPollFailures >= LOG_POLL_MAX_FAILURES || Date.now() - jobsPollFirstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS;
+          renderJobsRefreshNotice(
+            stopped
+              ? "La actualizacion de Jobs se detuvo tras varios fallos."
+              : `No se pudo actualizar Jobs. Reintentando (${jobsPollFailures}/${LOG_POLL_MAX_FAILURES}).`,
+            stopped ? retryJobsPolling : null,
+          );
+          if (stopped) {
+            jobsPolling = false;
+            jobsPollTimer = null;
+          }
         }
         if (jobsPolling) {
           jobsPollTimer = setTimeout(tick, 3000);
@@ -2308,6 +3557,8 @@ docker compose up -d
         clearTimeout(jobsPollTimer);
         jobsPollTimer = null;
       }
+      jobsPollFailures = 0;
+      jobsPollFirstFailureAt = 0;
     }
 
     function renderStorage(content) {

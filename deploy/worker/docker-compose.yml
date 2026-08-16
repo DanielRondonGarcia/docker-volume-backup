@@ -87,10 +87,28 @@ services:
       WORKER_HEALTH_PORT: "8081"
       # Imagen usada para ejecutar los jobs de backup/restore.
       BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-docker-volume-backup-runtime-local:dev}
+      # Snapshot Explorer v2 feature flags and bounded Redis cache settings.
+      SNAPSHOT_EXPLORER_NO_LOCK: ${SNAPSHOT_EXPLORER_NO_LOCK:-false}
+      SNAPSHOT_EXPLORER_CACHE_DIR: ${SNAPSHOT_EXPLORER_CACHE_DIR:-/var/cache/restic-explorer}
+      SNAPSHOT_EXPLORER_REDIS_URL: ${SNAPSHOT_EXPLORER_REDIS_URL:-redis://redis:6379/0}
+      # Preserve whether the host explicitly supplied an empty URL; Compose's
+      # default expansion otherwise turns that empty value into the default.
+      SNAPSHOT_EXPLORER_REDIS_URL_SET: ${SNAPSHOT_EXPLORER_REDIS_URL+true}
+      SNAPSHOT_EXPLORER_REDIS_URL_NONEMPTY: ${SNAPSHOT_EXPLORER_REDIS_URL:+true}
+      SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS: ${SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS:-86400}
+      SNAPSHOT_EXPLORER_REDIS_MAX_ENTRIES: ${SNAPSHOT_EXPLORER_REDIS_MAX_ENTRIES:-1000}
+      SNAPSHOT_EXPLORER_REDIS_MAX_VALUE_BYTES: ${SNAPSHOT_EXPLORER_REDIS_MAX_VALUE_BYTES:-262144}
+      SNAPSHOT_EXPLORER_REDIS_LOCK_TTL_MS: ${SNAPSHOT_EXPLORER_REDIS_LOCK_TTL_MS:-5000}
+      SNAPSHOT_EXPLORER_REDIS_LOCK_WAIT_MS: ${SNAPSHOT_EXPLORER_REDIS_LOCK_WAIT_MS:-1000}
+      SNAPSHOT_EXPLORER_REDIS_LOCK_POLL_MS: ${SNAPSHOT_EXPLORER_REDIS_LOCK_POLL_MS:-25}
+      SNAPSHOT_EXPLORER_EAGER_INDEX: ${SNAPSHOT_EXPLORER_EAGER_INDEX:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp:/tmp
       - worker_state:/data
+      # Persistent restic cache, isolated per target ID + repository fingerprint
+      # by the worker runtime (subdirectories under SNAPSHOT_EXPLORER_CACHE_DIR).
+      - worker_restic_cache:/var/cache/restic-explorer
     networks:
       - default
       - control-plane
@@ -112,3 +130,4 @@ volumes:
   demo_redis_data:
   demo_files_data:
   worker_state:
+  worker_restic_cache:

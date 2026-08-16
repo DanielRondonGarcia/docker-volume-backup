@@ -3,9 +3,11 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.control_plane.application.ports.ports import (
+    CacheRepository,
+    IndexRepository,
     InventoryRepository,
     JobRepository,
     RetentionPolicyRepository,
@@ -20,6 +22,8 @@ from src.control_plane.application.ports.ports import (
 )
 from src.control_plane.domain.models import (
     BackupTargetRecord,
+    CacheGenerationRecord,
+    IndexStatusRecord,
     InventorySnapshot,
     JobRecord,
     JobStatus,
@@ -67,6 +71,8 @@ def _json_load(value: Optional[str], fallback):
 
 
 class SQLiteRepositoryBase:
+    SCHEMA_VERSION = 1
+
     def __init__(self, database_path: str):
         self.database_path = database_path
         self._lock = Lock()
@@ -226,12 +232,43 @@ class SQLiteRepositoryBase:
                     global_cron_expression TEXT,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS explorer_cache_generations (
+                    target_id TEXT NOT NULL,
+                    repository_fingerprint TEXT NOT NULL,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (target_id, repository_fingerprint)
+                );
+
+                CREATE TABLE IF NOT EXISTS explorer_index_status (
+                    target_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    entry_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (target_id, snapshot_id)
+                );
                 """
             )
             self._ensure_column(connection, "settings", "rclone_conf_secret_id", "TEXT")
             self._ensure_column(connection, "settings", "global_cron_expression", "TEXT")
             self._ensure_column(connection, "settings", "control_plane_public_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(self.SCHEMA_VERSION),),
+            )
+
+    def get_schema_version(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
@@ -508,6 +545,126 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             rows = connection.execute("SELECT * FROM jobs ORDER BY submitted_at DESC").fetchall()
         return [self._row_to_job(row) for row in rows]
 
+    @staticmethod
+    def _reconcile_expired_leases_locked(connection, now) -> int:
+        rows = connection.execute(
+            """
+            SELECT id, result_summary_json, log_lines_json, lease_expires_at
+            FROM jobs
+            WHERE status = ? AND lease_expires_at IS NOT NULL
+            """,
+            (JobStatus.IN_PROGRESS,),
+        ).fetchall()
+        interruption_log = "Worker lease expired before terminal status was reported."
+        reconciled = 0
+        for row in rows:
+            lease_expires_at = _dt(row["lease_expires_at"])
+            if lease_expires_at and lease_expires_at.tzinfo:
+                lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if not lease_expires_at or lease_expires_at > now:
+                continue
+            result_summary = _json_load(row["result_summary_json"], None)
+            result_summary = dict(result_summary) if isinstance(result_summary, dict) else {}
+            result_summary.setdefault("error", "worker lease expired before the job reported a terminal result")
+            result_summary["recovery"] = "worker_interrupted"
+            log_lines = _json_load(row["log_lines_json"], [])
+            log_lines = list(log_lines) if isinstance(log_lines, list) else []
+            if interruption_log not in log_lines:
+                log_lines.append(interruption_log)
+            updated = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, owner_worker_id = NULL, lease_token = NULL,
+                    lease_issued_at = NULL, lease_expires_at = NULL,
+                    result_summary_json = ?, log_lines_json = ?,
+                    finished_at = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    JobStatus.FAILED,
+                    json.dumps(result_summary),
+                    json.dumps(log_lines),
+                    now.isoformat(),
+                    now.isoformat(),
+                    row["id"],
+                    JobStatus.IN_PROGRESS,
+                ),
+            )
+            reconciled += updated.rowcount
+        return reconciled
+
+    def reconcile_expired_leases(self) -> int:
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                reconciled = self._reconcile_expired_leases_locked(connection, utcnow())
+                connection.commit()
+                return reconciled
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
+    def renew_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        lease_duration_seconds: int = 300,
+    ) -> Optional[JobRecord]:
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease duration must be positive")
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                now = utcnow()
+                row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                lease_expires_at = _dt(row["lease_expires_at"]) if row else None
+                if lease_expires_at and lease_expires_at.tzinfo:
+                    lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+                if (
+                    row is None
+                    or JobStatus.normalize(row["status"]) != JobStatus.IN_PROGRESS
+                    or row["owner_worker_id"] != worker_id
+                    or row["lease_token"] != lease_token
+                    or not lease_expires_at
+                    or lease_expires_at <= now
+                ):
+                    connection.commit()
+                    return None
+                expires_at = now + timedelta(seconds=lease_duration_seconds)
+                updated = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET lease_expires_at = ?, updated_at = ?
+                    WHERE id = ? AND status = ? AND owner_worker_id = ?
+                      AND lease_token = ? AND lease_expires_at > ?
+                    """,
+                    (
+                        expires_at.isoformat(),
+                        now.isoformat(),
+                        job_id,
+                        JobStatus.IN_PROGRESS,
+                        worker_id,
+                        lease_token,
+                        now.isoformat(),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    connection.commit()
+                    return None
+                renewed = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                connection.commit()
+                return self._row_to_job(renewed) if renewed else None
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
     def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
         if lease_duration_seconds <= 0:
             raise ValueError("lease duration must be positive")
@@ -515,29 +672,8 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                rows = connection.execute(
-                    """
-                    SELECT id, lease_expires_at FROM jobs
-                    WHERE worker_id = ? AND status = ? AND lease_expires_at IS NOT NULL
-                    """,
-                    (worker_id, JobStatus.IN_PROGRESS),
-                ).fetchall()
                 now = utcnow()
-                for row in rows:
-                    lease_expires_at = _dt(row["lease_expires_at"])
-                    if lease_expires_at and lease_expires_at.tzinfo:
-                        lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
-                    if lease_expires_at and lease_expires_at <= now:
-                        connection.execute(
-                            """
-                            UPDATE jobs
-                            SET status = ?, owner_worker_id = NULL, lease_token = NULL,
-                                lease_issued_at = NULL, lease_expires_at = NULL,
-                                started_at = NULL, finished_at = NULL, updated_at = ?
-                            WHERE id = ? AND status = ?
-                            """,
-                            (JobStatus.PENDING, now.isoformat(), row["id"], JobStatus.IN_PROGRESS),
-                        )
+                self._reconcile_expired_leases_locked(connection, now)
                 rows = connection.execute(
                     """
                     SELECT * FROM jobs
@@ -897,3 +1033,126 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
                 ),
             )
         return settings
+
+
+class SQLiteCacheRepository(SQLiteRepositoryBase, CacheRepository):
+    def get_generation(self, target_id: str, repository_fingerprint: str) -> Optional[CacheGenerationRecord]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM explorer_cache_generations WHERE target_id = ? AND repository_fingerprint = ?",
+                (target_id, repository_fingerprint),
+            ).fetchone()
+        if not row:
+            return None
+        return CacheGenerationRecord(
+            target_id=row["target_id"],
+            repository_fingerprint=row["repository_fingerprint"],
+            generation=row["generation"] or 0,
+            updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
+        )
+
+    def bump_generation(self, target_id: str, repository_fingerprint: str) -> CacheGenerationRecord:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT generation FROM explorer_cache_generations WHERE target_id = ? AND repository_fingerprint = ?",
+                (target_id, repository_fingerprint),
+            ).fetchone()
+            generation = (row["generation"] if row else 0) + 1
+            now = utcnow()
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO explorer_cache_generations (target_id, repository_fingerprint, generation, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (target_id, repository_fingerprint, generation, now.isoformat()),
+            )
+        return CacheGenerationRecord(
+            target_id=target_id,
+            repository_fingerprint=repository_fingerprint,
+            generation=generation,
+            updated_at=now,
+        )
+
+    def cleanup_orphaned(self, active_keys: List[Tuple[str, str]]) -> int:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT target_id, repository_fingerprint FROM explorer_cache_generations"
+            ).fetchall()
+            active = set(active_keys)
+            removed = 0
+            for row in rows:
+                key = (row["target_id"], row["repository_fingerprint"])
+                if key not in active:
+                    connection.execute(
+                        "DELETE FROM explorer_cache_generations WHERE target_id = ? AND repository_fingerprint = ?",
+                        key,
+                    )
+                    removed += 1
+        return removed
+
+
+class SQLiteIndexRepository(SQLiteRepositoryBase, IndexRepository):
+    def upsert_status(self, record: IndexStatusRecord) -> IndexStatusRecord:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO explorer_index_status (target_id, snapshot_id, status, entry_count, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    record.target_id,
+                    record.snapshot_id,
+                    record.status,
+                    record.entry_count,
+                    record.updated_at.isoformat(),
+                ),
+            )
+        return record
+
+    def get_status(self, target_id: str, snapshot_id: str) -> Optional[IndexStatusRecord]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM explorer_index_status WHERE target_id = ? AND snapshot_id = ?",
+                (target_id, snapshot_id),
+            ).fetchone()
+        if not row:
+            return None
+        return IndexStatusRecord(
+            target_id=row["target_id"],
+            snapshot_id=row["snapshot_id"],
+            status=row["status"],
+            entry_count=row["entry_count"] or 0,
+            updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
+        )
+
+    def list_by_target(self, target_id: str) -> List[IndexStatusRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM explorer_index_status WHERE target_id = ? ORDER BY snapshot_id ASC",
+                (target_id,),
+            ).fetchall()
+        return [
+            IndexStatusRecord(
+                target_id=row["target_id"],
+                snapshot_id=row["snapshot_id"],
+                status=row["status"],
+                entry_count=row["entry_count"] or 0,
+                updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
+            )
+            for row in rows
+        ]
+
+    def delete_for_target(self, target_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM explorer_index_status WHERE target_id = ?", (target_id,))
+
+    def cleanup_orphaned(self, active_target_ids: List[str]) -> int:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("SELECT target_id FROM explorer_index_status").fetchall()
+            active = set(active_target_ids)
+            removed = 0
+            for row in rows:
+                if row["target_id"] not in active:
+                    connection.execute("DELETE FROM explorer_index_status WHERE target_id = ?", (row["target_id"],))
+                    removed += 1
+        return removed

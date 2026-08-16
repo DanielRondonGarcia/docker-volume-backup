@@ -114,6 +114,14 @@ class SchedulerService:
                     last = self._last_check.get(target.id)
                     if last and (now - last) < timedelta(minutes=1):
                         continue
+                    if not self._service.is_worker_eligible(target.worker_id):
+                        logger.info(
+                            "Skipping scheduled backup for target %s: worker %s is not eligible",
+                            target.id,
+                            target.worker_id,
+                        )
+                        self._last_check[target.id] = now
+                        continue
                     if self._service.has_active_backup_for_target(target.id):
                         logger.info("Skipping scheduled backup for target %s: backup already pending or active", target.id)
                         self._last_check[target.id] = now
@@ -126,5 +134,7 @@ class SchedulerService:
                         requested_by="scheduler",
                         trigger="schedule",
                     )
+            except ValueError as exc:
+                logger.info("Skipping scheduled backup for target %s: %s", target.id, exc)
             except Exception:
                 logger.exception("Error evaluating cron for target %s", target.id)

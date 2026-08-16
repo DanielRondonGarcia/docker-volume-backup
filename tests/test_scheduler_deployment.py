@@ -43,10 +43,10 @@ class SchedulerDeploymentTests(unittest.TestCase):
         for expression in ("", "* * *", "* * * * * *", "*/0 * * * *", "60 * * * *", "* * * * 8", "* * 32 * *"):
             self.assertFalse(cron_matches(expression, now), expression)
 
-    def test_expired_in_progress_lease_is_reclaimed_before_claim(self):
-        self._assert_expired_lease_reclaimed(InMemoryJobRepository())
+    def test_expired_in_progress_lease_fails_before_pending_claim(self):
+        self._assert_expired_lease_failed(InMemoryJobRepository())
         with tempfile.TemporaryDirectory() as directory:
-            self._assert_expired_lease_reclaimed(SQLiteJobRepository(str(Path(directory) / "control-plane.db")))
+            self._assert_expired_lease_failed(SQLiteJobRepository(str(Path(directory) / "control-plane.db")))
 
     def test_scheduler_suppresses_existing_backup_job(self):
         service = self._service()
@@ -66,9 +66,14 @@ class SchedulerDeploymentTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("worker_state:/data", worker_compose)
         self.assertIn("worker_state:/data", ghcr_compose)
-        self.assertIn("name: docker-volume-backup-control-plane_default", ghcr_compose)
+        self.assertIn(
+            "name: ${CONTROL_PLANE_NETWORK:-docker-volume-backup-control-plane-ghcr_default}",
+            ghcr_compose,
+        )
         self.assertIn("HTTP is trusted-network default", worker_compose)
         self.assertIn("HTTP is trusted-network default", ghcr_compose)
+        self.assertIn("SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS: ${SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS:-86400}", worker_compose)
+        self.assertIn("SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS: ${SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS:-86400}", ghcr_compose)
         self.assertIn("BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup:latest}", ghcr_compose)
         self.assertNotIn("BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}", ghcr_compose)
         self.assertIn("pull_request:", workflow)
@@ -76,33 +81,65 @@ class SchedulerDeploymentTests(unittest.TestCase):
         self.assertIn("python -m pip install -r requirements.txt", workflow)
         self.assertIn("python -m unittest discover tests", workflow)
 
-    def _assert_expired_lease_reclaimed(self, repository):
-        job = JobRecord(
+    def _assert_expired_lease_failed(self, repository):
+        stale_token = "stale-token"
+        interrupted = JobRecord(
             worker_id="worker-a",
             command="backup.run",
             status=JobStatus.IN_PROGRESS,
             owner_worker_id="worker-a",
-            lease_token="stale-token",
+            lease_token=stale_token,
             lease_issued_at=utcnow() - timedelta(minutes=6),
             lease_expires_at=utcnow() - timedelta(minutes=1),
             attempt_count=1,
         )
-        repository.save(job)
+        pending = JobRecord(worker_id="worker-a", command="worker.self_check")
+        repository.save(interrupted)
+        repository.save(pending)
         claimed = repository.claim_pending_for_worker("worker-a")
         self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0].id, pending.id)
         self.assertEqual(claimed[0].status, JobStatus.IN_PROGRESS)
-        self.assertEqual(claimed[0].attempt_count, 2)
-        self.assertNotEqual(claimed[0].lease_token, "stale-token")
+        self.assertEqual(claimed[0].attempt_count, 1)
+
+        failed = repository.get(interrupted.id)
+        self.assertIsNotNone(failed)
+        self.assertEqual(failed.status, JobStatus.FAILED)
+        self.assertEqual(failed.attempt_count, 1)
+        self.assertIsNotNone(failed.finished_at)
+        self.assertIsNotNone(failed.updated_at)
+        self.assertIsNone(failed.owner_worker_id)
+        self.assertIsNone(failed.lease_token)
+        self.assertIsNone(failed.lease_issued_at)
+        self.assertIsNone(failed.lease_expires_at)
+        self.assertEqual(
+            failed.result_summary,
+            {
+                "error": "worker lease expired before the job reported a terminal result",
+                "recovery": "worker_interrupted",
+            },
+        )
+        self.assertEqual(failed.log_lines, ["Worker lease expired before terminal status was reported."])
+
+        service = self._service(repository)
+        with self.assertRaisesRegex(ValueError, "does not own"):
+            service.update_job_status(
+                worker_id="worker-a",
+                job_id=interrupted.id,
+                status=JobStatus.SUCCEEDED,
+                lease_token=stale_token,
+            )
+        self.assertEqual(repository.get(interrupted.id).status, JobStatus.FAILED)
 
     @staticmethod
-    def _service():
+    def _service(job_repository=None):
         workers = InMemoryWorkerRepository()
-        workers.save(WorkerRecord(name="worker-a", host_name="test", id="worker-a"))
+        workers.save(WorkerRecord(name="worker-a", host_name="test", id="worker-a", last_seen_at=utcnow()))
         return ControlPlaneService(
             worker_repository=workers,
             inventory_repository=InMemoryInventoryRepository(),
             target_repository=InMemoryTargetRepository(),
-            job_repository=InMemoryJobRepository(),
+            job_repository=job_repository or InMemoryJobRepository(),
             storage_profile_repository=InMemoryStorageProfileRepository(),
             secret_repository=InMemorySecretRepository(),
             snapshot_repository=InMemorySnapshotRepository(),

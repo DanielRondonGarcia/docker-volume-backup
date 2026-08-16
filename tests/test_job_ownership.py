@@ -23,8 +23,8 @@ from src.control_plane.infrastructure.repositories.sqlite import SQLiteJobReposi
 class JobOwnershipTests(unittest.TestCase):
     def make_service(self, job_repository=None):
         workers = InMemoryWorkerRepository()
-        workers.save(WorkerRecord(name="worker-a", host_name="test", id="worker-a"))
-        workers.save(WorkerRecord(name="worker-b", host_name="test", id="worker-b"))
+        workers.save(WorkerRecord(name="worker-a", host_name="test", id="worker-a", last_seen_at=utcnow()))
+        workers.save(WorkerRecord(name="worker-b", host_name="test", id="worker-b", last_seen_at=utcnow()))
         return ControlPlaneService(
             worker_repository=workers,
             inventory_repository=InMemoryInventoryRepository(),
@@ -86,6 +86,53 @@ class JobOwnershipTests(unittest.TestCase):
             )
         self.assertEqual(service.job_repository.get(job.id).status, JobStatus.IN_PROGRESS)
 
+    def test_lease_renewal_extends_only_the_current_owner_lease(self):
+        service = self.make_service()
+        job = service.dispatch_job("worker-a", "worker.self_check")
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        original_expiry = claimed.lease_expires_at
+
+        renewed = service.renew_job_lease("worker-a", job.id, claimed.lease_token)
+
+        self.assertGreater(renewed.lease_expires_at, original_expiry)
+        self.assertIsNotNone(service.worker_repository.get("worker-a").last_seen_at)
+        with self.assertRaisesRegex(ValueError, "invalid or stale"):
+            service.renew_job_lease("worker-a", job.id, "wrong-token")
+
+        renewed.lease_expires_at = utcnow() - timedelta(seconds=1)
+        service.job_repository.save(renewed)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            service.renew_job_lease("worker-a", job.id, claimed.lease_token)
+
+        with tempfile.TemporaryDirectory() as directory:
+            sqlite_service = self.make_service(SQLiteJobRepository(f"{directory}/control-plane.db"))
+            sqlite_job = sqlite_service.dispatch_job("worker-a", "worker.self_check")
+            sqlite_claimed = sqlite_service.fetch_jobs_for_worker("worker-a")[0]
+            sqlite_renewed = sqlite_service.renew_job_lease("worker-a", sqlite_job.id, sqlite_claimed.lease_token)
+            self.assertGreater(sqlite_renewed.lease_expires_at, sqlite_claimed.lease_expires_at)
+
+    def test_read_reconciles_expired_lease_without_worker_fetch(self):
+        service = self.make_service()
+        interrupted = JobRecord(
+            worker_id="worker-a",
+            command="restore.run",
+            status=JobStatus.IN_PROGRESS,
+            owner_worker_id="worker-a",
+            lease_token="lease-token",
+            lease_issued_at=utcnow() - timedelta(minutes=6),
+            lease_expires_at=utcnow() - timedelta(minutes=1),
+        )
+        service.job_repository.save(interrupted)
+
+        observed = service.get_job(interrupted.id)
+
+        self.assertEqual(observed.status, JobStatus.FAILED)
+        self.assertEqual(observed.result_summary["recovery"], "worker_interrupted")
+        self.assertIsNone(observed.owner_worker_id)
+        self.assertIsNone(observed.lease_token)
+        self.assertEqual(observed.log_lines.count("Worker lease expired before terminal status was reported."), 1)
+        self.assertEqual(service.get_job(interrupted.id).status, JobStatus.FAILED)
+
     def test_duplicate_and_canceled_completion_are_rejected(self):
         service = self.make_service()
         job = service.dispatch_job("worker-a", "worker.self_check")
@@ -102,6 +149,20 @@ class JobOwnershipTests(unittest.TestCase):
                 "worker-a", canceled.id, JobStatus.SUCCEEDED, lease_token=canceled_claim.lease_token
             )
         self.assertEqual(service.job_repository.get(canceled.id).status, JobStatus.CANCELED)
+
+    def test_cancel_fills_empty_terminal_summary_and_logs(self):
+        service = self.make_service()
+        job = service.dispatch_job("worker-a", "restore.run")
+        service.fetch_jobs_for_worker("worker-a")
+
+        canceled = service.cancel_job(job.id)
+
+        self.assertEqual(canceled.status, JobStatus.CANCELED)
+        self.assertEqual(canceled.result_summary["recovery"], "operator_canceled")
+        self.assertEqual(
+            canceled.log_lines,
+            ["Job canceled by operator before terminal worker completion."],
+        )
 
     def test_in_memory_claim_does_not_double_assign(self):
         repository = InMemoryJobRepository()

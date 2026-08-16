@@ -21,6 +21,17 @@ quieren backupear, en `deploy/worker/`.
     Docker nombrado `control_plane_state`
   - publica la UI/API en el puerto definido por `CONTROL_PLANE_PUBLISHED_PORT`
     (por defecto `8080`) y mantiene `8080` interno dentro de la red del Compose
+- `redis`
+  - ejecuta Redis 7 para la cache acotada de metadatos de Snapshot Explorer v2,
+    con AOF en el volumen nombrado `snapshot_explorer_redis`
+  - conserva las entradas hasta 86400 segundos (24 horas) por defecto; el Worker
+    aplica ese TTL con un maximo de 86400 segundos y una cardinalidad maxima de
+    1000 entradas por target y repositorio
+  - mantiene `maxmemory 128mb` con politica `allkeys-lru`: la persistencia AOF y
+    el volumen no evitan la expiracion, la eviccion por memoria ni los limites de
+    cardinalidad
+  - solo es accesible dentro de la red del Compose; el Worker lo alcanza como
+    `redis:6379` a través de la red compartida
 
 ## Red compartida con el Worker
 
@@ -31,6 +42,19 @@ servicio `control-plane` sin necesidad de exponer el puerto del CP al host.
 
 Por eso el valor por defecto de `CONTROL_PLANE_URL` en el Worker es
 `http://control-plane:8080`.
+
+El Worker usa por defecto `redis://redis:6379/0` para las lecturas de metadatos
+del explorador. Para desactivar Redis explícitamente, conserva la variable vacía
+al levantar el stack del Worker:
+
+```powershell
+$env:SNAPSHOT_EXPLORER_REDIS_URL=""
+docker compose -f deploy/worker/docker-compose.yml up -d --build
+```
+
+Si Redis no está disponible, está mal configurado o se desactiva, el Worker
+continúa leyendo directamente de Restic y el Control Plane mantiene su catálogo
+SQLite; una lectura ordinaria no depende de Redis.
 
 > Nota: el servicio `demo-app` del Compose del Worker usa un **bind mount**
 > (`./demo-app-data`), no un volumen nombrado. El Worker detecta igualmente el

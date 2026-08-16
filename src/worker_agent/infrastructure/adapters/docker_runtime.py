@@ -1,9 +1,13 @@
-import os
-import shutil
-import tempfile
+import hashlib
 import json
 import math
-from typing import Any, Dict, List
+import os
+import posixpath
+import re
+import shutil
+import tempfile
+import time
+from typing import Any, Callable, Dict, List
 
 import logging
 
@@ -17,13 +21,40 @@ logger = logging.getLogger(__name__)
 
 class DockerRuntimeAdapter:
     DEFAULT_RUNTIME_TIMEOUT_SECONDS = 1800.0
-    _SHELL_METACHARACTERS = frozenset(";|&`$><\\\"'\n\r\x00")
+    DEFAULT_CACHE_DIR = "/var/cache/restic-explorer"
+    CACHE_MOUNT_PATH = "/root/.cache/restic"
+    RUNTIME_TEMPORARY_LABEL = "docker-volume-backup.runtime.temporary"
+    RUNTIME_JOB_ID_LABEL = "docker-volume-backup.runtime.job_id"
+    RUNTIME_TEMPORARY_VALUE = "true"
+    CLEANUP_REMOVE_ATTEMPTS = 2
+    MAX_CLEANUP_REPORT_IDS = 20
+    MAX_LOG_BYTES = 4 * 1024 * 1024
+    MAX_DUMP_BYTES = 16 * 1024 * 1024
+    MAX_ZIP_BYTES = 64 * 1024 * 1024
+    MAX_SNAPSHOT_ENTRIES = 10_000
+    MAX_RECOVERY_LOG_BYTES = 512 * 1024
+    MAX_SNAPSHOT_PATH_LENGTH = 4096
+    _SHELL_METACHARACTERS = frozenset(";|&`$><\\\"'\n\r\x00(){}[]*?!")
     _SECRET_ENV_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL")
+    _READ_ONLY_OPERATIONS = frozenset({"snapshots", "ls", "dump", "find", "stats"})
+    _WRITE_OPERATIONS = frozenset({"backup", "restore", "forget", "prune"})
+    _SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
+    _SAFE_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+    _REPOSITORY_URL_PATTERN = re.compile(r"(?i)\b(?:https?|s3|gs|az|swift)://[^\s\"'<>]+")
+    _RCLONE_REPOSITORY_PATTERN = re.compile(r"(?i)\brclone:[^\s\"'<>]+")
+    _LOCAL_REPOSITORY_PATTERN = re.compile(r"(?i)\blocal:[^\s\"'<>]+")
+    _SAFE_LABEL_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+    _RECOVERY_SECRET_PATTERN = re.compile(
+        r"(?i)\b(password|passphrase|secret|token|private[_-]?key|access[_-]?key|credential)\b"
+        r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    )
 
     def __init__(self, timeout_seconds: float | None = None):
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else os.environ.get(
             "WORKER_RUNTIME_TIMEOUT_SECONDS", str(self.DEFAULT_RUNTIME_TIMEOUT_SECONDS)
         )
+        self.no_lock = self._env_flag("SNAPSHOT_EXPLORER_NO_LOCK")
+        self.cache_dir = os.environ.get("SNAPSHOT_EXPLORER_CACHE_DIR") or None
         if docker is None:
             self.client = None
             return
@@ -31,6 +62,13 @@ class DockerRuntimeAdapter:
             self.client = docker.from_env()
         except Exception:
             self.client = None
+
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def _timeout_seconds(cls, value: Any) -> float:
@@ -54,31 +92,99 @@ class DockerRuntimeAdapter:
             argv = command.split()
         else:
             raise ValueError("runtime command must be a supported string or argv list")
-        if tuple(argv) in {
-            ("/root/backup.sh",),
-            ("restic", "snapshots", "--json"),
-            ("restic", "stats", "--mode", "raw-data", "--json"),
-        }:
+
+        if any(not item or any(character in item for character in cls._SHELL_METACHARACTERS) for item in argv):
+            raise ValueError("runtime command contains shell metacharacters")
+
+        explicit_no_lock = "--no-lock" in argv
+        if explicit_no_lock:
+            argv = [item for item in argv if item != "--no-lock"]
+            if not cls._is_read_only_argv(argv):
+                raise ValueError("runtime write command cannot disable locks")
+
+        if tuple(argv) == ("/root/backup.sh",):
             return argv
         if not argv or argv[0] != "restic":
             raise ValueError("unsupported runtime executable")
-        if len(argv) in (4, 5) and argv[1:3] == ["ls", "--json"]:
-            if not cls._safe_runtime_token(argv[3]) or (len(argv) == 5 and not cls._safe_runtime_token(argv[4], True)):
-                raise ValueError("unsafe restic ls bounds")
+
+        operation = argv[1] if len(argv) > 1 else ""
+        if operation == "snapshots" and argv == ["restic", "snapshots", "--json"]:
             return argv
-        if len(argv) == 4 and argv[1] == "dump" and cls._safe_runtime_token(argv[2]) and cls._safe_runtime_token(argv[3], True):
+        if operation == "stats" and argv == ["restic", "stats", "--mode", "raw-data", "--json"]:
             return argv
-        if len(argv) >= 3 and argv[1] == "forget":
+        if operation == "ls" and len(argv) in (4, 5) and argv[2] == "--json":
+            cls.validate_snapshot_id(argv[3])
+            if len(argv) == 5:
+                argv[4] = cls.normalize_snapshot_path(argv[4])
+            return argv
+        if operation == "find" and len(argv) in (4, 5) and argv[2] == "--json":
+            cls.validate_snapshot_id(argv[3])
+            if len(argv) == 5:
+                argv[4] = cls.normalize_snapshot_path(argv[4])
+            return argv
+        if operation == "dump":
+            if len(argv) == 4:
+                cls.validate_snapshot_id(argv[2])
+                argv[3] = cls.normalize_snapshot_path(argv[3])
+                return argv
+            if len(argv) == 6 and argv[2] in {"-a", "--archive"} and argv[3] == "zip":
+                cls.validate_snapshot_id(argv[4])
+                argv[5] = cls.normalize_snapshot_path(argv[5])
+                return argv
+        if operation == "forget" and len(argv) >= 3:
             index = 2
             while index < len(argv):
                 if argv[index] == "--prune":
                     index += 1
-                elif argv[index] in {"--keep-last", "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"} and index + 1 < len(argv) and argv[index + 1].isdigit():
+                elif (
+                    argv[index]
+                    in {"--keep-last", "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"}
+                    and index + 1 < len(argv)
+                    and argv[index + 1].isdigit()
+                ):
                     index += 2
                 else:
                     raise ValueError("unsupported or unbounded restic retention command")
             return argv
+        if operation == "prune" and len(argv) == 2:
+            return argv
         raise ValueError("unsupported runtime command")
+
+    @classmethod
+    def _is_read_only_argv(cls, argv: List[str]) -> bool:
+        return bool(len(argv) > 1 and argv[0] == "restic" and argv[1] in cls._READ_ONLY_OPERATIONS)
+
+    @classmethod
+    def _apply_lock_policy(cls, argv: List[str], no_lock: bool) -> List[str]:
+        if not no_lock or not cls._is_read_only_argv(argv) or "--no-lock" in argv:
+            return argv
+        return [*argv, "--no-lock"]
+
+    @classmethod
+    def validate_snapshot_id(cls, value: Any) -> str:
+        if not isinstance(value, str) or not cls._SNAPSHOT_ID_PATTERN.fullmatch(value):
+            raise ValueError("invalid snapshot ID")
+        return value
+
+    @classmethod
+    def normalize_snapshot_path(cls, value: Any) -> str:
+        if value is None or value == "":
+            return "/"
+        if not isinstance(value, str):
+            raise ValueError("snapshot path must be a POSIX string")
+        if len(value) > cls.MAX_SNAPSHOT_PATH_LENGTH or "\x00" in value:
+            raise ValueError("snapshot path is invalid")
+        if "\\" in value or any(ord(character) < 32 for character in value):
+            raise ValueError("snapshot path must use POSIX separators")
+        if not value.startswith("/") or value.startswith("//"):
+            raise ValueError("snapshot path must be absolute within the snapshot")
+        parts = value.split("/")
+        if ".." in parts:
+            raise ValueError("snapshot path traversal is not allowed")
+        normalized = posixpath.normpath(value)
+        if normalized == ".":
+            return "/"
+        return normalized
 
     @staticmethod
     def _safe_runtime_token(value: Any, path: Any = False) -> bool:
@@ -86,6 +192,55 @@ class DockerRuntimeAdapter:
             return False
         allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:+-"
         return (not path or value.startswith("/")) and all(character in allowed + ("/" if path else "") for character in value)
+
+    @classmethod
+    def repository_fingerprint(cls, repository: Any) -> str:
+        if not isinstance(repository, str) or not repository or "\x00" in repository:
+            raise ValueError("repository fingerprint requires a non-empty repository")
+        return hashlib.sha256(repository.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _validate_target_scope(cls, payload: Dict[str, Any]) -> None:
+        target_id = payload.get("target_id")
+        if target_id is not None and not cls._SAFE_TARGET_PATTERN.fullmatch(str(target_id)):
+            raise ValueError("invalid target ID")
+
+        snapshot_target_id = payload.get("snapshot_target_id")
+        snapshot_metadata = payload.get("snapshot") or payload.get("snapshot_record")
+        if isinstance(snapshot_metadata, dict):
+            snapshot_target_id = snapshot_target_id or snapshot_metadata.get("target_id")
+        if snapshot_target_id is not None and not cls._SAFE_TARGET_PATTERN.fullmatch(str(snapshot_target_id)):
+            raise ValueError("invalid snapshot target ID")
+        if target_id is not None and snapshot_target_id is not None and str(target_id) != str(snapshot_target_id):
+            raise ValueError("snapshot belongs to a different target")
+
+    @classmethod
+    def _snapshot_arguments(cls, argv: List[str]) -> tuple[str | None, str | None]:
+        if len(argv) < 2 or argv[0] != "restic":
+            return None, None
+        operation = argv[1]
+        if operation in {"ls", "find"}:
+            return argv[3], argv[4] if len(argv) == 5 else "/"
+        if operation == "dump":
+            if len(argv) == 4:
+                return argv[2], argv[3]
+            return argv[4], argv[5]
+        return None, None
+
+    @classmethod
+    def _validate_snapshot_scope(cls, payload: Dict[str, Any], argv: List[str]) -> None:
+        cls._validate_target_scope(payload)
+        snapshot_id, path = cls._snapshot_arguments(argv)
+        if snapshot_id is None:
+            return
+        cls.validate_snapshot_id(snapshot_id)
+        normalized_path = cls.normalize_snapshot_path(path)
+        requested_snapshot_id = payload.get("snapshot_id")
+        if requested_snapshot_id is not None and str(requested_snapshot_id) != snapshot_id:
+            raise ValueError("snapshot ID does not match the request")
+        requested_path = payload.get("path")
+        if requested_path is not None and cls.normalize_snapshot_path(requested_path) != normalized_path:
+            raise ValueError("snapshot path does not match the request")
 
     def _validate_runtime_volumes(self, volumes: Any) -> Dict[str, Dict[str, str]]:
         if not isinstance(volumes, dict):
@@ -109,14 +264,67 @@ class DockerRuntimeAdapter:
         environment = environment if isinstance(environment, dict) else {}
         env_secrets = {value for key, value in environment.items() if isinstance(value, str) and value and (key == "RCLONE_CONF_CONTENT" or any(marker in str(key).upper() for marker in cls._SECRET_ENV_MARKERS))}
         file_secrets = {item["content"] for item in payload.get("resolved_files") or [] if isinstance(item, dict) and isinstance(item.get("content"), str) and item["content"]}
-        return env_secrets | file_secrets
+        repository = environment.get("RESTIC_REPOSITORY")
+        repository_values = {repository} if isinstance(repository, str) and repository else set()
+        nested_secrets: set[str] = set()
+
+        def collect_nested(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for nested_key, nested_value in value.items():
+                    collect_nested(nested_value, str(nested_key))
+            elif isinstance(value, (list, tuple)):
+                for nested_value in value:
+                    collect_nested(nested_value, key)
+            elif isinstance(value, str) and value and any(marker in key.upper() for marker in cls._SECRET_ENV_MARKERS + ("PLAINTEXT", "PAYLOAD")):
+                nested_secrets.add(value)
+
+        collect_nested(payload)
+        return env_secrets | file_secrets | repository_values | nested_secrets
 
     @staticmethod
     def _redact_text(value: Any, secrets: set[str]) -> str:
         text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
         for secret in sorted(secrets, key=len, reverse=True):
             text = text.replace(secret, "<redacted>")
+        text = DockerRuntimeAdapter._REPOSITORY_URL_PATTERN.sub("<redacted-repository>", text)
+        text = DockerRuntimeAdapter._RCLONE_REPOSITORY_PATTERN.sub("<redacted-repository>", text)
+        text = DockerRuntimeAdapter._LOCAL_REPOSITORY_PATTERN.sub("<redacted-repository>", text)
         return text
+
+    @classmethod
+    def _safe_label_value(cls, value: Any, default: str = "unknown") -> str:
+        if isinstance(value, str) and cls._SAFE_LABEL_VALUE_PATTERN.fullmatch(value):
+            return value
+        return default
+
+    @classmethod
+    def _runtime_job_id(cls, payload: Dict[str, Any]) -> str:
+        value = payload.get("_job_id")
+        if value is None:
+            value = payload.get("job_id")
+        return cls._safe_label_value(value)
+
+    @classmethod
+    def _runtime_container_labels(cls, payload: Dict[str, Any]) -> Any:
+        temporary_labels = {
+            cls.RUNTIME_TEMPORARY_LABEL: cls.RUNTIME_TEMPORARY_VALUE,
+            cls.RUNTIME_JOB_ID_LABEL: cls._runtime_job_id(payload),
+        }
+        user_labels = payload.get("labels")
+        if isinstance(user_labels, dict):
+            labels = dict(user_labels)
+            labels.update(temporary_labels)
+            return labels
+        if isinstance(user_labels, (list, tuple)):
+            reserved = set(temporary_labels)
+            labels = [
+                item
+                for item in user_labels
+                if not isinstance(item, str) or item.split("=", 1)[0] not in reserved
+            ]
+            labels.extend(f"{key}={value}" for key, value in temporary_labels.items())
+            return labels
+        return temporary_labels
 
     @staticmethod
     def _write_secret(path: str, content: str) -> None:
@@ -130,11 +338,298 @@ class DockerRuntimeAdapter:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     @staticmethod
-    def _cleanup_container(container: Any) -> None:
+    def _container_labels(container: Any) -> Dict[str, Any]:
         try:
-            container.remove(force=True)
+            labels = getattr(container, "labels", None)
         except Exception:
-            pass
+            labels = None
+        if isinstance(labels, dict):
+            return labels
+        try:
+            attrs = getattr(container, "attrs", None)
+        except Exception:
+            attrs = None
+        if isinstance(attrs, dict):
+            config = attrs.get("Config")
+            if isinstance(config, dict) and isinstance(config.get("Labels"), dict):
+                return config["Labels"]
+        return {}
+
+    @staticmethod
+    def _container_status(container: Any) -> str | None:
+        try:
+            status = getattr(container, "status", None)
+        except Exception:
+            status = None
+        if isinstance(status, str):
+            return status.casefold()
+        try:
+            attrs = getattr(container, "attrs", None)
+        except Exception:
+            attrs = None
+        if isinstance(attrs, dict):
+            state = attrs.get("State")
+            if isinstance(state, dict) and isinstance(state.get("Status"), str):
+                return state["Status"].casefold()
+        return None
+
+    @classmethod
+    def _redact_recovery_text(cls, value: Any) -> str:
+        text = cls._redact_text(value, set())
+
+        def replace(match: re.Match[str]) -> str:
+            value = match.group(3)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = f"{value[0]}<redacted>{value[-1]}"
+            else:
+                value = "<redacted>"
+            return f"{match.group(1)}{match.group(2)}{value}"
+
+        return cls._RECOVERY_SECRET_PATTERN.sub(replace, text)
+
+    def inspect_runtime_container(self, container: Any) -> Dict[str, Any]:
+        """Read exit evidence before an orphaned container is removed."""
+        result: Dict[str, Any] = {
+            "container_id": self._container_identifier(container),
+            "status": self._container_status(container),
+        }
+        try:
+            reload_container = getattr(container, "reload", None)
+            if callable(reload_container):
+                reload_container()
+            result["status"] = self._container_status(container)
+        except Exception:
+            result["inspect_error"] = "container refresh failed"
+            return result
+
+        if result["status"] not in {"exited", "dead"}:
+            return result
+
+        state = None
+        try:
+            attrs = getattr(container, "attrs", None)
+            if isinstance(attrs, dict) and isinstance(attrs.get("State"), dict):
+                state = attrs["State"]
+        except Exception:
+            state = None
+        status_code = state.get("ExitCode") if isinstance(state, dict) else None
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            try:
+                try:
+                    waited = container.wait(timeout=1)
+                except TypeError:
+                    waited = container.wait()
+                status_code = waited.get("StatusCode") if isinstance(waited, dict) else None
+            except Exception:
+                result["inspect_error"] = "container exit status unavailable"
+                return result
+        if not isinstance(status_code, int) or isinstance(status_code, bool) or not -1 <= status_code <= 255:
+            result["inspect_error"] = "container exit status unavailable"
+            return result
+        result["status_code"] = status_code
+
+        try:
+            try:
+                raw_logs = container.logs(stdout=True, stderr=True, timestamps=False)
+            except TypeError:
+                raw_logs = container.logs()
+            bounded_logs, exceeded = self._bounded_bytes(raw_logs, self.MAX_RECOVERY_LOG_BYTES)
+        except Exception:
+            result["inspect_error"] = "container logs unavailable"
+            return result
+        result["logs"] = self._redact_recovery_text(bounded_logs)
+        result["logs_truncated"] = exceeded
+        return result
+
+    @classmethod
+    def _container_identifier(cls, container: Any) -> str:
+        try:
+            value = getattr(container, "id", None)
+        except Exception:
+            value = None
+        return cls._safe_label_value(value)
+
+    @staticmethod
+    def _is_container_gone_error(error: Exception) -> bool:
+        error_name = error.__class__.__name__.casefold()
+        message = str(error).casefold()
+        return "notfound" in error_name or "no such container" in message or "not found" in message
+
+    def _cleanup_container(
+        self,
+        container: Any,
+        already_exited: bool | None = None,
+        job_id: Any = None,
+    ) -> Dict[str, Any]:
+        container_id = self._container_identifier(container)
+        labels = self._container_labels(container)
+        cleanup_job_id = self._safe_label_value(
+            job_id if job_id is not None else labels.get(self.RUNTIME_JOB_ID_LABEL)
+        )
+        status = self._container_status(container)
+        exited = already_exited is True or status in {"exited", "dead"}
+        stop_attempted = False
+        if not exited:
+            stop_attempted = True
+            try:
+                container.stop(timeout=1)
+            except Exception as exc:
+                logger.debug(
+                    "Runtime container stop did not complete (container_id=%s job_id=%s error_type=%s)",
+                    container_id,
+                    cleanup_job_id,
+                    exc.__class__.__name__,
+                )
+
+        remove_attempts = 0
+        last_error = None
+        for attempt in range(1, self.CLEANUP_REMOVE_ATTEMPTS + 1):
+            remove_attempts = attempt
+            try:
+                container.remove(force=True)
+                return {
+                    "removed": True,
+                    "container_id": container_id,
+                    "job_id": cleanup_job_id,
+                    "stop_attempted": stop_attempted,
+                    "remove_attempts": remove_attempts,
+                    "fallback_used": False,
+                }
+            except Exception as exc:
+                if self._is_container_gone_error(exc):
+                    return {
+                        "removed": True,
+                        "container_id": container_id,
+                        "job_id": cleanup_job_id,
+                        "stop_attempted": stop_attempted,
+                        "remove_attempts": remove_attempts,
+                        "fallback_used": False,
+                    }
+                last_error = exc
+                logger.debug(
+                    "Runtime container remove attempt failed (container_id=%s job_id=%s attempt=%d error_type=%s)",
+                    container_id,
+                    cleanup_job_id,
+                    attempt,
+                    exc.__class__.__name__,
+                )
+
+        fallback_used = False
+        api = getattr(getattr(self, "client", None), "api", None)
+        remove_container = getattr(api, "remove_container", None)
+        if callable(remove_container) and container_id != "unknown":
+            fallback_used = True
+            try:
+                remove_container(container_id, force=True)
+                return {
+                    "removed": True,
+                    "container_id": container_id,
+                    "job_id": cleanup_job_id,
+                    "stop_attempted": stop_attempted,
+                    "remove_attempts": remove_attempts,
+                    "fallback_used": True,
+                }
+            except Exception as exc:
+                if self._is_container_gone_error(exc):
+                    return {
+                        "removed": True,
+                        "container_id": container_id,
+                        "job_id": cleanup_job_id,
+                        "stop_attempted": stop_attempted,
+                        "remove_attempts": remove_attempts,
+                        "fallback_used": True,
+                    }
+                last_error = exc
+
+        logger.warning(
+            "Runtime container cleanup failed (container_id=%s job_id=%s remove_attempts=%d fallback=%s error_type=%s)",
+            container_id,
+            cleanup_job_id,
+            remove_attempts,
+            fallback_used,
+            last_error.__class__.__name__ if last_error is not None else "unknown",
+        )
+        return {
+            "removed": False,
+            "container_id": container_id,
+            "job_id": cleanup_job_id,
+            "stop_attempted": stop_attempted,
+            "remove_attempts": remove_attempts,
+            "fallback_used": fallback_used,
+        }
+
+    def cleanup_orphaned_runtime_containers(self, recover_callback: Callable[[Any, Dict[str, Any]], str] | None = None) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "inspected": 0,
+            "removed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "retained": 0,
+            "removed_ids": [],
+            "failed_ids": [],
+            "retained_ids": [],
+        }
+        if self.client is None:
+            summary["error"] = "docker unavailable"
+            logger.warning("Runtime orphan sweep unavailable: Docker client is not configured")
+            return summary
+
+        try:
+            containers = self.client.containers.list(
+                all=True,
+                filters={"label": f"{self.RUNTIME_TEMPORARY_LABEL}={self.RUNTIME_TEMPORARY_VALUE}"},
+            )
+            for container in containers or []:
+                summary["inspected"] += 1
+                labels = self._container_labels(container)
+                if labels.get(self.RUNTIME_TEMPORARY_LABEL) != self.RUNTIME_TEMPORARY_VALUE:
+                    summary["skipped"] += 1
+                    continue
+                if self._container_status(container) not in {"exited", "dead"}:
+                    summary["skipped"] += 1
+                    continue
+                job_id = labels.get(self.RUNTIME_JOB_ID_LABEL)
+                if recover_callback is not None:
+                    inspection = self.inspect_runtime_container(container)
+                    if inspection.get("inspect_error"):
+                        action = "retain"
+                    else:
+                        try:
+                            action = recover_callback(job_id, inspection)
+                        except Exception as exc:
+                            logger.warning(
+                                "Runtime orphan recovery failed (container_id=%s error_type=%s)",
+                                self._container_identifier(container),
+                                exc.__class__.__name__,
+                            )
+                            action = "retain"
+                    if action != "remove":
+                        summary["retained"] += 1
+                        if len(summary["retained_ids"]) < self.MAX_CLEANUP_REPORT_IDS:
+                            summary["retained_ids"].append(self._container_identifier(container))
+                        continue
+                result = self._cleanup_container(container, already_exited=True, job_id=job_id)
+                container_id = result["container_id"]
+                if result["removed"]:
+                    summary["removed"] += 1
+                    if len(summary["removed_ids"]) < self.MAX_CLEANUP_REPORT_IDS:
+                        summary["removed_ids"].append(container_id)
+                else:
+                    summary["failed"] += 1
+                    if len(summary["failed_ids"]) < self.MAX_CLEANUP_REPORT_IDS:
+                        summary["failed_ids"].append(container_id)
+        except Exception as exc:
+            summary["error"] = "sweep failed"
+            logger.warning("Runtime orphan sweep failed (error_type=%s)", exc.__class__.__name__)
+
+        logger.info(
+            "Runtime orphan sweep inspected=%d removed=%d failed=%d skipped=%d",
+            summary["inspected"],
+            summary["removed"],
+            summary["failed"],
+            summary["skipped"],
+        )
+        return summary
 
     @staticmethod
     def _is_timeout_error(error: Exception) -> bool:
@@ -142,15 +637,104 @@ class DockerRuntimeAdapter:
 
     def _failure_result(self, message: str, binary: bool, secrets: set[str], status_code: int = 1) -> Dict[str, Any]:
         message = self._redact_text(message, secrets)
-        return {"success": False, "status_code": status_code, "error": message, **({"stdout_bytes": b"", "stderr": message} if binary else {"logs": message, "stderr": ""})}
+        return {
+            "success": False,
+            "status_code": status_code,
+            "error": message,
+            "canceled": status_code == 130,
+            **({"stdout_bytes": b"", "stderr": message} if binary else {"logs": message, "stderr": ""}),
+        }
+
+    @classmethod
+    def _bounded_limit(cls, value: Any, default: int, maximum: int) -> int:
+        if value is None:
+            return default
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("runtime output limit must be a positive integer") from None
+        if limit <= 0 or limit > maximum:
+            raise ValueError("runtime output limit is outside the permitted bounds")
+        return limit
+
+    @staticmethod
+    def _bounded_bytes(value: Any, limit: int) -> tuple[bytes, bool]:
+        raw = value if isinstance(value, bytes) else str(value or "").encode("utf-8", errors="replace")
+        return raw[:limit], len(raw) > limit
+
+    @classmethod
+    def _safe_cache_component(cls, value: Any, label: str) -> str:
+        if not isinstance(value, str) or not cls._SAFE_TARGET_PATTERN.fullmatch(value):
+            raise ValueError(f"invalid {label}")
+        return value
+
+    def _cache_mount(self, payload: Dict[str, Any], environment: Dict[str, Any]) -> str | None:
+        cache_root = payload.get("cache_dir") or getattr(self, "cache_dir", None) or os.environ.get("SNAPSHOT_EXPLORER_CACHE_DIR")
+        target_id = payload.get("target_id")
+        repository = environment.get("RESTIC_REPOSITORY")
+        if not cache_root or not target_id or not repository:
+            return None
+        if not isinstance(cache_root, str) or "\x00" in cache_root:
+            raise ValueError("cache directory is invalid")
+        target_component = self._safe_cache_component(target_id, "target ID")
+        fingerprint = self.repository_fingerprint(repository)
+        cache_path = os.path.join(cache_root, target_component, fingerprint)
+        os.makedirs(cache_path, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(cache_path, 0o700)
+        except OSError:
+            pass
+        environment["RESTIC_CACHE_DIR"] = self.CACHE_MOUNT_PATH
+        return cache_path
+
+    @staticmethod
+    def _callback_is_true(callback: Callable[[], bool] | None) -> bool:
+        if callback is None:
+            return False
+        try:
+            return bool(callback())
+        except Exception:
+            return False
+
+    def _wait_for_container(
+        self,
+        container: Any,
+        timeout: float,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[Dict[str, Any] | None, bool]:
+        if cancel_check is None:
+            return container.wait(timeout=timeout), False
+
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._callback_is_true(cancel_check):
+                return None, True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("container wait timed out")
+            try:
+                result = container.wait(timeout=min(0.5, remaining))
+            except Exception as exc:
+                if self._is_timeout_error(exc):
+                    continue
+                raise
+            return result, False
 
     def _prepare_runtime(self, payload: Dict[str, Any], binary: bool):
         environment = dict(payload.get("environment") or {})
         volumes = self._validate_runtime_volumes(payload.get("volumes") or {})
         command = self._runtime_command_argv(payload.get("command"))
+        self._validate_snapshot_scope(payload, command)
+        command = self._apply_lock_policy(command, bool(getattr(self, "no_lock", False)))
         timeout = self._timeout_seconds(payload.get("timeout_seconds", getattr(self, "timeout_seconds", self.DEFAULT_RUNTIME_TIMEOUT_SECONDS)))
         network_mode = payload.get("network_mode") or ("none" if binary else None)
-        if network_mode not in {None, "none", "bridge"}: raise ValueError("unsupported runtime network mode")
+        if network_mode not in {None, "none", "bridge"}:
+            raise ValueError("unsupported runtime network mode")
+        cache_path = self._cache_mount(payload, environment)
+        if cache_path:
+            volumes[cache_path] = {"bind": self.CACHE_MOUNT_PATH, "mode": "rw"}
+            if command and command[0] == "restic":
+                command = ["restic", "--cache-dir", self.CACHE_MOUNT_PATH, *command[1:]]
         resolved_files = payload.get("resolved_files") or []
         if os.path.exists("/var/run/docker.sock"): volumes["/var/run/docker.sock"] = {"bind": "/var/run/docker.sock", "mode": "rw"}
         temp_dirs = []
@@ -449,14 +1033,22 @@ class DockerRuntimeAdapter:
                 errors.append(f"{container_id}: {exc}")
         return {"restarted": restarted, "errors": errors}
 
-    def run_runtime_job(self, image: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def run_runtime_job(
+        self,
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         if self.client is None:
             return {"success": False, "error": "docker unavailable"}
         secrets = self._collect_secret_values(payload)
         temp_dirs = None
         container = None
+        container_exited = False
         try:
             environment, volumes, command, network_mode, timeout, temp_dirs = self._prepare_runtime(payload, binary=False)
+            if self._callback_is_true(cancel_check):
+                return self._failure_result("runtime canceled before launch", False, secrets, 130)
             self._pull_image(image)
             container = self.client.containers.run(
                 image=image,
@@ -466,25 +1058,41 @@ class DockerRuntimeAdapter:
                 network_mode=network_mode,
                 detach=True,
                 remove=False,
+                labels=self._runtime_container_labels(payload),
             )
             try:
-                result = container.wait(timeout=timeout)
+                result, canceled = self._wait_for_container(container, timeout, cancel_check)
             except Exception as exc:
                 if not self._is_timeout_error(exc):
                     raise
                 return self._failure_result(f"runtime timed out after {timeout:g} seconds", False, secrets, 124)
-            combined = self._redact_text(container.logs(stdout=True, stderr=True, timestamps=False), secrets)
+            container_exited = not canceled
+            if canceled:
+                return self._failure_result("runtime canceled", False, secrets, 130)
+            raw_logs, exceeded = self._bounded_bytes(container.logs(stdout=True, stderr=True, timestamps=False), self._bounded_limit(payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES))
+            if exceeded:
+                return self._failure_result("runtime logs exceeded the permitted limit", False, secrets, 413)
+            combined = self._redact_text(raw_logs, secrets)
             status_code = result.get("StatusCode", 1)
             return {"success": status_code == 0, "status_code": status_code, "logs": combined, "stderr": ""}
         except Exception as exc:
             return self._failure_result(f"runtime execution failed: {exc}", False, secrets)
         finally:
             if container is not None:
-                self._cleanup_container(container)
+                self._cleanup_container(
+                    container,
+                    already_exited=container_exited,
+                    job_id=self._runtime_job_id(payload),
+                )
             self._cleanup_temp_dirs(temp_dirs)
 
-    def list_restic_snapshots(self, image: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        summary = self.run_runtime_job(image=image, payload=payload)
+    def list_restic_snapshots(
+        self,
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
+        summary = self.run_runtime_job(image=image, payload=payload, **({"cancel_check": cancel_check} if cancel_check else {}))
         logs = summary.get("logs", "")
         snapshots = []
         if summary.get("success"):
@@ -507,11 +1115,21 @@ class DockerRuntimeAdapter:
                 except json.JSONDecodeError:
                     summary["success"] = False
                     summary["error"] = "failed to parse restic snapshots JSON"
-        summary["snapshots"] = snapshots
+        max_entries = self._bounded_limit(payload.get("max_entries"), self.MAX_SNAPSHOT_ENTRIES, self.MAX_SNAPSHOT_ENTRIES)
+        if len(snapshots) > max_entries:
+            summary["success"] = False
+            summary["error"] = "snapshot listing exceeded the permitted entry limit"
+            snapshots = []
+        summary["snapshots"] = snapshots[:max_entries]
         return summary
 
-    def get_restic_stats(self, image: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        summary = self.run_runtime_job(image=image, payload=payload)
+    def get_restic_stats(
+        self,
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
+        summary = self.run_runtime_job(image=image, payload=payload, **({"cancel_check": cancel_check} if cancel_check else {}))
         logs = summary.get("logs", "")
         stats = {}
         if summary.get("success"):
@@ -523,14 +1141,22 @@ class DockerRuntimeAdapter:
         summary["stats"] = stats
         return summary
 
-    def run_runtime_job_binary(self, image: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def run_runtime_job_binary(
+        self,
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         if self.client is None:
             return {"success": False, "error": "docker unavailable"}
         secrets = self._collect_secret_values(payload)
         temp_dirs = None
         container = None
+        container_exited = False
         try:
             environment, volumes, command, network_mode, timeout, temp_dirs = self._prepare_runtime(payload, binary=True)
+            if self._callback_is_true(cancel_check):
+                return self._failure_result("runtime canceled before launch", True, secrets, 130)
             self._pull_image(image)
             container = self.client.containers.run(
                 image=image,
@@ -540,20 +1166,41 @@ class DockerRuntimeAdapter:
                 network_mode=network_mode,
                 detach=True,
                 remove=False,
+                labels=self._runtime_container_labels(payload),
             )
             try:
-                result = container.wait(timeout=timeout)
+                result, canceled = self._wait_for_container(container, timeout, cancel_check)
             except Exception as exc:
                 if not self._is_timeout_error(exc):
                     raise
                 return self._failure_result(f"runtime timed out after {timeout:g} seconds", True, secrets, 124)
-            stdout_bytes = container.logs(stdout=True, stderr=False)
-            stderr_text = self._redact_text(container.logs(stdout=False, stderr=True), secrets)
+            container_exited = not canceled
+            if canceled:
+                return self._failure_result("runtime canceled", True, secrets, 130)
+            operation_index = 3 if len(command) > 2 and command[1] == "--cache-dir" else 1
+            is_zip = len(command) > operation_index and command[operation_index] == "dump" and "zip" in command
+            default_limit = self.MAX_ZIP_BYTES if is_zip else self.MAX_DUMP_BYTES
+            output_limit = self._bounded_limit(payload.get("max_output_bytes"), default_limit, default_limit)
+            raw_stdout, stdout_exceeded = self._bounded_bytes(container.logs(stdout=True, stderr=False), output_limit)
+            raw_stderr, stderr_exceeded = self._bounded_bytes(
+                container.logs(stdout=False, stderr=True),
+                self._bounded_limit(payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES),
+            )
+            if stdout_exceeded:
+                return self._failure_result("runtime dump exceeded the permitted limit", True, secrets, 413)
+            if stderr_exceeded:
+                return self._failure_result("runtime logs exceeded the permitted limit", True, secrets, 413)
+            stdout_bytes = raw_stdout
+            stderr_text = self._redact_text(raw_stderr, secrets)
             status_code = result.get("StatusCode", 1)
             return {"success": status_code == 0, "status_code": status_code, "stdout_bytes": stdout_bytes, "stderr": stderr_text}
         except Exception as exc:
             return self._failure_result(f"runtime execution failed: {exc}", True, secrets)
         finally:
             if container is not None:
-                self._cleanup_container(container)
+                self._cleanup_container(
+                    container,
+                    already_exited=container_exited,
+                    job_id=self._runtime_job_id(payload),
+                )
             self._cleanup_temp_dirs(temp_dirs)

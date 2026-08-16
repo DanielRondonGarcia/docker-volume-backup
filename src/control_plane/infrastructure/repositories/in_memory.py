@@ -1,9 +1,12 @@
+import hmac
 import secrets
 from datetime import timedelta, timezone
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.control_plane.application.ports.ports import (
+    CacheRepository,
+    IndexRepository,
     InventoryRepository,
     JobRepository,
     RetentionPolicyRepository,
@@ -18,6 +21,8 @@ from src.control_plane.application.ports.ports import (
 )
 from src.control_plane.domain.models import (
     BackupTargetRecord,
+    CacheGenerationRecord,
+    IndexStatusRecord,
     InventorySnapshot,
     JobRecord,
     JobStatus,
@@ -133,30 +138,74 @@ class InMemoryJobRepository(JobRepository):
     def list(self) -> List[JobRecord]:
         return sorted(self._items.values(), key=lambda item: item.submitted_at, reverse=True)
 
+    def _reconcile_expired_leases_locked(self, now) -> int:
+        interruption_log = "Worker lease expired before terminal status was reported."
+        reconciled = 0
+        for job in self._items.values():
+            lease_expires_at = job.lease_expires_at
+            if lease_expires_at and lease_expires_at.tzinfo:
+                lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if (
+                job.status == JobStatus.IN_PROGRESS
+                and lease_expires_at
+                and lease_expires_at <= now
+            ):
+                result_summary = dict(job.result_summary or {})
+                result_summary.setdefault("error", "worker lease expired before the job reported a terminal result")
+                result_summary["recovery"] = "worker_interrupted"
+                job.status = JobStatus.FAILED
+                job.owner_worker_id = None
+                job.lease_token = None
+                job.lease_issued_at = None
+                job.lease_expires_at = None
+                job.result_summary = result_summary
+                job.log_lines = list(job.log_lines or [])
+                if interruption_log not in job.log_lines:
+                    job.log_lines.append(interruption_log)
+                job.finished_at = now
+                job.updated_at = now
+                reconciled += 1
+        return reconciled
+
+    def reconcile_expired_leases(self) -> int:
+        with self._lock:
+            return self._reconcile_expired_leases_locked(utcnow())
+
+    def renew_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        lease_duration_seconds: int = 300,
+    ) -> Optional[JobRecord]:
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease duration must be positive")
+        with self._lock:
+            now = utcnow()
+            job = self._items.get(job_id)
+            lease_expires_at = job.lease_expires_at if job else None
+            if lease_expires_at and lease_expires_at.tzinfo:
+                lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if (
+                job is None
+                or job.status != JobStatus.IN_PROGRESS
+                or job.owner_worker_id != worker_id
+                or not hmac.compare_digest(job.lease_token or "", lease_token or "")
+                or not lease_expires_at
+                or lease_expires_at <= now
+            ):
+                return None
+            job.lease_expires_at = now + timedelta(seconds=lease_duration_seconds)
+            job.updated_at = now
+            return job
+
     def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
         if lease_duration_seconds <= 0:
             raise ValueError("lease duration must be positive")
         with self._lock:
             now = utcnow()
+            self._reconcile_expired_leases_locked(now)
             expires_at = now + timedelta(seconds=lease_duration_seconds)
-            for job in self._items.values():
-                lease_expires_at = job.lease_expires_at
-                if lease_expires_at and lease_expires_at.tzinfo:
-                    lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
-                if (
-                    job.worker_id == worker_id
-                    and job.status == JobStatus.IN_PROGRESS
-                    and lease_expires_at
-                    and lease_expires_at <= now
-                ):
-                    job.status = JobStatus.PENDING
-                    job.owner_worker_id = None
-                    job.lease_token = None
-                    job.lease_issued_at = None
-                    job.lease_expires_at = None
-                    job.started_at = None
-                    job.finished_at = None
-                    job.updated_at = now
             claimed = []
             for job in sorted(self._items.values(), key=lambda item: item.submitted_at):
                 if job.worker_id != worker_id or job.status != JobStatus.PENDING:
@@ -272,3 +321,67 @@ class InMemorySettingsRepository(SettingsRepository):
         with self._lock:
             self._item = settings
         return settings
+
+
+class InMemoryCacheRepository(CacheRepository):
+    def __init__(self):
+        self._items: Dict[Tuple[str, str], CacheGenerationRecord] = {}
+        self._lock = Lock()
+
+    def get_generation(self, target_id: str, repository_fingerprint: str) -> Optional[CacheGenerationRecord]:
+        return self._items.get((target_id, repository_fingerprint))
+
+    def bump_generation(self, target_id: str, repository_fingerprint: str) -> CacheGenerationRecord:
+        with self._lock:
+            key = (target_id, repository_fingerprint)
+            current = self._items.get(key)
+            record = CacheGenerationRecord(
+                target_id=target_id,
+                repository_fingerprint=repository_fingerprint,
+                generation=(current.generation if current else 0) + 1,
+            )
+            self._items[key] = record
+            return record
+
+    def cleanup_orphaned(self, active_keys: List[Tuple[str, str]]) -> int:
+        with self._lock:
+            active = set(active_keys)
+            stale = [key for key in self._items if key not in active]
+            for key in stale:
+                self._items.pop(key, None)
+            return len(stale)
+
+
+class InMemoryIndexRepository(IndexRepository):
+    def __init__(self):
+        self._items: Dict[Tuple[str, str], IndexStatusRecord] = {}
+        self._lock = Lock()
+
+    def upsert_status(self, record: IndexStatusRecord) -> IndexStatusRecord:
+        with self._lock:
+            self._items[(record.target_id, record.snapshot_id)] = record
+        return record
+
+    def get_status(self, target_id: str, snapshot_id: str) -> Optional[IndexStatusRecord]:
+        return self._items.get((target_id, snapshot_id))
+
+    def list_by_target(self, target_id: str) -> List[IndexStatusRecord]:
+        return [
+            record
+            for (record_target_id, _), record in sorted(self._items.items(), key=lambda item: item[0][1])
+            if record_target_id == target_id
+        ]
+
+    def delete_for_target(self, target_id: str) -> None:
+        with self._lock:
+            stale = [key for key in self._items if key[0] == target_id]
+            for key in stale:
+                self._items.pop(key, None)
+
+    def cleanup_orphaned(self, active_target_ids: List[str]) -> int:
+        with self._lock:
+            active = set(active_target_ids)
+            stale = [key for key in self._items if key[0] not in active]
+            for key in stale:
+                self._items.pop(key, None)
+            return len(stale)

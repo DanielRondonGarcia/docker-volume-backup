@@ -1,13 +1,17 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from src.control_plane.domain.models import (
     BackupTargetRecord,
+    CacheGenerationRecord,
+    IndexStatusRecord,
     InventorySnapshot,
     JobRecord,
     RetentionPolicyRecord,
     SecretRecord,
     SettingsRecord,
+    SnapshotReadRequest,
+    SnapshotReadResponse,
     SnapshotRecord,
     StorageProfileRecord,
     TargetStatsRecord,
@@ -97,6 +101,20 @@ class JobRepository(ABC):
     def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
         raise NotImplementedError
 
+    @abstractmethod
+    def reconcile_expired_leases(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def renew_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        lease_duration_seconds: int = 300,
+    ) -> Optional[JobRecord]:
+        raise NotImplementedError
+
 
 class StorageProfileRepository(ABC):
     @abstractmethod
@@ -175,4 +193,60 @@ class SettingsRepository(ABC):
 
     @abstractmethod
     def save(self, settings: SettingsRecord) -> SettingsRecord:
+        raise NotImplementedError
+
+
+class CacheRepository(ABC):
+    """Persistent per-target restic cache metadata (generation/invalidation)."""
+
+    @abstractmethod
+    def get_generation(self, target_id: str, repository_fingerprint: str) -> Optional[CacheGenerationRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def bump_generation(self, target_id: str, repository_fingerprint: str) -> CacheGenerationRecord:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cleanup_orphaned(self, active_keys: List[Tuple[str, str]]) -> int:
+        raise NotImplementedError
+
+
+class IndexRepository(ABC):
+    """Bounded eager-index status metadata per snapshot."""
+
+    @abstractmethod
+    def upsert_status(self, record: IndexStatusRecord) -> IndexStatusRecord:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_status(self, target_id: str, snapshot_id: str) -> Optional[IndexStatusRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_by_target(self, target_id: str) -> List[IndexStatusRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_for_target(self, target_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cleanup_orphaned(self, active_target_ids: List[str]) -> int:
+        raise NotImplementedError
+
+
+class InteractiveJobPort(ABC):
+    """Bounded interactive lane beside durable jobs for explorer reads."""
+
+    @abstractmethod
+    def submit(self, request: SnapshotReadRequest) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_result(self, job_id: str) -> Optional[SnapshotReadResponse]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel(self, job_id: str) -> bool:
         raise NotImplementedError

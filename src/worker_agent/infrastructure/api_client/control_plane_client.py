@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib import request
+from urllib.error import HTTPError
 
 from src.security.hmac_protocol import digest_secret, sign_request
 from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
@@ -58,6 +59,20 @@ class ControlPlaneClient:
     def fetch_jobs(self, worker_id: str) -> List[Dict[str, Any]]:
         return self._post(f"/api/v1/workers/{worker_id}/jobs/fetch", {}).get("items", [])
 
+    def fetch_interactive_jobs(self, worker_id: str) -> List[Dict[str, Any]]:
+        try:
+            return self._post(f"/api/v1/workers/{worker_id}/jobs/fetch-interactive", {}).get("items", [])
+        except (AttributeError, NotImplementedError):
+            return self.fetch_jobs(worker_id)
+        except HTTPError as exc:
+            if exc.code not in (404, 405, 501):
+                raise
+            return self.fetch_jobs(worker_id)
+
+    def is_job_cancelled(self, worker_id: str, job_id: str) -> bool:
+        result = self._post(f"/api/v1/workers/{worker_id}/jobs/{job_id}/cancel-status", {})
+        return bool(result.get("canceled", False))
+
     def update_job_status(
         self,
         worker_id: str,
@@ -75,6 +90,12 @@ class ControlPlaneClient:
                 "log_lines": log_lines,
                 "lease_token": lease_token,
             },
+        )
+
+    def renew_job_lease(self, worker_id: str, job_id: str, lease_token: str) -> Dict[str, Any]:
+        return self._post(
+            f"/api/v1/workers/{worker_id}/jobs/{job_id}/renew-lease",
+            {"lease_token": lease_token},
         )
 
     def _post(self, path: str, payload: Dict[str, Any], authenticate: bool = True) -> Dict[str, Any]:

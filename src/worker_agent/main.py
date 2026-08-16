@@ -1,17 +1,20 @@
 import json
 import logging
+import math
 import os
 import socket
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
 
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
+from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
 from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
 
@@ -37,7 +40,7 @@ class WorkerHealthSnapshot:
     last_error: Optional[str] = None
     last_processed_jobs: int = 0
     run_once: bool = False
-    poll_interval_seconds: int = 30
+    poll_interval_seconds: float = 30.0
 
 
 class WorkerHealthState:
@@ -48,7 +51,7 @@ class WorkerHealthState:
             worker_name=worker_name,
         )
 
-    def set_runtime(self, run_once: bool, poll_interval_seconds: int):
+    def set_runtime(self, run_once: bool, poll_interval_seconds: float):
         with self._lock:
             self._snapshot.run_once = run_once
             self._snapshot.poll_interval_seconds = poll_interval_seconds
@@ -126,6 +129,38 @@ def _labels_from_env() -> dict:
         return {}
 
 
+def _bounded_interval(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s is invalid; using %.3fs", name, default)
+        return default
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        logger.warning("%s is outside %.3f..%.3fs; using %.3fs", name, minimum, maximum, default)
+        return default
+    return value
+
+
+def _runtime_orphan_sweep_interval() -> float:
+    return _bounded_interval(
+        "WORKER_RUNTIME_ORPHAN_SWEEP_INTERVAL_SECONDS",
+        15.0,
+        5.0,
+        3600.0,
+    )
+
+
+def _poll_worker(service: WorkerAgentService):
+    interactive_poll = getattr(service, "poll_interactive_once", None)
+    if callable(interactive_poll):
+        try:
+            return interactive_poll()
+        except (AttributeError, NotImplementedError):
+            logger.debug("Interactive worker lane unavailable; falling back to durable polling")
+    return service.poll_once()
+
+
 def build_service() -> WorkerAgentService:
     def _resolve_version():
         wv = (os.environ.get("WORKER_VERSION") or "").strip()
@@ -137,6 +172,9 @@ def build_service() -> WorkerAgentService:
         return wv or av or "dev"
 
     credential_file = os.environ.get("WORKER_CREDENTIAL_FILE", ".worker_credentials.json")
+    recovery_file = os.environ.get("WORKER_JOB_RECOVERY_FILE") or str(
+        Path(credential_file).with_name("worker_job_recovery.json")
+    )
     credential_store = WorkerCredentialStore(credential_file)
     stored = credential_store.load()
     config = WorkerAgentConfig(
@@ -160,7 +198,14 @@ def build_service() -> WorkerAgentService:
         enrollment_secret=config.enrollment_token,
     )
     docker_runtime = DockerRuntimeAdapter()
-    return WorkerAgentService(config, client, docker_runtime)
+    snapshot_cache = RedisSnapshotCache.from_env()
+    return WorkerAgentService(
+        config,
+        client,
+        docker_runtime,
+        snapshot_cache=snapshot_cache,
+        recovery_file=recovery_file,
+    )
 
 
 def start_health_server(state: WorkerHealthState):
@@ -183,9 +228,15 @@ def start_health_server(state: WorkerHealthState):
 def main():
     service = build_service()
     run_once = os.environ.get("WORKER_RUN_ONCE", "true").strip().lower() in ("1", "true", "yes", "on")
-    poll_interval = int(os.environ.get("WORKER_POLL_INTERVAL_SECONDS", "30"))
+    poll_interval = _bounded_interval("WORKER_POLL_INTERVAL_SECONDS", 30.0, 0.1, 86400.0)
+    interactive_interval = _bounded_interval("WORKER_INTERACTIVE_POLL_INTERVAL_SECONDS", 0.5, 0.1, 5.0)
+    inventory_interval = _bounded_interval("WORKER_INVENTORY_SYNC_INTERVAL_SECONDS", poll_interval, 0.5, 86400.0)
+    orphan_sweep_interval = _runtime_orphan_sweep_interval()
     last_logged_worker_id = None
     attempts = 0
+    next_orphan_sweep_at = None
+    last_heartbeat_at = 0.0
+    last_inventory_sync_at = 0.0
     health_state = WorkerHealthState(
         control_plane_url=service.config.control_plane_url,
         worker_name=service.config.name,
@@ -199,9 +250,35 @@ def main():
             if last_logged_worker_id != worker_id:
                 logger.info("Worker registered with id %s", worker_id)
                 last_logged_worker_id = worker_id
-            service.send_heartbeat()
-            service.sync_inventory()
-            processed = service.poll_once()
+            now = time.monotonic()
+            if next_orphan_sweep_at is None or now >= next_orphan_sweep_at:
+                next_orphan_sweep_at = now + orphan_sweep_interval
+                try:
+                    sweep = service.cleanup_orphaned_runtime_containers()
+                    sweep = sweep if isinstance(sweep, dict) else {}
+                    logger.info(
+                        "Runtime orphan sweep %s: inspected=%s removed=%s failed=%s skipped=%s; "
+                        "expired in-progress leases fail closed as worker_interrupted",
+                        "partial" if sweep.get("error") else "complete",
+                        sweep.get("inspected", 0),
+                        sweep.get("removed", 0),
+                        sweep.get("failed", 0),
+                        sweep.get("skipped", 0),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Runtime orphan sweep failed; expired in-progress leases fail closed as worker_interrupted "
+                        "(error_type=%s)",
+                        exc.__class__.__name__,
+                    )
+            now = time.monotonic()
+            if run_once or now - last_heartbeat_at >= poll_interval:
+                service.send_heartbeat()
+                last_heartbeat_at = now
+            if run_once or now - last_inventory_sync_at >= inventory_interval:
+                service.sync_inventory()
+                last_inventory_sync_at = now
+            processed = _poll_worker(service)
             health_state.record_control_plane_success(worker_id=worker_id, processed_jobs=len(processed))
             logger.info("Worker processed %s jobs", len(processed))
             attempts = 0
@@ -217,7 +294,13 @@ def main():
         if run_once and attempts == 0:
             break
         if attempts or not run_once:
-            time.sleep(float(os.environ.get("WORKER_STARTUP_RETRY_DELAY_SECONDS", poll_interval)))
+            retry_delay = _bounded_interval(
+                "WORKER_STARTUP_RETRY_DELAY_SECONDS",
+                poll_interval,
+                0.0,
+                86400.0,
+            ) if attempts else interactive_interval
+            time.sleep(retry_delay)
 
 
 if __name__ == "__main__":

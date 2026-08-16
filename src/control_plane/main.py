@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http import cookies
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 try:
     from http.server import ThreadingHTTPSServer as NativeThreadingHTTPSServer
@@ -19,6 +20,8 @@ from src.control_plane.application.services.control_plane_service import Control
 from src.control_plane.application.services.scheduler_service import SchedulerService
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
+    InMemoryCacheRepository,
+    InMemoryIndexRepository,
     InMemoryJobRepository,
     InMemoryRetentionPolicyRepository,
     InMemorySecretRepository,
@@ -31,6 +34,8 @@ from src.control_plane.infrastructure.repositories.in_memory import (
 )
 from src.control_plane.infrastructure.repositories.sqlite import (
     SQLiteInventoryRepository,
+    SQLiteCacheRepository,
+    SQLiteIndexRepository,
     SQLiteJobRepository,
     SQLiteRetentionPolicyRepository,
     SQLiteSecretRepository,
@@ -99,6 +104,8 @@ def _build_service() -> ControlPlaneService:
         service = ControlPlaneService(
             worker_repository=InMemoryWorkerRepository(),
             inventory_repository=InMemoryInventoryRepository(),
+            cache_repository=InMemoryCacheRepository(),
+            index_repository=InMemoryIndexRepository(),
             target_repository=InMemoryTargetRepository(),
             job_repository=InMemoryJobRepository(),
             storage_profile_repository=InMemoryStorageProfileRepository(),
@@ -118,6 +125,8 @@ def _build_service() -> ControlPlaneService:
     service = ControlPlaneService(
         worker_repository=SQLiteWorkerRepository(database_path),
         inventory_repository=SQLiteInventoryRepository(database_path),
+        cache_repository=SQLiteCacheRepository(database_path),
+        index_repository=SQLiteIndexRepository(database_path),
         target_repository=SQLiteTargetRepository(database_path),
         job_repository=SQLiteJobRepository(database_path),
         storage_profile_repository=SQLiteStorageProfileRepository(database_path),
@@ -187,6 +196,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_get_request(self, head_only: bool):
         path = urlparse(self.path).path
+        parts = self._path_parts(path)
         try:
             if path in ("/login", "/login/"):
                 return self._write_file(UI_ROOT / "login.html", "text/html; charset=utf-8", head_only=head_only)
@@ -261,6 +271,32 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     },
                     head_only=head_only,
                 )
+            if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] == "snapshots":
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                return self._write_json(
+                    200,
+                    {
+                        "schema_version": 1,
+                        "request_id": str(uuid4()),
+                        "job_id": None,
+                        "status": "succeeded",
+                        "source": "metadata",
+                        "cache_hit": True,
+                        "entries": self._control_plane_service().snapshot_catalog(parts[3]),
+                        "b64_content": "",
+                        "error": None,
+                    },
+                    head_only=head_only,
+                )
+            if len(parts) == 4 and parts[:3] == ["api", "v2", "jobs"]:
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                try:
+                    result = self._control_plane_service().snapshot_job_contract(parts[3])
+                except ValueError:
+                    return self._write_json(404, {"error": "job not found"}, head_only=head_only)
+                return self._write_json(200, result, head_only=head_only)
             if path == "/api/v1/workers":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
@@ -373,6 +409,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         body = self._read_json_body()
+        parts = self._path_parts(path)
         try:
             if path in ("/api/v1/workers/register", "/api/v1/worker-enrollments/sign"):
                 return self._write_json(404, {"error": "legacy worker trust path is unsupported"})
@@ -458,6 +495,31 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     name=result["name"], host_name=result["host_name"], labels=result["labels"], worker_id=result["worker_id"]
                 )
                 return self._write_json(201, {"worker_id": worker.id, "credential_version": result["credential_version"]})
+            if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] in {"browse", "search", "dump"}:
+                if not self._require_auth(ROLE_VIEWER, api_mode=True):
+                    return
+                result = self._control_plane_service().dispatch_snapshot_read(
+                    target_id=parts[3],
+                    operation=parts[4],
+                    snapshot_id=body.get("snapshot_id"),
+                    path=body.get("path", ""),
+                    request_id=body.get("request_id"),
+                    max_entries=body.get("max_entries"),
+                    query=body.get("query"),
+                    archive=body.get("archive") == "zip"
+                    or body.get("archive", body.get("format") == "zip" or body.get("zip", False)),
+                    max_output_bytes=body.get("max_output_bytes"),
+                    requested_by="api",
+                )
+                return self._write_json(202, result)
+            if len(parts) == 5 and parts[:3] == ["api", "v2", "jobs"] and parts[4] == "cancel":
+                if not self._require_auth(ROLE_OPERATOR, api_mode=True):
+                    return
+                try:
+                    job = self._control_plane_service().cancel_job(parts[3])
+                except ValueError as exc:
+                    return self._write_json(409, {"error": str(exc)})
+                return self._write_json(200, self._control_plane_service().snapshot_job_contract(job.id))
             parts = self._path_parts(path)
             if len(parts) == 6 and parts[:4] == ["api", "v1", "admin", "workers"]:
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
@@ -619,6 +681,38 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     return
                 jobs = self._control_plane_service().fetch_jobs_for_worker(parts[3])
                 return self._write_json(200, {"items": _to_jsonable(jobs)})
+
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4] == "jobs" and parts[5] == "fetch-interactive":
+                if not self._require_worker_identity(parts[3]):
+                    return
+                jobs = self._control_plane_service().fetch_interactive_jobs_for_worker(parts[3])
+                return self._write_json(200, {"items": _to_jsonable(jobs)})
+
+            if (
+                len(parts) == 7
+                and parts[:3] == ["api", "v1", "workers"]
+                and parts[4] == "jobs"
+                and parts[6] == "renew-lease"
+            ):
+                if not self._require_worker_identity(parts[3]):
+                    return
+                job = self._control_plane_service().renew_job_lease(
+                    worker_id=parts[3],
+                    job_id=parts[5],
+                    lease_token=body.get("lease_token"),
+                )
+                return self._write_json(200, _to_jsonable(job))
+
+            if (
+                len(parts) == 7
+                and parts[:3] == ["api", "v1", "workers"]
+                and parts[4] == "jobs"
+                and parts[6] == "cancel-status"
+            ):
+                if not self._require_worker_identity(parts[3]):
+                    return
+                canceled = self._control_plane_service().is_job_cancelled(parts[3], parts[5])
+                return self._write_json(200, {"canceled": bool(canceled)})
 
             if (
                 len(parts) == 7

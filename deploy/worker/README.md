@@ -21,6 +21,12 @@ Los nombres de servicios y volúmenes son equivalentes en `docker-compose.yml` y
 variante local y la de GHCR. El volumen `worker_state` conserva las credenciales
 y el estado del worker; no es parte de los datos demo.
 
+El cache de metadatos de Snapshot Explorer usa Redis cuando esta disponible. Su
+TTL por defecto es de 86400 segundos (24 horas), con un maximo de 86400 y hasta
+1000 entradas por target y repositorio. Redis conserva AOF en un volumen
+nombrado, pero la expiracion, la eviccion por memoria y esos limites siguen
+aplicando; el Worker vuelve a Restic si Redis no puede atender una lectura.
+
 Cada ruta de montaje aparece en el inventario como un `volume_target`
 seleccionable. La UI muestra la ruta y, cuando está disponible, el nombre Docker
 del volumen. En este demo, Redis aparece en `/var/lib/redis`, `demo-files` en
@@ -36,10 +42,12 @@ permisos iniciales del volumen; después Redis se ejecuta como el usuario
 
 ## Conexión y arranque
 
-El worker usa por defecto la red externa
-`docker-volume-backup-control-plane_default` y alcanza el CP mediante
-`http://control-plane:8080`. Levanta primero el Control Plane. Después configura
-el token HMAC de enrolamiento en el entorno y levanta una variante:
+El Compose local usa por defecto la red externa
+`docker-volume-backup-control-plane_default`. El Compose GHCR usa por defecto
+`docker-volume-backup-control-plane-ghcr_default`. Ambas variantes alcanzan el
+CP mediante `http://control-plane:8080`; levanta primero el Control Plane.
+Después configura el token HMAC de enrolamiento en el entorno y levanta una
+variante:
 
 ```powershell
 $env:WORKER_ENROLLMENT_TOKEN="<token-de-enrolamiento>"
@@ -49,6 +57,14 @@ docker compose -f deploy/worker/docker-compose.yml up -d --build
 Para usar las imágenes publicadas:
 
 ```powershell
+docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
+```
+
+Si el worker GHCR debe emparejarse intencionalmente con otra red del CP, puedes
+sobrescribir el valor por defecto antes de levantarlo:
+
+```powershell
+$env:CONTROL_PLANE_NETWORK="nombre-de-la-red-del-cp"
 docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
 ```
 

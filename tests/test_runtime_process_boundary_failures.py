@@ -68,6 +68,75 @@ class RuntimeProcessBoundaryTests(unittest.TestCase):
         self.assertEqual(len(observed_sources), 2)
         self.assertTrue(all(not os.path.exists(source) for source in observed_sources))
 
+    def test_runtime_labels_are_forwarded_for_text_and_binary_jobs(self):
+        cases = (
+            ("run_runtime_job", {"command": "restic snapshots --json"}),
+            ("run_runtime_job_binary", {"command": "restic dump abcdef12 /directory"}),
+        )
+        for method_name, payload in cases:
+            with self.subTest(method=method_name):
+                container = self.container()
+                runtime = self.runtime(container)
+                payload.update({"job_id": "job-123", "labels": {"target.label": "target-value"}})
+
+                result = getattr(runtime, method_name)("runtime", payload)
+
+                self.assertTrue(result["success"])
+                labels = runtime.client.containers.run.call_args.kwargs["labels"]
+                self.assertEqual(labels["target.label"], "target-value")
+                self.assertEqual(labels[DockerRuntimeAdapter.RUNTIME_TEMPORARY_LABEL], "true")
+                self.assertEqual(labels[DockerRuntimeAdapter.RUNTIME_JOB_ID_LABEL], "job-123")
+
+    def test_exited_container_skips_stop_before_remove(self):
+        container = self.container()
+        container.id = "container-1"
+        container.status = "exited"
+        runtime = self.runtime(container)
+
+        result = runtime.run_runtime_job("runtime", {"command": "restic snapshots --json", "job_id": "job-1"})
+
+        self.assertTrue(result["success"])
+        container.stop.assert_not_called()
+        container.remove.assert_called_once_with(force=True)
+
+    def test_cleanup_retries_removal_and_falls_back_to_low_level_api(self):
+        retry_container = self.container()
+        retry_container.id = "retry-container"
+        retry_container.remove.side_effect = [RuntimeError("temporary"), None]
+        retry_runtime = self.runtime(retry_container)
+
+        retry_result = retry_runtime.run_runtime_job("runtime", {"command": "restic snapshots --json"})
+
+        self.assertTrue(retry_result["success"])
+        self.assertEqual(retry_container.remove.call_count, 2)
+
+        fallback_container = self.container()
+        fallback_container.id = "fallback-container"
+        fallback_container.remove.side_effect = RuntimeError("remove failed")
+        fallback_runtime = self.runtime(fallback_container)
+        fallback_runtime.client.api = Mock()
+
+        fallback_result = fallback_runtime.run_runtime_job("runtime", {"command": "restic snapshots --json"})
+
+        self.assertTrue(fallback_result["success"])
+        self.assertEqual(fallback_container.remove.call_count, 2)
+        fallback_runtime.client.api.remove_container.assert_called_once_with("fallback-container", force=True)
+
+    def test_cleanup_failure_is_observable_without_replacing_runtime_result(self):
+        container = self.container()
+        container.id = "failed-container"
+        container.remove.side_effect = RuntimeError("cleanup failed")
+        runtime = self.runtime(container)
+        runtime.client.api = None
+
+        with self.assertLogs("src.worker_agent.infrastructure.adapters.docker_runtime", level="WARNING") as logs:
+            result = runtime.run_runtime_job("runtime", {"command": "restic snapshots --json", "job_id": "job-1"})
+
+        self.assertTrue(result["success"])
+        self.assertEqual(container.remove.call_count, 2)
+        self.assertIn("failed-container", "\n".join(logs.output))
+        self.assertIn("job-1", "\n".join(logs.output))
+
     def test_execution_failure_cleans_secret_temp_dirs(self):
         secret = "execution-failure-secret"
         container = self.container()
