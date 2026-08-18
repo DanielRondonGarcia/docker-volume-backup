@@ -549,6 +549,122 @@ class ControlPlaneService:
             "error": result_summary.get("stderr", "") if result.get("status") != "succeeded" else "",
         }
 
+    def storage_about(self, profile_id: str) -> Dict[str, Any]:
+        """Query the configured global rclone remote about a storage profile.
+
+        Resolves the global Settings rclone.conf secret, dispatches one durable
+        ``storage.about`` job to the first online worker in repository order,
+        waits for its completion, and returns the truthful per-card contract
+        ``{profile_id, state, metrics, error, job_id}``. Secrets, the remote
+        name, and the job payload are never serialized into the response.
+        """
+        profile = self._require_storage_profile(profile_id)
+        settings = self.settings_repository.get() if self.settings_repository else None
+        remote = self._global_rclone_remote(settings)
+        if remote is None:
+            return {
+                "profile_id": profile.id,
+                "state": "not-configured",
+                "metrics": None,
+                "error": None,
+                "job_id": None,
+            }
+        worker = self._select_online_worker()
+        if worker is None:
+            return {
+                "profile_id": profile.id,
+                "state": "transient-failure",
+                "metrics": None,
+                "error": "no online worker available for storage.about",
+                "job_id": None,
+            }
+        payload = self._build_storage_about_payload(
+            profile=profile,
+            remote_name=remote["remote_name"],
+            rclone_content=remote["rclone_content"],
+        )
+        job = self.dispatch_job(
+            worker_id=worker.id,
+            command="storage.about",
+            payload=payload,
+            requested_by="api",
+            trigger="interactive",
+        )
+        result = self._wait_for_job_completion(job.id, timeout_seconds=60)
+        return self._storage_about_contract(profile.id, job.id, result)
+
+    def _global_rclone_remote(self, settings: Optional[SettingsRecord]) -> Optional[Dict[str, str]]:
+        """Resolve the global Settings rclone.conf secret into remote + content."""
+        if not settings or not settings.rclone_conf_secret_id:
+            return None
+        secret = self.secret_repository.get(settings.rclone_conf_secret_id)
+        if not secret:
+            return None
+        rclone_content = self.secret_codec.decrypt(secret.ciphertext)
+        remote_name = self._extract_rclone_remote_name(settings.rclone_conf_secret_id)
+        if not remote_name:
+            return None
+        return {"remote_name": remote_name, "rclone_content": rclone_content}
+
+    def _storage_about_contract(self, profile_id: str, job_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        status = result.get("status")
+        result_summary = result.get("result_summary") or {}
+        if not isinstance(result_summary, dict):
+            result_summary = {}
+        state = result_summary.get("state")
+        if status == "timeout":
+            return {
+                "profile_id": profile_id,
+                "state": "transient-failure",
+                "metrics": None,
+                "error": "storage.about timed out (60s)",
+                "job_id": job_id,
+            }
+        if status == JobStatus.SUCCEEDED and state == "about-unsupported":
+            return {
+                "profile_id": profile_id,
+                "state": "about-unsupported",
+                "metrics": None,
+                "error": None,
+                "job_id": job_id,
+            }
+        if status == JobStatus.SUCCEEDED and state == "available":
+            raw_metrics = result_summary.get("metrics")
+            metrics = None
+            if isinstance(raw_metrics, dict):
+                metrics = {
+                    field: int(value)
+                    for field, value in raw_metrics.items()
+                    if field in {"total", "used", "free", "trashed"}
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                }
+            return {
+                "profile_id": profile_id,
+                "state": "available",
+                "metrics": metrics or None,
+                "error": None,
+                "job_id": job_id,
+            }
+        error = result_summary.get("error")
+        if not isinstance(error, str) or not error:
+            logs = result.get("logs") or ""
+            error = logs.strip().splitlines()[-1] if logs.strip() else f"storage.about job {status}"
+        return {
+            "profile_id": profile_id,
+            "state": "transient-failure",
+            "metrics": None,
+            "error": error,
+            "job_id": job_id,
+        }
+
+    def _select_online_worker(self) -> Optional[WorkerRecord]:
+        """Return the first online worker in repository (created-at) order."""
+        for worker in self.worker_repository.list():
+            if self._worker_status(worker) == WorkerStatus.ONLINE:
+                return worker
+        return None
+
     def dispatch_restore_for_target(
         self,
         target_id: str,
@@ -696,6 +812,40 @@ class ControlPlaneService:
             path=self._normalize_snapshot_path(path),
             operation="dump",
         )
+
+    def _build_storage_about_payload(
+        self,
+        profile: StorageProfileRecord,
+        remote_name: str,
+        rclone_content: str,
+    ) -> Dict[str, Any]:
+        """Build the durable ``storage.about`` payload for the global Settings remote.
+
+        The payload carries only the validated remote name, the rclone.conf
+        secret content needed by the worker runtime, and the runtime image.
+        ``resolved_files`` mirrors the ``RCLONE_CONF_CONTENT`` convention so
+        the runtime writes and mounts the config as a file; secrets are
+        redacted by the worker before any result/log crosses the boundary.
+        """
+        return {
+            "profile_id": profile.id,
+            "remote": f"{remote_name}:",
+            "environment": {
+                "RCLONE_CONF_CONTENT": rclone_content,
+                "RCLONE_CONFIG": "/run/secrets/rclone.conf",
+            },
+            "resolved_files": [
+                {
+                    "container_path": "/run/secrets/rclone.conf",
+                    "content": rclone_content,
+                    "secret_id": "",
+                    "secret_name": "rclone.conf",
+                }
+            ],
+            "image": None,
+            "network_mode": "bridge",
+            "labels": profile.labels,
+        }
 
     def _build_snapshot_read_payload(
         self,

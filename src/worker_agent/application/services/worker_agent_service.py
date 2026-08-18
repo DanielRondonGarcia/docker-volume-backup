@@ -22,7 +22,7 @@ class WorkerAgentService:
     MAX_SNAPSHOT_ENTRIES = 10_000
     JOB_LEASE_RENEWAL_INTERVAL_SECONDS = 60.0
     INTERACTIVE_COMMANDS = frozenset(
-        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "stats.get"}
+        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "stats.get", "storage.about"}
     )
 
     def __init__(
@@ -439,6 +439,88 @@ class WorkerAgentService:
         return JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED
 
     @staticmethod
+    def _about_metrics(value: Any) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        metrics: Dict[str, int] = {}
+        for field in ("total", "used", "free", "trashed"):
+            raw = value.get(field)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                continue
+            metrics[field] = int(raw)
+        return metrics
+
+    @classmethod
+    def _is_unsupported_about_error(cls, text: str) -> bool:
+        lowered = text.casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "not supported by this backend",
+                "about is not supported",
+                "does not support about",
+                "about: not supported",
+            )
+        )
+
+    def _execute_storage_about(
+        self,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None,
+    ) -> WorkerJobExecutionResult:
+        remote = payload.get("remote")
+        try:
+            DockerRuntimeAdapter._validated_rclone_remote(remote)
+        except (TypeError, ValueError) as exc:
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={"state": "transient-failure", "error": self._safe_job_text(payload, exc)},
+                log_lines=[self._safe_job_text(payload, exc)],
+            )
+        argv = ["rclone", "about", remote, "--json"]
+        about_payload = {**payload, "command": argv}
+        image = payload.get("image") or self.config.backup_runtime_image
+        summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, about_payload, cancel_check)
+        logs = summary.get("logs", "")
+        safe_logs = self._safe_job_text(payload, logs)
+
+        if not summary.get("success"):
+            error = self._safe_job_text(payload, summary.get("error", "") or summary.get("logs", ""))
+            if self._is_unsupported_about_error(error) or self._is_unsupported_about_error(safe_logs):
+                return WorkerJobExecutionResult(
+                    status=JobStatus.SUCCEEDED,
+                    result_summary={"state": "about-unsupported"},
+                    log_lines=["Remote does not support the about operation."],
+                )
+            state = "transient-failure"
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={"state": state, "error": error},
+                log_lines=self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr"), error),
+            )
+
+        try:
+            parsed = json.loads(logs or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={"state": "transient-failure", "error": "failed to parse rclone about JSON"},
+                log_lines=["Failed to parse rclone about JSON."],
+            )
+        metrics = self._about_metrics(parsed)
+        if not metrics:
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={"state": "transient-failure", "error": "rclone about JSON is missing capacity fields"},
+                log_lines=["Failed to parse rclone about JSON."],
+            )
+        return WorkerJobExecutionResult(
+            status=JobStatus.SUCCEEDED,
+            result_summary={"state": "available", "metrics": metrics},
+            log_lines=self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")),
+        )
+
+    @staticmethod
     def _safe_job_text(payload: Dict[str, Any], value: Any) -> str:
         secrets = DockerRuntimeAdapter._collect_secret_values(payload)
         return DockerRuntimeAdapter._redact_text(value, secrets)
@@ -698,6 +780,9 @@ class WorkerAgentService:
                     },
                     log_lines=self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")),
                 )
+
+            if command == "storage.about":
+                return self._execute_storage_about(payload, cancel_check)
 
             if command == "retention.run":
                 image = payload.get("image") or self.config.backup_runtime_image

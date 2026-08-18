@@ -207,6 +207,63 @@ class RuntimeProcessBoundaryTests(unittest.TestCase):
         self.assertFalse(os.path.exists(rclone_source))
         self.assertFalse(os.path.exists(secrets_source))
 
+    def test_rclone_about_output_and_logs_redact_conf_and_remote_credentials(self):
+        rclone_conf = "conf-secret-value"
+        remote_credentials = "rem:access-key:secret-key@bucket"
+        container = self.container()
+        container.logs.return_value = (
+            f"about output {rclone_conf} {remote_credentials}".encode("utf-8")
+        )
+        runtime = self.runtime(container)
+        observed_sources = []
+
+        def launch(**kwargs):
+            observed_sources.extend(
+                source for source, spec in kwargs["volumes"].items()
+                if spec["bind"] in {"/run/secrets", "/run/rclone-config"}
+            )
+            return container
+
+        runtime.client.containers.run.side_effect = launch
+        payload = {
+            "command": ["rclone", "about", "rem:", "--json"],
+            "environment": {
+                "RCLONE_CONF_CONTENT": rclone_conf,
+                "RCLONE_REMOTE": remote_credentials,
+            },
+        }
+
+        result = runtime.run_runtime_job("runtime", payload)
+
+        self.assertTrue(result["success"])
+        self.assertNotIn(rclone_conf, repr(result))
+        self.assertNotIn(remote_credentials, repr(result))
+        self.assertIn("<redacted>", result["logs"])
+        self.assertEqual(len(observed_sources), 2)
+        self.assertTrue(all(not os.path.exists(source) for source in observed_sources))
+
+    def test_rclone_about_failure_redacts_conf_and_remote_credentials(self):
+        rclone_conf = "failure-conf-value"
+        remote_credentials = "failure-remote:user:pass@bucket"
+        runtime = self.runtime(self.container())
+        runtime.client.containers.run.side_effect = RuntimeError(
+            f"rclone failed: {rclone_conf} {remote_credentials}"
+        )
+        payload = {
+            "command": ["rclone", "about", "rem:", "--json"],
+            "environment": {
+                "RCLONE_CONF_CONTENT": rclone_conf,
+                "RCLONE_REMOTE": remote_credentials,
+            },
+        }
+
+        result = runtime.run_runtime_job("runtime", payload)
+
+        self.assertFalse(result["success"])
+        self.assertNotIn(rclone_conf, repr(result))
+        self.assertNotIn(remote_credentials, repr(result))
+        self.assertIn("redacted", result["error"])
+
     def test_secret_temp_dirs_are_cleaned_when_preparation_fails(self):
         temp_dirs = []
         real_mkdtemp = tempfile.mkdtemp

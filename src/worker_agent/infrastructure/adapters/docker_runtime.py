@@ -40,6 +40,7 @@ class DockerRuntimeAdapter:
     _WRITE_OPERATIONS = frozenset({"backup", "restore", "forget", "prune"})
     _SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     _SAFE_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+    _RCLONE_REMOTE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
     _REPOSITORY_URL_PATTERN = re.compile(r"(?i)\b(?:https?|s3|gs|az|swift)://[^\s\"'<>]+")
     _RCLONE_REPOSITORY_PATTERN = re.compile(r"(?i)\brclone:[^\s\"'<>]+")
     _LOCAL_REPOSITORY_PATTERN = re.compile(r"(?i)\blocal:[^\s\"'<>]+")
@@ -104,7 +105,14 @@ class DockerRuntimeAdapter:
 
         if tuple(argv) == ("/root/backup.sh",):
             return argv
-        if not argv or argv[0] != "restic":
+        if not argv:
+            raise ValueError("unsupported runtime executable")
+        if argv[0] == "rclone":
+            if len(argv) != 4 or argv[1] != "about" or argv[3] != "--json":
+                raise ValueError("unsupported rclone command")
+            argv = ["rclone", "about", cls._validated_rclone_remote(argv[2]), "--json"]
+            return argv
+        if argv[0] != "restic":
             raise ValueError("unsupported runtime executable")
 
         operation = argv[1] if len(argv) > 1 else ""
@@ -194,6 +202,12 @@ class DockerRuntimeAdapter:
         return (not path or value.startswith("/")) and all(character in allowed + ("/" if path else "") for character in value)
 
     @classmethod
+    def _validated_rclone_remote(cls, value: Any) -> str:
+        if not isinstance(value, str) or not cls._RCLONE_REMOTE_PATTERN.fullmatch(value):
+            raise ValueError("invalid rclone remote")
+        return value
+
+    @classmethod
     def repository_fingerprint(cls, repository: Any) -> str:
         if not isinstance(repository, str) or not repository or "\x00" in repository:
             raise ValueError("repository fingerprint requires a non-empty repository")
@@ -262,7 +276,7 @@ class DockerRuntimeAdapter:
             return set()
         environment = payload.get("environment") or {}
         environment = environment if isinstance(environment, dict) else {}
-        env_secrets = {value for key, value in environment.items() if isinstance(value, str) and value and (key == "RCLONE_CONF_CONTENT" or any(marker in str(key).upper() for marker in cls._SECRET_ENV_MARKERS))}
+        env_secrets = {value for key, value in environment.items() if isinstance(value, str) and value and (key == "RCLONE_CONF_CONTENT" or key == "RCLONE_REMOTE" or any(marker in str(key).upper() for marker in cls._SECRET_ENV_MARKERS))}
         file_secrets = {item["content"] for item in payload.get("resolved_files") or [] if isinstance(item, dict) and isinstance(item.get("content"), str) and item["content"]}
         repository = environment.get("RESTIC_REPOSITORY")
         repository_values = {repository} if isinstance(repository, str) and repository else set()

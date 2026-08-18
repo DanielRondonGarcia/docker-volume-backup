@@ -3588,6 +3588,9 @@ docker compose up -d
       jobsPollFirstFailureAt = 0;
     }
 
+    let storageTableState = { sortKey: "name", sortDir: "asc", page: 1, pageSize: 25, filters: { name: "", backend: "" } };
+    let storageAboutState = {};
+
     function renderStorage(content) {
       const fileSecrets = state.secrets.filter(s => s.secret_type === "file");
       const fileSecretOptions = fileSecrets.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
@@ -3613,17 +3616,70 @@ docker compose up -d
           </form>
         </div></details>
         <div class="page-header"><div><h2>Profiles configurados</h2></div></div>
-        <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Backend</th><th>Environment</th><th>File secrets</th><th class="action-col">Acciones</th></tr></thead>
-          <tbody>${state.storageProfiles.length ? state.storageProfiles.map(s => `<tr>
-            <td>${escapeHtml(s.name)}</td>
-            <td>${escapeHtml(s.backend_type)}</td>
-            <td class="mono">${escapeHtml(JSON.stringify(s.environment || {}))}</td>
-            <td class="mono">${escapeHtml(JSON.stringify(s.file_secret_refs || {}))}</td>
-            <td class="action-cell"><button class="btn ghost xs" onclick="editStorageProfile('${escapeHtml(s.id)}')">Editar</button> <button class="btn danger xs" onclick="deleteStorageProfile('${escapeHtml(s.id)}','${escapeHtml(s.name)}', event)">Eliminar</button></td>
-          </tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin storage profiles</td></tr>`}</tbody>
-        </table></div></div>
+        <div class="storage-toolbar">
+          <div class="storage-toolbar-filters">
+            <input type="text" class="dt-filter" data-storage-filter="name" placeholder="Filtrar nombre..." value="${escapeHtml(storageTableState.filters.name)}" />
+            <input type="text" class="dt-filter" data-storage-filter="backend" placeholder="Filtrar backend..." value="${escapeHtml(storageTableState.filters.backend)}" />
+          </div>
+          <div class="storage-toolbar-sort">
+            <label>Ordenar:
+              <select id="storageSortKey">
+                <option value="name" ${storageTableState.sortKey === "name" ? "selected" : ""}>Nombre</option>
+                <option value="backend" ${storageTableState.sortKey === "backend" ? "selected" : ""}>Backend</option>
+              </select>
+              <select id="storageSortDir">
+                <option value="asc" ${storageTableState.sortDir === "asc" ? "selected" : ""}>Ascendente</option>
+                <option value="desc" ${storageTableState.sortDir === "desc" ? "selected" : ""}>Descendente</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="storageCardsContainer" class="storage-grid"></div>
+        <div id="storageEmptyState" class="empty-state" hidden>Sin profiles que coincidan con los filtros</div>
+        <div class="pagination">
+          <div class="pagination-info"></div>
+          <div class="pagination-controls"></div>
+          <div class="pagination-size">
+            <label>Por pagina:
+              <select id="storagePageSize">
+                <option value="10" ${storageTableState.pageSize === 10 ? "selected" : ""}>10</option>
+                <option value="25" ${storageTableState.pageSize === 25 ? "selected" : ""}>25</option>
+                <option value="50" ${storageTableState.pageSize === 50 ? "selected" : ""}>50</option>
+                <option value="100" ${storageTableState.pageSize === 100 ? "selected" : ""}>100</option>
+              </select>
+            </label>
+          </div>
+        </div>
       `;
+      content.querySelectorAll(".dt-filter").forEach(input => {
+        input.addEventListener("input", () => {
+          storageTableState.filters[input.dataset.storageFilter] = input.value;
+          storageTableState.page = 1;
+          renderStorageCards();
+        });
+      });
+      const sortKeySelect = document.getElementById("storageSortKey");
+      if (sortKeySelect) {
+        sortKeySelect.addEventListener("change", () => {
+          storageTableState.sortKey = sortKeySelect.value;
+          renderStorageCards();
+        });
+      }
+      const sortDirSelect = document.getElementById("storageSortDir");
+      if (sortDirSelect) {
+        sortDirSelect.addEventListener("change", () => {
+          storageTableState.sortDir = sortDirSelect.value;
+          renderStorageCards();
+        });
+      }
+      const pageSizeSelect = document.getElementById("storagePageSize");
+      if (pageSizeSelect) {
+        pageSizeSelect.addEventListener("change", () => {
+          storageTableState.pageSize = parseInt(pageSizeSelect.value, 10);
+          storageTableState.page = 1;
+          renderStorageCards();
+        });
+      }
       const form = document.getElementById("createStorageForm");
       const backendType = document.getElementById("spBackendType");
       const rcloneRow = document.getElementById("spRcloneConfRow");
@@ -3659,6 +3715,144 @@ docker compose up -d
           }, "Creando...").catch(() => {});
         });
       }
+      renderStorageCards();
+      bindStorageCardActions();
+      (state.storageProfiles || []).forEach(p => {
+        if (!storageAboutState[p.id]) refreshStorageAbout(p.id);
+      });
+    }
+
+    function getFilteredStorageProfiles() {
+      const f = storageTableState.filters;
+      return (state.storageProfiles || []).filter(p => {
+        if (f.name && !(p.name || "").toLowerCase().includes(f.name.toLowerCase())) return false;
+        if (f.backend && !(p.backend_type || "").toLowerCase().includes(f.backend.toLowerCase())) return false;
+        return true;
+      });
+    }
+
+    function renderStorageCards() {
+      const container = document.getElementById("storageCardsContainer");
+      if (!container) return;
+      const filtered = getFilteredStorageProfiles();
+      const dir = storageTableState.sortDir === "asc" ? 1 : -1;
+      const key = storageTableState.sortKey;
+      filtered.sort((a, b) => {
+        const va = key === "backend" ? (a.backend_type || "") : (a.name || "");
+        const vb = key === "backend" ? (b.backend_type || "") : (b.name || "");
+        return va.localeCompare(vb) * dir;
+      });
+      const total = filtered.length;
+      const pageSize = storageTableState.pageSize;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      if (storageTableState.page > totalPages) storageTableState.page = totalPages;
+      if (storageTableState.page < 1) storageTableState.page = 1;
+      const startIdx = (storageTableState.page - 1) * pageSize;
+      const paged = filtered.slice(startIdx, startIdx + pageSize);
+      const emptyState = document.getElementById("storageEmptyState");
+      if (emptyState) {
+        if (total > 0) {
+          emptyState.hidden = true;
+        } else {
+          emptyState.hidden = false;
+          emptyState.textContent = (state.storageProfiles || []).length === 0
+            ? "Sin storage profiles"
+            : "Sin profiles que coincidan con los filtros";
+        }
+      }
+      container.innerHTML = paged.length ? paged.map(p => renderStorageCard(p)).join("") : "";
+      const infoEl = document.querySelector("#storageCardsContainer ~ .pagination .pagination-info");
+      if (infoEl) infoEl.textContent = total === 0 ? "Sin resultados" : `Mostrando ${startIdx + 1}-${Math.min(startIdx + pageSize, total)} de ${total}`;
+      const controlsEl = document.querySelector("#storageCardsContainer ~ .pagination .pagination-controls");
+      if (controlsEl) {
+        const cur = storageTableState.page;
+        controlsEl.innerHTML = totalPages <= 1 ? "" : Array.from({length: totalPages}, (_, i) => i + 1).map(p =>
+          `<button class="btn ghost xs ${p === cur ? "active" : ""}" data-storage-page="${p}">${p}</button>`
+        ).join("");
+        controlsEl.querySelectorAll("[data-storage-page]").forEach(btn => {
+          btn.addEventListener("click", () => {
+            storageTableState.page = parseInt(btn.dataset.storagePage, 10);
+            renderStorageCards();
+          });
+        });
+      }
+    }
+
+    function renderStorageCard(profile) {
+      const about = storageAboutState[profile.id] || { state: "loading", metrics: null, error: null };
+      let metricsHtml = "";
+      let stateBadge = "";
+      if (about.state === "available" && about.metrics) {
+        const m = about.metrics;
+        const fmtBytes = (v) => {
+          const n = Number(v);
+          if (!isFinite(n) || n < 0) return "—";
+          if (n === 0) return "0 B";
+          const units = ["B", "KB", "MB", "GB", "TB"];
+          const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+          return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        };
+        metricsHtml = `
+          <div class="storage-metrics">
+            <div class="storage-metric"><span class="storage-metric-label">Total</span><span class="storage-metric-value">${escapeHtml(fmtBytes(m.total))}</span></div>
+            <div class="storage-metric"><span class="storage-metric-label">Usado</span><span class="storage-metric-value">${escapeHtml(fmtBytes(m.used))}</span></div>
+            <div class="storage-metric"><span class="storage-metric-label">Libre</span><span class="storage-metric-value">${escapeHtml(fmtBytes(m.free))}</span></div>
+            <div class="storage-metric"><span class="storage-metric-label">Papelera</span><span class="storage-metric-value">${escapeHtml(fmtBytes(m.trashed))}</span></div>
+          </div>`;
+        stateBadge = `<span class="pill ok">Disponible</span>`;
+      } else if (about.state === "about-unsupported") {
+        stateBadge = `<span class="pill warn">About not supported</span>`;
+      } else if (about.state === "transient-failure") {
+        stateBadge = `<span class="pill warn">Fallo transitorio</span>`;
+      } else if (about.state === "not-configured") {
+        stateBadge = `<span class="pill muted">No configurado</span>`;
+      } else if (about.state === "loading") {
+        stateBadge = `<span class="pill muted">Consultando...</span>`;
+      } else {
+        stateBadge = `<span class="pill muted">${escapeHtml(about.state || "Desconocido")}</span>`;
+      }
+      const errorHtml = about.error ? `<div class="storage-card-error">${escapeHtml(about.error)}</div>` : "";
+      return `
+        <article class="storage-card" data-profile-id="${escapeHtml(profile.id)}">
+          <div class="storage-card-header">
+            <div class="storage-card-title">
+              <h3>${escapeHtml(profile.name)}</h3>
+              <div class="storage-card-backend">${escapeHtml(profile.backend_type)}</div>
+            </div>
+            ${stateBadge}
+          </div>
+          ${metricsHtml}
+          ${errorHtml}
+          <div class="storage-card-actions">
+            <button class="btn ghost xs" data-storage-refresh="${escapeHtml(profile.id)}">Refrescar</button>
+            <button class="btn ghost xs" onclick="editStorageProfile('${escapeHtml(profile.id)}')">Editar</button>
+            <button class="btn danger xs" onclick="deleteStorageProfile('${escapeHtml(profile.id)}','${escapeHtml(profile.name)}', event)">Eliminar</button>
+          </div>
+        </article>`;
+    }
+
+    async function refreshStorageAbout(profileId) {
+      storageAboutState[profileId] = { state: "loading", metrics: null, error: null };
+      renderStorageCards();
+      try {
+        const resp = await apiGet(`/api/v1/storage-profiles/${encodeURIComponent(profileId)}/about`);
+        storageAboutState[profileId] = {
+          state: resp.state || "transient-failure",
+          metrics: resp.metrics || null,
+          error: resp.error || null,
+        };
+      } catch (e) {
+        storageAboutState[profileId] = { state: "transient-failure", metrics: null, error: e.message || null };
+      }
+      renderStorageCards();
+    }
+
+    function bindStorageCardActions() {
+      document.querySelectorAll("[data-storage-refresh]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          refreshStorageAbout(btn.dataset.storageRefresh);
+        });
+      });
     }
 
     let storageModalState = { mode: "edit", profile: null };

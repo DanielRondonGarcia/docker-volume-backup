@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 UI_PATH = Path(__file__).resolve().parents[1] / "src" / "control_plane" / "ui" / "index.html"
+UI_CSS_PATH = Path(__file__).resolve().parents[1] / "src" / "control_plane" / "ui" / "styles" / "components.css"
 
 
 class SnapshotExplorerUiStateTests(unittest.TestCase):
@@ -304,6 +305,90 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         trigger_renderer = re.search(r"function fmtJobTrigger\(trigger\) \{.*?\n    \}", self.source, re.S)
         self.assertIsNotNone(trigger_renderer)
         self.assertIn("escapeHtml", trigger_renderer.group(0))
+
+
+class StorageCardsUiStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = UI_PATH.read_text(encoding="utf-8")
+        cls.css = UI_CSS_PATH.read_text(encoding="utf-8")
+
+    def test_storage_renders_card_grid_with_filters_sort_and_pagination(self):
+        storage = re.search(r"function renderStorage\(content\) \{.*?\n    let storageModalState", self.source, re.S)
+        self.assertIsNotNone(storage)
+        storage_source = storage.group(0)
+        for marker in (
+            "storageTableState",
+            "storage-grid",
+            "storage-card",
+            'data-storage-filter="name"',
+            'data-storage-filter="backend"',
+            "storageCardsContainer",
+            "storageEmptyState",
+            "Sin storage profiles",
+            "Sin profiles que coincidan",
+            "Mostrando ",
+        ):
+            self.assertIn(marker, storage_source)
+        self.assertNotIn('<tbody id="storageTbody"', storage_source)
+
+    def test_storage_pagination_resets_page_on_filter_change_and_sorts(self):
+        storage = re.search(r"function renderStorage\(content\) \{.*?\n    let storageModalState", self.source, re.S)
+        self.assertIsNotNone(storage)
+        storage_source = storage.group(0)
+        for marker in (
+            'storageTableState.page = 1',
+            "storageTableState.filters[input.dataset.storageFilter] = input.value",
+            "storageTableState.sortKey",
+            "storageTableState.sortDir",
+            "storagePageSize",
+            "renderStorageCards()",
+        ):
+            self.assertIn(marker, storage_source)
+        self.assertIn("storageTableState.page = parseInt(btn.dataset.storagePage, 10)", self.source)
+
+    def test_storage_cards_have_independent_about_state_and_no_polling(self):
+        storage = re.search(r"function renderStorage\(content\) \{.*?\n    let storageModalState", self.source, re.S)
+        self.assertIsNotNone(storage)
+        storage_source = storage.group(0)
+        for marker in (
+            "storageAboutState",
+            "about-unsupported",
+            "transient-failure",
+            "not-configured",
+            "About not supported",
+            "No configurado",
+            "Refrescar",
+            "storage-profiles/${encodeURIComponent(profileId)}/about",
+        ):
+            self.assertIn(marker, storage_source)
+        self.assertNotIn("setInterval", storage_source)
+        self.assertNotIn("setTimeout", storage_source)
+
+    def test_storage_cards_escape_displayed_values_and_never_render_secrets(self):
+        card = re.search(r"function renderStorageCard\(profile\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(card)
+        card_source = card.group(0)
+        for marker in (
+            "escapeHtml(profile.name)",
+            "escapeHtml(profile.backend_type)",
+            "escapeHtml(about.error)",
+        ):
+            self.assertIn(marker, card_source)
+        self.assertNotIn("environment", card_source)
+        self.assertNotIn("secret_refs", card_source)
+        self.assertNotIn("RCLONE_REMOTE", card_source)
+
+    def test_storage_card_grid_css_is_responsive_and_reuses_pagination(self):
+        css = self.css
+        for marker in (
+            ".storage-grid",
+            ".storage-card",
+            "repeat(auto-fill, minmax(",
+        ):
+            self.assertIn(marker, css)
+        self.assertIn("@media (max-width: 768px)", css)
+        self.assertNotIn("storage-grid", self.source.split("renderStorage(content)", 1)[0])
 
 
 if __name__ == "__main__":

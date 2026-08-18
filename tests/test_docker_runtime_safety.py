@@ -65,6 +65,47 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
             write_command = write_runtime.client.containers.run.call_args.kwargs["command"]
             self.assertNotIn("--no-lock", write_command)
 
+    def test_rclone_about_argv_is_admitted_and_variants_fail_closed(self):
+        admitted = DockerRuntimeAdapter._runtime_command_argv(["rclone", "about", "rem:", "--json"])
+        self.assertEqual(admitted, ["rclone", "about", "rem:", "--json"])
+
+        variants = (
+            ["rclone", "lsjson", "rem:", "--json"],
+            ["rclone", "about", "rem:", "--json", "--extra"],
+            ["rclone", "about", "rem:"],
+            ["rclone", "about", "rem: --json"],
+            ["rclone", "about", "rem:/path", "--json"],
+            ["rclone", "about", "rem", "--json"],
+            ["rclone", "about", "rem:$(touch /tmp/pwned)", "--json"],
+            ["rclone", "about", "..", "--json"],
+            ["rclone", "about", "not a remote:", "--json"],
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                with self.assertRaises(ValueError):
+                    DockerRuntimeAdapter._runtime_command_argv(variant)
+
+        invalid_runtime = self.runtime(self.container())
+        invalid_result = invalid_runtime.run_runtime_job(
+            "runtime",
+            {"command": ["rclone", "about", "rem:/path", "--json"]},
+        )
+        self.assertFalse(invalid_result["success"])
+        invalid_runtime.client.containers.run.assert_not_called()
+
+    def test_rclone_about_runs_admitted_argv_without_shell(self):
+        runtime = self.runtime(self.container(logs=b'{"total":1,"used":2,"free":3,"trashed":0}'))
+
+        result = runtime.run_runtime_job(
+            "runtime",
+            {"command": ["rclone", "about", "rem:", "--json"]},
+        )
+
+        self.assertTrue(result["success"])
+        command = runtime.client.containers.run.call_args.kwargs["command"]
+        self.assertEqual(command, ["rclone", "about", "rem:", "--json"])
+        self.assertNotIn("/bin/sh", " ".join(command))
+
     def test_snapshot_path_id_and_target_scope_are_validated_before_launch(self):
         cases = (
             {"command": "restic ls --json not-a-restic-id /"},
@@ -250,6 +291,128 @@ class WorkerReadPathTests(unittest.TestCase):
         parsed = WorkerAgentService._parse_snapshot_ls_entries(entries, max_entries=7)
         self.assertEqual(len(parsed), 7)
         self.assertEqual(parsed[0]["path"], "/file-0")
+
+    def test_storage_about_is_an_interactive_command(self):
+        self.assertIn("storage.about", WorkerAgentService.INTERACTIVE_COMMANDS)
+
+    def test_storage_about_success_returns_whitelisted_metrics(self):
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": True,
+            "status_code": 0,
+            "logs": '{"total":100,"used":25,"free":75,"trashed":2}',
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {"command": "storage.about", "payload": {"remote": "rem:"}}
+        )
+
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertEqual(result.result_summary["state"], "available")
+        self.assertEqual(
+            result.result_summary["metrics"],
+            {"total": 100, "used": 25, "free": 75, "trashed": 2},
+        )
+        self.assertNotIn("error", result.result_summary)
+        runtime.run_runtime_job.assert_called_once()
+        launched_payload = runtime.run_runtime_job.call_args.kwargs["payload"]
+        self.assertEqual(launched_payload["command"], ["rclone", "about", "rem:", "--json"])
+
+    def test_storage_about_rejects_invalid_remote_without_launch(self):
+        runtime = Mock()
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        for remote in ("", "rem", "not a remote", "..", "rem:/path", "rem:$(id)"):
+            with self.subTest(remote=remote):
+                result = service.execute_job(
+                    {"command": "storage.about", "payload": {"remote": remote}}
+                )
+                self.assertEqual(result.status, JobStatus.FAILED)
+                self.assertIn("invalid", result.result_summary["error"])
+                runtime.run_runtime_job.assert_not_called()
+
+    def test_storage_about_malformed_json_returns_safe_failure_summary(self):
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": True,
+            "status_code": 0,
+            "logs": "not json at all",
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {"command": "storage.about", "payload": {"remote": "rem:"}}
+        )
+
+        self.assertEqual(result.status, JobStatus.FAILED)
+        self.assertEqual(result.result_summary["state"], "transient-failure")
+        self.assertIn("failed to parse", result.result_summary["error"])
+        self.assertNotIn("metrics", result.result_summary)
+
+    def test_storage_about_unsupported_remote_is_explicit_not_transient(self):
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": False,
+            "status_code": 1,
+            "logs": "rclone about: about is not supported by this backend",
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {"command": "storage.about", "payload": {"remote": "rem:"}}
+        )
+
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertEqual(result.result_summary["state"], "about-unsupported")
+        self.assertNotIn("metrics", result.result_summary)
+        self.assertNotIn("error", result.result_summary)
+
+    def test_storage_about_transient_failure_is_retryable_and_redacts_secrets(self):
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": False,
+            "status_code": 124,
+            "logs": "rclone about timed out after about-secret",
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {
+                "command": "storage.about",
+                "payload": {"remote": "rem:", "environment": {"RCLONE_CONF_CONTENT": "about-secret"}},
+            }
+        )
+
+        self.assertEqual(result.status, JobStatus.FAILED)
+        self.assertEqual(result.result_summary["state"], "transient-failure")
+        self.assertIn("timed out", result.result_summary["error"])
+        self.assertNotIn("about-secret", repr(result))
+        self.assertNotIn("about-secret", "\n".join(result.log_lines))
 
     def test_interactive_poll_falls_back_to_durable_fetch(self):
         class CredentialStore:

@@ -377,6 +377,14 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
                 return self._write_json(200, {"items": _to_jsonable(self._control_plane_service().list_storage_profiles())}, head_only=head_only)
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "storage-profiles"] and parts[4] == "about":
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                return self._write_json(
+                    200,
+                    self._control_plane_service().storage_about(parts[3]),
+                    head_only=head_only,
+                )
             if path == "/api/v1/retention-policies":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return

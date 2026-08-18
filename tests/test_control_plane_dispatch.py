@@ -1,10 +1,14 @@
 import io
+import json
 import threading
+import time
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
+
+from cryptography.fernet import Fernet
 
 from src.control_plane.application.services.control_plane_service import ControlPlaneService
 from src.control_plane.auth import ROLE_OPERATOR, ROLE_VIEWER
@@ -12,10 +16,14 @@ from src.control_plane.domain.models import (
     BackupTargetRecord,
     IndexStatusRecord,
     JobStatus,
+    SecretRecord,
+    SettingsRecord,
     SnapshotRecord,
+    StorageProfileRecord,
     WorkerRecord,
     utcnow,
 )
+from src.control_plane.infrastructure.security.secret_codec import SecretCodec
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryCacheRepository,
     InMemoryIndexRepository,
@@ -359,6 +367,235 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual([item.snapshot_id for item in service.list_snapshots("target-a")], ["abcdef12"])
+
+
+class StorageAboutDispatchTests(unittest.TestCase):
+    """PR 2 / Control Plane: storage.about dispatch, worker selection, state classification."""
+
+    RCLONE_CONF = (
+        "[rem]\n"
+        "type = s3\n"
+        "provider = AWS\n"
+        "access_key_id = AKIAEXAMPLE1234\n"
+        "secret_access_key = rclone-conf-secret-key\n"
+    )
+    REMOTE_CREDENTIALS = "AKIAEXAMPLE1234"
+    RCLONE_CONF_SECRET = "rclone-conf-secret"
+
+    def make_service(self, with_remote=True, offline_workers=()):
+        workers = InMemoryWorkerRepository()
+        for worker_id in ("worker-a", "worker-b"):
+            workers.save(WorkerRecord(name=worker_id, host_name="test", id=worker_id, status="online", last_seen_at=utcnow()))
+        for worker_id in offline_workers:
+            worker = workers.get(worker_id)
+            worker.last_seen_at = None
+            workers.save(worker)
+        profiles = InMemoryStorageProfileRepository()
+        profiles.save(StorageProfileRecord(name="profile-a", backend_type="rclone", id="profile-a"))
+        secrets = InMemorySecretRepository()
+        codec = SecretCodec(Fernet.generate_key())
+        settings_repository = InMemorySettingsRepository()
+        if with_remote:
+            secrets.save(SecretRecord(
+                name="rclone-conf",
+                scope="settings",
+                secret_type="file",
+                id="rclone-conf-secret",
+                ciphertext=codec.encrypt(self.RCLONE_CONF),
+            ))
+            settings_repository.save(SettingsRecord(id="default", rclone_conf_secret_id="rclone-conf-secret"))
+        return ControlPlaneService(
+            worker_repository=workers,
+            inventory_repository=InMemoryInventoryRepository(),
+            target_repository=InMemoryTargetRepository(),
+            job_repository=InMemoryJobRepository(),
+            storage_profile_repository=profiles,
+            secret_repository=secrets,
+            snapshot_repository=InMemorySnapshotRepository(),
+            retention_policy_repository=InMemoryRetentionPolicyRepository(),
+            target_stats_repository=InMemoryTargetStatsRepository(),
+            secret_codec=codec,
+            settings_repository=settings_repository,
+        )
+
+    def completed(self, service, state, metrics=None, error=None, status=None):
+        """Mock a completed durable storage.about job (worker-side runtime mocked)."""
+        if status is None:
+            status = JobStatus.SUCCEEDED if state in ("available", "about-unsupported") else JobStatus.FAILED
+        summary = {"state": state}
+        if metrics is not None:
+            summary["metrics"] = metrics
+        if error is not None:
+            summary["error"] = error
+        return patch.object(service, "_wait_for_job_completion", return_value={
+            "status": status,
+            "logs": error or "",
+            "result_summary": summary,
+        })
+
+    def test_storage_about_route_contract_available_and_not_configured(self):
+        service = self.make_service(with_remote=True)
+        with self.completed(service, "available", {"total": 100, "used": 25, "free": 75, "trashed": 2}) as waiter:
+            response = service.storage_about("profile-a")
+        self.assertEqual(set(response.keys()), {"profile_id", "state", "metrics", "error", "job_id"})
+        self.assertEqual(response["profile_id"], "profile-a")
+        self.assertEqual(response["state"], "available")
+        self.assertEqual(response["metrics"], {"total": 100, "used": 25, "free": 75, "trashed": 2})
+        self.assertIsNone(response["error"])
+        self.assertTrue(response["job_id"])
+        waiter.assert_called_once()
+
+        unconfigured = self.make_service(with_remote=False)
+        self.assertEqual(
+            unconfigured.storage_about("profile-a"),
+            {"profile_id": "profile-a", "state": "not-configured", "metrics": None, "error": None, "job_id": None},
+        )
+
+    def test_storage_about_route_401_without_viewer_role(self):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler.path = "/api/v1/storage-profiles/profile-a/about"
+        handler.headers = {}
+        service = Mock()
+        handler.server = SimpleNamespace(application=SimpleNamespace(control_plane_service=service))
+        handler._require_auth = Mock(return_value=None)
+        handler._write_json = Mock(return_value=None)
+
+        handler._handle_get_request(head_only=False)
+
+        handler._require_auth.assert_called_once_with(ROLE_VIEWER, head_only=False, api_mode=True)
+        service.storage_about.assert_not_called()
+
+    def test_storage_about_route_returns_contract_for_viewer(self):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler.path = "/api/v1/storage-profiles/profile-a/about"
+        handler.headers = {}
+        service = Mock()
+        service.storage_about.return_value = {
+            "profile_id": "profile-a",
+            "state": "available",
+            "metrics": {"total": 100, "used": 25, "free": 75, "trashed": 2},
+            "error": None,
+            "job_id": "job-1",
+        }
+        handler.server = SimpleNamespace(application=SimpleNamespace(control_plane_service=service))
+        handler._require_auth = Mock(return_value={"role": ROLE_VIEWER})
+        handler._write_json = Mock(return_value=None)
+
+        handler._handle_get_request(head_only=False)
+
+        handler._require_auth.assert_called_once_with(ROLE_VIEWER, head_only=False, api_mode=True)
+        service.storage_about.assert_called_once_with("profile-a")
+        self.assertEqual(handler._write_json.call_args.args[0], 200)
+        payload = handler._write_json.call_args.args[1]
+        self.assertEqual(set(payload.keys()), {"profile_id", "state", "metrics", "error", "job_id"})
+
+    def test_storage_about_worker_selection_picks_first_online_worker_in_repository_order(self):
+        service = self.make_service(with_remote=True)
+        workers = service.worker_repository.list()
+        self.assertEqual(workers[0].id, "worker-a")
+        self.assertEqual(workers[1].id, "worker-b")
+
+        with self.completed(service, "available", {"total": 1, "used": 0, "free": 1, "trashed": 0}):
+            service.storage_about("profile-a")
+
+        job = service.job_repository.list()[0]
+        self.assertEqual(job.worker_id, "worker-a")
+        self.assertEqual(job.command, "storage.about")
+        self.assertEqual(job.trigger, "interactive")
+        self.assertEqual(job.payload["remote"], "rem:")
+        self.assertEqual(job.payload["profile_id"], "profile-a")
+        self.assertEqual(job.payload["environment"]["RCLONE_CONF_CONTENT"], self.RCLONE_CONF)
+        self.assertEqual(job.payload["environment"]["RCLONE_CONFIG"], "/run/secrets/rclone.conf")
+
+    def test_storage_about_worker_selection_skips_offline_workers(self):
+        service = self.make_service(with_remote=True, offline_workers=("worker-a",))
+        with self.completed(service, "about-unsupported"):
+            response = service.storage_about("profile-a")
+        job = service.job_repository.list()[0]
+        self.assertEqual(job.worker_id, "worker-b")
+        self.assertEqual(response["state"], "about-unsupported")
+        self.assertIsNone(response["metrics"])
+        self.assertIsNone(response["error"])
+
+    def test_storage_about_classifies_available_unsupported_and_transient(self):
+        with self.completed(service := self.make_service(with_remote=True), "available", {"total": 100, "used": 25, "free": 75, "trashed": 2}):
+            response = service.storage_about("profile-a")
+        self.assertEqual(response["state"], "available")
+        self.assertEqual(response["metrics"], {"total": 100, "used": 25, "free": 75, "trashed": 2})
+        self.assertIsNone(response["error"])
+
+        with self.completed(unsupported := self.make_service(with_remote=True), "about-unsupported"):
+            response = unsupported.storage_about("profile-a")
+        self.assertEqual(response["state"], "about-unsupported")
+        self.assertIsNone(response["metrics"])
+        self.assertIsNone(response["error"])
+
+        with self.completed(transient := self.make_service(with_remote=True), "transient-failure", error="timed out after 60s"):
+            response = transient.storage_about("profile-a")
+        self.assertEqual(response["state"], "transient-failure")
+        self.assertIsNone(response["metrics"])
+        self.assertEqual(response["error"], "timed out after 60s")
+
+        with self.completed(timeout := self.make_service(with_remote=True), "transient-failure", error="", status="timeout"):
+            response = timeout.storage_about("profile-a")
+        self.assertEqual(response["state"], "transient-failure")
+        self.assertIsNone(response["metrics"])
+        self.assertIn("timed out", response["error"])
+
+    def test_storage_about_durable_job_completion_round_trip(self):
+        """Runtime harness: real durable dispatch + real _wait_for_job_completion
+        polling, with a background worker claim completing the job through the
+        repository lease path (mocked worker runtime)."""
+        service = self.make_service(with_remote=True)
+        completed = {}
+
+        def worker_completes_pending_job():
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                claimed = service.fetch_jobs_for_worker("worker-a")
+                about_jobs = [item for item in claimed if item.command == "storage.about"]
+                if not about_jobs:
+                    time.sleep(0.01)
+                    continue
+                job = about_jobs[0]
+                completed["job"] = service.update_job_status(
+                    "worker-a",
+                    job.id,
+                    JobStatus.SUCCEEDED,
+                    result_summary={"state": "available", "metrics": {"total": 100, "used": 25, "free": 75, "trashed": 2}},
+                    lease_token=job.lease_token,
+                )
+                return
+            raise AssertionError("worker did not observe the pending storage.about job")
+
+        thread = threading.Thread(target=worker_completes_pending_job)
+        thread.start()
+        response = service.storage_about("profile-a")
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+
+        self.assertEqual(response["state"], "available")
+        self.assertEqual(response["metrics"], {"total": 100, "used": 25, "free": 75, "trashed": 2})
+        self.assertIsNone(response["error"])
+        self.assertEqual(completed["job"].command, "storage.about")
+        self.assertEqual(completed["job"].result_summary["state"], "available")
+
+    def test_storage_about_response_never_leaks_secrets_remote_or_payload(self):
+        service = self.make_service(with_remote=True)
+        with self.completed(service, "available", {"total": 100, "used": 25, "free": 75, "trashed": 2}):
+            response = service.storage_about("profile-a")
+        raw = json.dumps(response)
+        self.assertNotIn(self.REMOTE_CREDENTIALS, raw)
+        self.assertNotIn(self.RCLONE_CONF_SECRET, raw)
+        self.assertNotIn(self.RCLONE_CONF, raw)
+        self.assertNotIn("AKIAEXAMPLE", raw)
+        self.assertNotIn("RCLONE_CONF_CONTENT", raw)
+        self.assertNotIn("environment", raw)
+
+    def test_storage_about_missing_profile_raises_error(self):
+        service = self.make_service(with_remote=True)
+        with self.assertRaisesRegex(ValueError, "storage profile not found"):
+            service.storage_about("missing")
 
 
 class ControlPlaneRouteTests(unittest.TestCase):
