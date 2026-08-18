@@ -16,6 +16,8 @@ quieren backupear, en `deploy/worker/`.
 
 - `control-plane`
   - ejecuta `python -m src.control_plane.main`
+  - evalua las expresiones cron en `CONTROL_PLANE_TIMEZONE` (por defecto
+    `America/Bogota`); usa una zona IANA valida y expone esa zona a la UI/API
   - persiste `control_plane.db`, `.control_plane.key`,
     `.control_plane.session.key` y `.control_plane.users.json` en un volumen
     Docker nombrado `control_plane_state`
@@ -68,6 +70,17 @@ SQLite; una lectura ordinaria no depende de Redis.
 $env:CONTROL_PLANE_PUBLISHED_PORT="18080"
 docker compose -f deploy/control-plane/docker-compose.yml up -d --build
 ```
+
+Para cambiar la zona del scheduler, define una zona IANA antes de arrancar el
+stack, por ejemplo `America/Bogota`, `America/New_York` o `UTC`:
+
+```powershell
+$env:CONTROL_PLANE_TIMEZONE="America/Bogota"
+docker compose -f deploy/control-plane/docker-compose.yml up -d --build
+```
+
+Una zona invalida impide que el Control Plane arranque para evitar ejecutar
+backups en una hora distinta de la configurada.
 
 Si el Control Plane va a estar detrás de un proxy o con un dominio, define
 también la URL pública para que los comandos del worker salgan correctos:

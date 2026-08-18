@@ -30,7 +30,7 @@ from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryTargetStatsRepository,
     InMemoryWorkerRepository,
 )
-from src.control_plane.main import ControlPlaneRequestHandler
+from src.control_plane.main import ControlPlaneRequestHandler, _to_jsonable
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
@@ -99,6 +99,13 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(job.payload["operation"], "browse")
         self.assertEqual(job.payload["command"][-1], "/folder with spaces/file.txt")
         self.assertEqual(job.payload["cache_generation"], 0)
+
+    def test_job_trigger_is_preserved_in_api_payload(self):
+        service = self.make_service()
+
+        for trigger in ("manual", "schedule", "automatic", "interactive", "future-trigger"):
+            job = service.dispatch_job("worker-a", "worker.self_check", trigger=trigger)
+            self.assertEqual(_to_jsonable(job)["trigger"], trigger)
 
     def test_snapshot_payload_uses_current_target_cache_generation(self):
         cache = InMemoryCacheRepository()
@@ -428,6 +435,45 @@ class ControlPlaneRouteTests(unittest.TestCase):
             lease_token="lease-token",
         )
         self.assertEqual(handler._write_json.call_args.args[0], 200)
+
+    def test_public_config_exposes_scheduler_timezone(self):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler.path = "/api/v1/config/public"
+        handler.headers = {}
+        handler.server = SimpleNamespace(
+            application=SimpleNamespace(
+                control_plane_service=SimpleNamespace(get_settings=lambda: None),
+                scheduler=SimpleNamespace(timezone_name="America/Bogota"),
+            )
+        )
+        handler._write_json = Mock(return_value=None)
+
+        handler._handle_get_request(head_only=False)
+
+        payload = handler._write_json.call_args.args[1]
+        self.assertEqual(payload["scheduler_timezone"], "America/Bogota")
+
+    def test_scheduler_preview_route_preserves_target_context_for_empty_cron(self):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler.path = "/api/v1/scheduler/preview?cron_expression=&target_context=true"
+        handler.headers = {}
+        handler.server = SimpleNamespace(
+            application=SimpleNamespace(
+                control_plane_service=SimpleNamespace(target_repository=SimpleNamespace(get=lambda target_id: None)),
+                scheduler=Mock(),
+            )
+        )
+        handler._require_auth = Mock(return_value=True)
+        handler._write_json = Mock(return_value=None)
+        handler.server.application.scheduler.preview.return_value = {"cron_source": "global"}
+
+        handler._handle_get_request(head_only=False)
+
+        handler.server.application.scheduler.preview.assert_called_once_with(
+            target=None,
+            cron_expression="",
+            target_context=True,
+        )
 
 
 class ControlPlaneClientFallbackTests(unittest.TestCase):

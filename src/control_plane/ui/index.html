@@ -205,6 +205,7 @@
       systemVersion: "dev",
       latestVersion: null,
       latestVersionUrl: null,
+      schedulerTimezone: null,
     };
 
     function escapeHtml(str) {
@@ -221,6 +222,13 @@
       if (!ts) return "—";
       try { return new Date(ts).toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return ts; }
     }
+    function fmtSchedulerDate(ts, timeZone) {
+      if (!ts) return "—";
+      if (!timeZone) return "zona del scheduler no disponible";
+      try {
+        return new Date(ts).toLocaleString("es-CO", { timeZone, dateStyle: "short", timeStyle: "short" });
+      } catch (e) { return ts; }
+    }
     function fmtStatus(status) {
       const cls = status === "online" ? "ok" : status === "offline" ? "warn" : "muted";
       return `<span class="pill ${cls}">${escapeHtml(status || "—")}</span>`;
@@ -236,6 +244,26 @@
       };
       const m = map[status] || { cls: "job-unknown", icon: "•", label: status || "—" };
       return `<span class="job-badge ${m.cls}"><span class="job-badge-icon">${m.icon}</span>${escapeHtml(m.label)}</span>`;
+    }
+
+    function jobTriggerInfo(trigger) {
+      const raw = String(trigger || "").trim();
+      const known = {
+        manual: { cls: "job-pending", icon: "M", label: "Manual" },
+        schedule: { cls: "job-running", icon: "C", label: "Cron automatico" },
+        automatic: { cls: "job-success", icon: "S", label: "Sistema automatico" },
+        interactive: { cls: "job-canceled", icon: "I", label: "Interactivo" },
+      }[raw];
+      return known || { cls: "job-unknown", icon: "?", label: raw ? `Desconocido (${raw})` : "Desconocido" };
+    }
+
+    function jobTriggerLabel(trigger) {
+      return jobTriggerInfo(trigger).label;
+    }
+
+    function fmtJobTrigger(trigger) {
+      const info = jobTriggerInfo(trigger);
+      return `<span class="job-badge ${info.cls}" title="Origen: ${escapeHtml(info.label)}"><span class="job-badge-icon">${info.icon}</span>${escapeHtml(info.label)}</span>`;
     }
 
     function fmtJobCommand(cmd) {
@@ -919,7 +947,7 @@ docker compose up -d
               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
               <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
-              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
+              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = usa el cron global; si tampoco existe, solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
               ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
             </div>
             <div class="field full">
@@ -955,6 +983,31 @@ docker compose up -d
       }
     }
 
+    function targetCronExpression(target) {
+      return target && (target.effective_cron_expression || target.cron_expression) || "";
+    }
+
+    function cronSourceLabel(source) {
+      return source === "target" ? "Cron del target" : source === "global" ? "Cron global" : "Solo manual";
+    }
+
+    function renderTargetCronLabel(target) {
+      const expression = targetCronExpression(target);
+      const timeZone = target.scheduler_timezone || state.schedulerTimezone || "";
+      const timeZoneLabel = timeZone ? `zona ${escapeHtml(timeZone)}` : "zona del scheduler no disponible";
+      if (!expression) {
+        return `<span style="color:var(--muted-foreground);">manual</span><div class="helper">${timeZoneLabel}</div>`;
+      }
+      if (target.cron_valid === false) {
+        return `<code class="mono cron-error" style="font-size:11px;">${escapeHtml(expression)}</code><div class="helper">Expresion invalida - ${timeZoneLabel}</div>`;
+      }
+      const source = cronSourceLabel(target.cron_source || (target.cron_expression ? "target" : "global"));
+      const next = target.next_scheduled_at
+        ? ` - Proxima: ${escapeHtml(fmtSchedulerDate(target.next_scheduled_at, timeZone))}`
+        : "";
+      return `<code class="mono" style="font-size:11px;">${escapeHtml(expression)}</code><div class="helper">${escapeHtml(source)} - ${timeZoneLabel}${next}</div>`;
+    }
+
     function getFilteredTargets() {
       const f = targetsTableState.filters;
       return (state.targets || []).filter(t => {
@@ -962,7 +1015,7 @@ docker compose up -d
         const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
         const wName = worker ? worker.name : (t.worker_id || "");
         const rName = retention ? retention.name : "";
-        const cron = t.cron_expression || "manual";
+        const cron = targetCronExpression(t) || "manual";
         if (f.name && !(t.name || "").toLowerCase().includes(f.name.toLowerCase())) return false;
         if (f.worker && !wName.toLowerCase().includes(f.worker.toLowerCase())) return false;
         if (f.compose && !(t.compose_project || "").toLowerCase().includes(f.compose.toLowerCase())) return false;
@@ -991,7 +1044,7 @@ docker compose up -d
           const rb = state.retentionPolicies.find(r => r.id === b.retention_policy_id);
           va = ra ? ra.name : ""; vb = rb ? rb.name : "";
         }
-        else if (key === "cron") { va = a.cron_expression || "manual"; vb = b.cron_expression || "manual"; }
+        else if (key === "cron") { va = targetCronExpression(a) || "manual"; vb = targetCronExpression(b) || "manual"; }
         return va.localeCompare(vb) * dir;
       });
     }
@@ -1097,7 +1150,7 @@ docker compose up -d
         const worker = state.workers.find(w => w.id === t.worker_id);
         const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
         const lastJob = getLastJobForTarget(t.id);
-        const cronLabel = t.cron_expression ? `<code class="mono" style="font-size:11px;">${escapeHtml(t.cron_expression)}</code>` : '<span style="color:var(--muted-foreground);">manual</span>';
+        const cronLabel = renderTargetCronLabel(t);
         return `<tr>
           <td>${escapeHtml(t.name)}</td>
           <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
@@ -2610,52 +2663,6 @@ docker compose up -d
       if (cancel && document.contains(cancel)) cancel.focus();
     }
 
-    function cronNextRun(cronExpr, fromDate) {
-      const parts = cronExpr.trim().split(/\s+/);
-      if (parts.length !== 5) return null;
-      const d = fromDate ? new Date(fromDate) : new Date();
-      d.setSeconds(0, 0);
-      const maxIter = 525600;
-      for (let i = 0; i < maxIter; i++) {
-        const next = new Date(d.getTime() + 60000 * (i + 1));
-        const m = next.getMinutes();
-        const h = next.getHours();
-        const dom = next.getDate();
-        const mon = next.getMonth() + 1;
-        const dow = next.getDay();
-        if (cronFieldMatch(parts[0], m) &&
-            cronFieldMatch(parts[1], h) &&
-            cronFieldMatch(parts[2], dom) &&
-            cronFieldMatch(parts[3], mon) &&
-            cronFieldMatch(parts[4], dow)) {
-          return next;
-        }
-      }
-      return null;
-    }
-
-    function cronFieldMatch(field, value) {
-      if (field === "*") return true;
-      for (let part of field.split(",")) {
-        part = part.trim();
-        let step = 1;
-        if (part.includes("/")) {
-          const [base, s] = part.split("/");
-          step = parseInt(s, 10);
-          part = base;
-        }
-        let lo, hi;
-        if (part === "*") { lo = 0; hi = 59; }
-        else if (part.includes("-")) { const [a, b] = part.split("-"); lo = parseInt(a, 10); hi = parseInt(b, 10); }
-        else { lo = parseInt(part, 10); hi = lo; }
-        if (isNaN(lo) || isNaN(hi) || isNaN(step)) continue;
-        for (let v = lo; v <= hi; v += step) {
-          if (v === value) return true;
-        }
-      }
-      return false;
-    }
-
     function cronDescribe(cronExpr) {
       const parts = cronExpr.trim().split(/\s+/);
       if (parts.length !== 5) return "";
@@ -2667,7 +2674,7 @@ docker compose up -d
       }
       if (m !== "*" && h !== "*" && !m.includes("/") && !h.includes("/") && dom === "*" && mon === "*" && dow !== "*") {
         const days = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
-        const d = parseInt(dow,10);
+        const d = parseInt(dow,10) % 7;
         return `cada ${days[d]||""} a las ${timeStr(parseInt(h,10), parseInt(m,10))}`;
       }
       if (m !== "*" && h === "*" && dom === "*" && mon === "*" && dow === "*") {
@@ -2687,39 +2694,52 @@ docker compose up -d
       return `cron: ${cronExpr}`;
     }
 
-    function updateCronPreview(inputId, previewId) {
+    const cronPreviewRequests = {};
+
+    async function updateCronPreview(inputId, previewId, targetId, targetContext) {
       const input = document.getElementById(inputId);
       const preview = document.getElementById(previewId);
       if (!input || !preview) return;
       const expr = input.value.trim();
-      if (!expr) {
-        preview.innerHTML = '<span class="cron-manual">Solo manual (sin cron)</span>';
-        return;
-      }
-      const parts = expr.split(/\s+/);
-      if (parts.length !== 5) {
-        preview.innerHTML = '<span class="cron-error">Formato invalido: debe tener 5 campos</span>';
-        return;
-      }
+      const requestId = (cronPreviewRequests[previewId] || 0) + 1;
+      cronPreviewRequests[previewId] = requestId;
+      const query = new URLSearchParams();
+      if (targetId) query.set("target_id", targetId);
+      if (targetContext) query.set("target_context", "true");
+      query.set("cron_expression", expr);
+      preview.innerHTML = '<span class="cron-next">Consultando scheduler...</span>';
       try {
-        const next = cronNextRun(expr);
-        if (!next) {
-          preview.innerHTML = '<span class="cron-error">No se encontro proxima ejecucion valida</span>';
+        const result = await apiGet(`/api/v1/scheduler/preview?${query.toString()}`);
+        if (cronPreviewRequests[previewId] !== requestId || !document.contains(preview)) return;
+        const timeZone = result.scheduler_timezone || state.schedulerTimezone || "";
+        const zoneLabel = timeZone ? `Zona del scheduler: ${timeZone}` : "Zona del scheduler no disponible";
+        if (!result.effective_cron_expression) {
+          preview.innerHTML = `<span class="cron-manual">Solo manual (sin cron)</span><br><span class="helper">${escapeHtml(zoneLabel)}</span>`;
           return;
         }
-        const desc = cronDescribe(expr);
-        const now = new Date();
-        const diffMs = next.getTime() - now.getTime();
+        if (result.cron_valid === false) {
+          preview.innerHTML = `<span class="cron-error">Expresion cron invalida</span><br><span class="helper">${escapeHtml(zoneLabel)}</span>`;
+          return;
+        }
+        const next = result.next_scheduled_at ? new Date(result.next_scheduled_at) : null;
+        if (!next || Number.isNaN(next.getTime())) {
+          preview.innerHTML = `<span class="cron-error">No se encontro proxima ejecucion valida</span><br><span class="helper">${escapeHtml(zoneLabel)}</span>`;
+          return;
+        }
+        const desc = cronDescribe(result.effective_cron_expression);
+        const diffMs = next.getTime() - Date.now();
         const diffMin = Math.round(diffMs / 60000);
         let inStr;
         if (diffMin < 1) inStr = "ahora";
         else if (diffMin < 60) inStr = `en ${diffMin} min`;
         else if (diffMin < 1440) inStr = `en ${Math.floor(diffMin/60)}h ${diffMin%60}m`;
         else inStr = `en ${Math.floor(diffMin/1440)}d ${Math.floor((diffMin%1440)/60)}h`;
-        const dateStr = next.toLocaleString("es-CO", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-        preview.innerHTML = `<span class="cron-badge">⏱ ${escapeHtml(desc)}</span><br><span class="cron-next">Proxima: <strong>${escapeHtml(dateStr)}</strong> (${inStr})</span>`;
+        const dateStr = fmtSchedulerDate(result.next_scheduled_at, timeZone);
+        const source = cronSourceLabel(result.cron_source);
+        preview.innerHTML = `<span class="cron-badge">Cron ${escapeHtml(source)}: ${escapeHtml(desc)}</span><br><span class="cron-next">Proxima: <strong>${escapeHtml(dateStr)}</strong> (${inStr})</span><br><span class="helper">${escapeHtml(zoneLabel)}</span>`;
       } catch (e) {
-        preview.innerHTML = '<span class="cron-error">Error calculando proxima ejecucion</span>';
+        if (cronPreviewRequests[previewId] !== requestId || !document.contains(preview)) return;
+        preview.innerHTML = '<span class="cron-error">No se pudo consultar el scheduler</span>';
       }
     }
 
@@ -2755,7 +2775,7 @@ docker compose up -d
                 <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
                 <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
                 <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
-                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
+                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion propia del target. Vacio = usa el cron global; si tampoco existe, solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
                 <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
               </div>
               <details class="sub-section">
@@ -2825,8 +2845,8 @@ docker compose up -d
       });
       const etCronInput = document.getElementById("etCronExpression");
       if (etCronInput) {
-        etCronInput.addEventListener("input", () => updateCronPreview("etCronExpression", "etCronPreview"));
-        updateCronPreview("etCronExpression", "etCronPreview");
+        etCronInput.addEventListener("input", () => updateCronPreview("etCronExpression", "etCronPreview", target.id));
+        updateCronPreview("etCronExpression", "etCronPreview", target.id);
       }
     }
 
@@ -3094,8 +3114,8 @@ docker compose up -d
       const summary = document.getElementById("targetProjectSummary");
       const ctCronInput = document.getElementById("targetCronExpression");
       if (ctCronInput) {
-        ctCronInput.addEventListener("input", () => updateCronPreview("targetCronExpression", "targetCronPreview"));
-        updateCronPreview("targetCronExpression", "targetCronPreview");
+        ctCronInput.addEventListener("input", () => updateCronPreview("targetCronExpression", "targetCronPreview", null, true));
+        updateCronPreview("targetCronExpression", "targetCronPreview", null, true);
       }
       async function refreshProjects() {
         const workerId = workerSelect.value;
@@ -3128,7 +3148,7 @@ docker compose up -d
       refreshProjects();
     }
 
-    let jobsTableState = { sortKey: "started_at", sortDir: "desc", page: 1, pageSize: 25, filters: { id: "", target: "", command: "", status: "", started: "", finished: "" } };
+    let jobsTableState = { sortKey: "started_at", sortDir: "desc", page: 1, pageSize: 25, filters: { id: "", target: "", command: "", status: "", origin: "", started: "", finished: "" } };
     let jobsPollTimer = null;
     let jobsPolling = false;
     let jobsPollFailures = 0;
@@ -3256,12 +3276,14 @@ docker compose up -d
           const target = (targetMap[j.target_id] || j.target_id || "").toLowerCase();
           const cmd = (j.command || "").toLowerCase();
           const status = (j.status || "").toLowerCase();
+          const origin = `${jobTriggerLabel(j.trigger)} ${String(j.trigger || "")}`.toLowerCase();
           const started = j.started_at ? new Date(j.started_at).toLocaleString().toLowerCase() : "";
           const finished = j.finished_at ? new Date(j.finished_at).toLocaleString().toLowerCase() : "";
           if (jobsTableState.filters.id && !id.includes(jobsTableState.filters.id.toLowerCase())) return false;
           if (jobsTableState.filters.target && !target.includes(jobsTableState.filters.target.toLowerCase())) return false;
           if (jobsTableState.filters.command && !cmd.includes(jobsTableState.filters.command.toLowerCase())) return false;
           if (jobsTableState.filters.status && !status.includes(jobsTableState.filters.status.toLowerCase())) return false;
+          if (jobsTableState.filters.origin && !origin.includes(jobsTableState.filters.origin.toLowerCase())) return false;
           if (jobsTableState.filters.started && !started.includes(jobsTableState.filters.started.toLowerCase())) return false;
           if (jobsTableState.filters.finished && !finished.includes(jobsTableState.filters.finished.toLowerCase())) return false;
           return true;
@@ -3282,6 +3304,8 @@ docker compose up -d
             vb = targetMap[b.target_id] || b.target_id || "";
           } else if (jobsTableState.sortKey === "command") {
             va = a.command || ""; vb = b.command || "";
+          } else if (jobsTableState.sortKey === "origin") {
+            va = jobTriggerLabel(a.trigger); vb = jobTriggerLabel(b.trigger);
           } else {
             va = String(a.id || ""); vb = String(b.id || "");
           }
@@ -3323,13 +3347,14 @@ docker compose up -d
 
         const tbody = content.querySelector("#jobsTbody");
         if (tbody) {
-          tbody.innerHTML = pagedJobs.length === 0 ? `<tr><td colspan="7" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
+          tbody.innerHTML = pagedJobs.length === 0 ? `<tr><td colspan="8" class="empty-state">Sin jobs que coincidan con los filtros</td></tr>` : pagedJobs.map(j => {
             const canCancel = j.status === "pending" || j.status === "in_progress";
             return `
             <tr id="job-row-${escapeHtml(j.id)}">
               <td class="mono">${escapeHtml(String(j.id).slice(0,8))}</td>
               <td>${escapeHtml(targetMap[j.target_id] || j.target_id || "—")}</td>
               <td>${fmtJobCommand(j.command)}</td>
+              <td>${fmtJobTrigger(j.trigger)}</td>
               <td>${fmtJobStatus(j.status)}</td>
               <td class="mono">${fmtDate(j.started_at)}</td>
               <td class="mono">${fmtDate(j.finished_at)}</td>
@@ -3339,7 +3364,7 @@ docker compose up -d
               </td>
             </tr>
             <tr class="log-accordion-row" id="log-accordion-${escapeHtml(j.id)}" style="display:none;">
-              <td colspan="7">
+              <td colspan="8">
                 <div class="log-accordion-content" id="log-content-${escapeHtml(j.id)}"></div>
               </td>
             </tr>
@@ -3359,7 +3384,7 @@ docker compose up -d
         const sortThs = content.querySelectorAll("[data-sort]");
         sortThs.forEach(th => {
           const key = th.dataset.sort;
-          th.innerHTML = `${key === "id" ? "ID" : key === "target" ? "Target" : key === "command" ? "Comando" : key === "status" ? "Status" : key === "started_at" ? "Inicio" : "Fin"}${sortIcon(key)}`;
+          th.innerHTML = `${key === "id" ? "ID" : key === "target" ? "Target" : key === "command" ? "Comando" : key === "origin" ? "Origen" : key === "status" ? "Status" : key === "started_at" ? "Inicio" : "Fin"}${sortIcon(key)}`;
         });
 
         bindJobsRowEvents();
@@ -3381,6 +3406,7 @@ docker compose up -d
                 <th ${sortAttrs("id")}>ID${sortIcon("id")}</th>
                 <th ${sortAttrs("target")}>Target${sortIcon("target")}</th>
                 <th ${sortAttrs("command")}>Comando${sortIcon("command")}</th>
+                <th ${sortAttrs("origin")}>Origen${sortIcon("origin")}</th>
                 <th ${sortAttrs("status")}>Status${sortIcon("status")}</th>
                 <th ${sortAttrs("started_at")}>Inicio${sortIcon("started_at")}</th>
                 <th ${sortAttrs("finished_at")}>Fin${sortIcon("finished_at")}</th>
@@ -3390,6 +3416,7 @@ docker compose up -d
                 <th><input type="text" class="dt-filter" data-col="id" placeholder="Filtrar ID..." value="${escapeHtml(jobsTableState.filters.id)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="target" placeholder="Filtrar target..." value="${escapeHtml(jobsTableState.filters.target)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="command" placeholder="Filtrar comando..." value="${escapeHtml(jobsTableState.filters.command)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="origin" placeholder="Filtrar origen..." value="${escapeHtml(jobsTableState.filters.origin)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="status" placeholder="Filtrar status..." value="${escapeHtml(jobsTableState.filters.status)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="started" placeholder="Filtrar inicio..." value="${escapeHtml(jobsTableState.filters.started)}" /></th>
                 <th><input type="text" class="dt-filter" data-col="finished" placeholder="Filtrar fin..." value="${escapeHtml(jobsTableState.filters.finished)}" /></th>
@@ -4070,7 +4097,7 @@ docker compose up -d
             <div class="field full" style="margin-top:12px;">
               <label for="settingsGlobalCron">Cron global (opcional)</label>
               <input id="settingsGlobalCron" value="${escapeHtml(settings.global_cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" />
-              <div class="helper">Expresion cron de 5 campos. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h). Los targets sin cron usaran este.</div>
+              <div class="helper">Expresion cron de 5 campos. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h). Los targets sin cron usaran este. Zona del scheduler: <strong>${escapeHtml(state.schedulerTimezone || "no disponible")}</strong>.</div>
               <div id="settingsGlobalCronPreview" class="cron-preview"></div>
             </div>
           </div>
@@ -4191,7 +4218,7 @@ docker compose up -d
         const me = await apiGet("/api/v1/auth/me");
         state.currentUser = me.username;
         state.currentRole = me.role;
-        const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings] = await Promise.all([
+        const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings, schedulerConfig] = await Promise.all([
           apiGet("/api/v1/workers"),
           apiGet("/api/v1/targets"),
           apiGet(currentLogJobId ? "/api/v1/jobs?include_logs=true" : "/api/v1/jobs"),
@@ -4200,6 +4227,7 @@ docker compose up -d
           apiGet("/api/v1/secrets").catch(() => ({ items: [] })),
           apiGet("/api/v1/admin/users").catch(() => ({ items: [] })),
           apiGet("/api/v1/settings").catch(() => ({})),
+          apiGet("/api/v1/config/public").catch(() => ({})),
         ]);
         state.workers = workers.items || [];
         state.targets = targets.items || [];
@@ -4209,6 +4237,7 @@ docker compose up -d
         state.secrets = secrets.items || [];
         state.localUsers = users.items || [];
         state.settings = settings || {};
+        state.schedulerTimezone = schedulerConfig.scheduler_timezone || state.settings.scheduler_timezone || null;
         let rcloneRemote = null;
         try {
           const rr = await apiGet("/api/v1/settings/rclone-remote");

@@ -1,12 +1,20 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from src.control_plane.application.services.control_plane_service import ControlPlaneService
-from src.control_plane.application.services.scheduler_service import SchedulerService, cron_matches
-from src.control_plane.domain.models import BackupTargetRecord, JobRecord, JobStatus, WorkerRecord, utcnow
+from src.control_plane.application.services.scheduler_service import (
+    DEFAULT_SCHEDULER_TIMEZONE,
+    SchedulerService,
+    cron_matches,
+    cron_next_run,
+    resolve_scheduler_timezone,
+)
+from src.control_plane.domain.models import BackupTargetRecord, JobRecord, JobStatus, SettingsRecord, WorkerRecord, utcnow
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
     InMemoryJobRepository,
@@ -43,6 +51,104 @@ class SchedulerDeploymentTests(unittest.TestCase):
         for expression in ("", "* * *", "* * * * * *", "*/0 * * * *", "60 * * * *", "* * * * 8", "* * 32 * *"):
             self.assertFalse(cron_matches(expression, now), expression)
 
+    def test_scheduler_uses_configured_local_timezone_for_eligibility(self):
+        service = self._service()
+        target = BackupTargetRecord(name="target", worker_id="worker-a", cron_expression="0 3 * * *")
+        service.target_repository.save(target)
+        scheduler = SchedulerService(
+            service,
+            timezone_name="America/Bogota",
+            now_fn=lambda: datetime(2024, 6, 3, 8, 0, tzinfo=timezone.utc),
+        )
+
+        scheduler._tick()
+
+        jobs = service.job_repository.list()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].trigger, "schedule")
+        self.assertEqual(scheduler.timezone_name, "America/Bogota")
+
+    def test_scheduler_preview_uses_target_then_global_cron_and_returns_timezone(self):
+        service = self._service()
+        service.settings_repository.save(SettingsRecord(global_cron_expression="0 3 * * *"))
+        target = BackupTargetRecord(name="target", worker_id="worker-a")
+        scheduler = SchedulerService(service, timezone_name=DEFAULT_SCHEDULER_TIMEZONE)
+        fixed_now = datetime(2024, 6, 3, 7, 0, tzinfo=timezone.utc)
+
+        global_preview = scheduler.preview(target=target, now=fixed_now)
+        self.assertEqual(global_preview["effective_cron_expression"], "0 3 * * *")
+        self.assertEqual(global_preview["cron_source"], "global")
+        self.assertEqual(global_preview["scheduler_timezone"], "America/Bogota")
+        self.assertEqual(global_preview["next_scheduled_at"], "2024-06-03T08:00:00Z")
+
+        cleared_global_preview = scheduler.preview(
+            cron_expression="",
+            settings=SettingsRecord(global_cron_expression="0 3 * * *"),
+        )
+        self.assertIsNone(cleared_global_preview["effective_cron_expression"])
+        self.assertEqual(cleared_global_preview["cron_source"], "manual")
+
+        new_target_preview = scheduler.preview(
+            cron_expression="0 4 * * *",
+            settings=SettingsRecord(global_cron_expression="0 3 * * *"),
+            target_context=True,
+            now=fixed_now,
+        )
+        self.assertEqual(new_target_preview["effective_cron_expression"], "0 4 * * *")
+        self.assertEqual(new_target_preview["cron_source"], "target")
+
+        empty_target_preview = scheduler.preview(
+            cron_expression="",
+            settings=SettingsRecord(global_cron_expression="0 3 * * *"),
+            target_context=True,
+            now=fixed_now,
+        )
+        self.assertEqual(empty_target_preview["effective_cron_expression"], "0 3 * * *")
+        self.assertEqual(empty_target_preview["cron_source"], "global")
+
+        target.cron_expression = "0 4 * * *"
+        target_preview = scheduler.preview(target=target, now=fixed_now)
+        self.assertEqual(target_preview["effective_cron_expression"], "0 4 * * *")
+        self.assertEqual(target_preview["cron_source"], "target")
+        self.assertEqual(target_preview["next_scheduled_at"], "2024-06-03T09:00:00Z")
+
+    def test_cron_next_run_handles_leap_day_beyond_one_year(self):
+        next_run = cron_next_run(
+            "0 0 29 2 *",
+            datetime(2024, 3, 1, 0, 0, tzinfo=timezone.utc),
+            ZoneInfo("America/Bogota"),
+        )
+
+        self.assertEqual(next_run, datetime(2028, 2, 29, 5, 0, tzinfo=timezone.utc))
+
+    def test_cron_next_run_skips_nonexistent_dst_wall_time(self):
+        next_run = cron_next_run(
+            "30 2 * * *",
+            datetime(2024, 3, 10, 6, 0, tzinfo=timezone.utc),
+            ZoneInfo("America/New_York"),
+        )
+
+        self.assertEqual(next_run, datetime(2024, 3, 11, 6, 30, tzinfo=timezone.utc))
+
+    def test_invalid_scheduler_timezone_fails_with_configuration_name(self):
+        with self.assertRaisesRegex(ValueError, "CONTROL_PLANE_TIMEZONE"):
+            resolve_scheduler_timezone("Not/ARealTimezone")
+
+        with patch.dict(os.environ, {"CONTROL_PLANE_TIMEZONE": "Not/ARealTimezone"}):
+            with patch("src.control_plane.main._build_service", return_value=object()):
+                from src.control_plane.main import build_application
+
+                with self.assertRaisesRegex(ValueError, "CONTROL_PLANE_TIMEZONE"):
+                    build_application()
+
+    def test_job_trigger_survives_sqlite_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteJobRepository(str(Path(directory) / "control-plane.db"))
+            for trigger in ("manual", "schedule", "automatic", "interactive"):
+                job = JobRecord(worker_id="worker-a", command="worker.self_check", trigger=trigger)
+                repository.save(job)
+                self.assertEqual(repository.get(job.id).trigger, trigger)
+
     def test_expired_in_progress_lease_fails_before_pending_claim(self):
         self._assert_expired_lease_failed(InMemoryJobRepository())
         with tempfile.TemporaryDirectory() as directory:
@@ -63,6 +169,8 @@ class SchedulerDeploymentTests(unittest.TestCase):
     def test_compose_and_ci_defaults(self):
         worker_compose = (ROOT / "deploy/worker/docker-compose.yml").read_text()
         ghcr_compose = (ROOT / "deploy/worker/docker-compose.ghcr.yml").read_text()
+        control_plane_compose = (ROOT / "deploy/control-plane/docker-compose.yml").read_text()
+        control_plane_ghcr_compose = (ROOT / "deploy/control-plane/docker-compose.ghcr.yml").read_text()
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("worker_state:/data", worker_compose)
         self.assertIn("worker_state:/data", ghcr_compose)
@@ -76,6 +184,9 @@ class SchedulerDeploymentTests(unittest.TestCase):
         self.assertIn("SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS: ${SNAPSHOT_EXPLORER_REDIS_TTL_SECONDS:-86400}", ghcr_compose)
         self.assertIn("BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup:latest}", ghcr_compose)
         self.assertNotIn("BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}", ghcr_compose)
+        self.assertIn("CONTROL_PLANE_TIMEZONE: ${CONTROL_PLANE_TIMEZONE:-America/Bogota}", control_plane_compose)
+        self.assertIn("CONTROL_PLANE_TIMEZONE: ${CONTROL_PLANE_TIMEZONE:-America/Bogota}", control_plane_ghcr_compose)
+        self.assertIn("tzdata", (ROOT / "Dockerfile").read_text())
         self.assertIn("pull_request:", workflow)
         self.assertIn("python-version: \"3.11\"", workflow)
         self.assertIn("python -m pip install -r requirements.txt", workflow)

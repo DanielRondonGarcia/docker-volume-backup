@@ -17,7 +17,11 @@ except ImportError:
 
 from src.control_plane.auth import AuthService, ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 from src.control_plane.application.services.control_plane_service import ControlPlaneService
-from src.control_plane.application.services.scheduler_service import SchedulerService
+from src.control_plane.application.services.scheduler_service import (
+    DEFAULT_SCHEDULER_TIMEZONE,
+    SCHEDULER_TIMEZONE_ENV,
+    SchedulerService,
+)
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
     InMemoryCacheRepository,
@@ -185,6 +189,18 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _control_plane_service(self) -> ControlPlaneService:
         return self.server.application.control_plane_service
 
+    def _scheduler(self) -> SchedulerService | None:
+        server = getattr(self, "server", None)
+        application = getattr(server, "application", None)
+        return getattr(application, "scheduler", None)
+
+    def _target_jsonable(self, target):
+        payload = _to_jsonable(target)
+        scheduler = self._scheduler()
+        if scheduler is not None:
+            payload.update(scheduler.preview(target=target))
+        return payload
+
     def _worker_auth(self) -> WorkerAuthState:
         return self._control_plane_service().worker_auth
 
@@ -256,7 +272,36 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 if not public_url:
                     public_url = os.environ.get("CONTROL_PLANE_PUBLIC_URL", "").strip()
                 tls_enabled = os.environ.get("CONTROL_PLANE_TLS_ENABLED", "").strip().lower() in ("1", "true", "yes")
-                return self._write_json(200, {"public_url": public_url, "tls_enabled": tls_enabled}, head_only=head_only)
+                scheduler = self._scheduler()
+                return self._write_json(
+                    200,
+                    {
+                        "public_url": public_url,
+                        "tls_enabled": tls_enabled,
+                        "scheduler_timezone": scheduler.timezone_name if scheduler else DEFAULT_SCHEDULER_TIMEZONE,
+                    },
+                    head_only=head_only,
+                )
+            if path == "/api/v1/scheduler/preview":
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                scheduler = self._scheduler()
+                if scheduler is None:
+                    return self._write_json(503, {"error": "scheduler not configured"}, head_only=head_only)
+                parsed = urlparse(self.path)
+                from urllib.parse import parse_qs
+                qs = parse_qs(parsed.query, keep_blank_values=True)
+                target_id = qs.get("target_id", [""])[0].strip() or None
+                target = self._control_plane_service().target_repository.get(target_id) if target_id else None
+                if target_id and target is None:
+                    return self._write_json(404, {"error": "target not found"}, head_only=head_only)
+                cron_expression = qs.get("cron_expression", [None])[0]
+                target_context = qs.get("target_context", [""])[0].strip().lower() in ("1", "true", "yes")
+                return self._write_json(
+                    200,
+                    scheduler.preview(target=target, cron_expression=cron_expression, target_context=target_context),
+                    head_only=head_only,
+                )
             if path == "/api/v1/auth/me":
                 session = self._current_session()
                 if not session:
@@ -323,7 +368,11 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
-                return self._write_json(200, {"items": _to_jsonable(self._control_plane_service().list_targets())}, head_only=head_only)
+                return self._write_json(
+                    200,
+                    {"items": [self._target_jsonable(target) for target in self._control_plane_service().list_targets()]},
+                    head_only=head_only,
+                )
             if path == "/api/v1/storage-profiles":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
@@ -344,7 +393,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 if not self._require_auth(ROLE_ADMIN, head_only=head_only, api_mode=True):
                     return
                 settings = self._control_plane_service().get_settings()
-                return self._write_json(200, _to_jsonable(settings or {}), head_only=head_only)
+                payload = _to_jsonable(settings or {})
+                scheduler = self._scheduler()
+                payload["scheduler_timezone"] = scheduler.timezone_name if scheduler else DEFAULT_SCHEDULER_TIMEZONE
+                return self._write_json(200, payload, head_only=head_only)
             if path == "/api/v1/settings/rclone-remote":
                 if not self._require_auth(ROLE_ADMIN, head_only=head_only, api_mode=True):
                     return
@@ -553,7 +605,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     labels=body.get("labels") or {},
                     cron_expression=body.get("cron_expression"),
                 )
-                return self._write_json(201, _to_jsonable(target))
+                return self._write_json(201, self._target_jsonable(target))
 
             if path == "/api/v1/storage-profiles":
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
@@ -852,7 +904,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     cron_expression=body.get("cron_expression"),
                     enabled=body.get("enabled"),
                 )
-                return self._write_json(200, _to_jsonable(target))
+                return self._write_json(200, self._target_jsonable(target))
             if path == "/api/v1/settings":
                 settings = self._control_plane_service().update_settings(
                     restic_repository_base=body.get("restic_repository_base"),
@@ -1044,7 +1096,12 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
 def build_application() -> ControlPlaneApplication:
     control_plane_service = _build_service()
     scheduler_interval = int(os.environ.get("SCHEDULER_INTERVAL_SECONDS", "60"))
-    scheduler = SchedulerService(control_plane_service, interval_seconds=scheduler_interval)
+    scheduler_timezone = os.environ.get(SCHEDULER_TIMEZONE_ENV, DEFAULT_SCHEDULER_TIMEZONE)
+    scheduler = SchedulerService(
+        control_plane_service,
+        interval_seconds=scheduler_interval,
+        timezone_name=scheduler_timezone,
+    )
     app = ControlPlaneApplication(
         auth_service=AuthService.from_runtime(),
         control_plane_service=control_plane_service,

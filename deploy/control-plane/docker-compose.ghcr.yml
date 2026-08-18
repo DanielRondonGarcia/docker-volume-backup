@@ -12,6 +12,7 @@ services:
       CONTROL_PLANE_KEY_FILE: /data/.control_plane.key
       CONTROL_PLANE_SESSION_KEY_FILE: /data/.control_plane.session.key
       CONTROL_PLANE_USERS_FILE: /data/.control_plane.users.json
+      CONTROL_PLANE_TIMEZONE: ${CONTROL_PLANE_TIMEZONE:-America/Bogota}
       CONTROL_PLANE_PUBLIC_URL: ${CONTROL_PLANE_PUBLIC_URL:-}
       CONTROL_PLANE_TLS_ENABLED: ${CONTROL_PLANE_TLS_ENABLED:-false}
     ports:

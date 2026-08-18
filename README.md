@@ -272,7 +272,13 @@ docker compose run --rm restore
 | `SCP_USER` | | Usuario SSH para SCP |
 | `SCP_DIRECTORY` | | Directorio remoto para SCP |
 | `GPG_PASSPHRASE` | | Cifra el backup con GPG |
-| `TZ` | `UTC` | Timezone para cron |
+| `TZ` | `UTC` | Timezone del runtime de backup; el scheduler del Control Plane usa `CONTROL_PLANE_TIMEZONE` |
+
+### Control Plane
+
+| Variable | Default | Descripcion |
+|---|---|---|
+| `CONTROL_PLANE_TIMEZONE` | `America/Bogota` | Zona IANA estable para evaluar cron y mostrar proximas ejecuciones. La UI nunca usa la zona horaria del navegador para el scheduler. |
 
 ### Restore
 

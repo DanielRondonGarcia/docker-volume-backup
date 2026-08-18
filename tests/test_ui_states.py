@@ -250,6 +250,61 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn('id="jobsRefreshNotice"', self.source)
         self.assertIn("notice.hidden = false;", self.source)
 
+    def test_cron_preview_uses_backend_effective_schedule_and_explicit_timezone(self):
+        for marker in (
+            "/api/v1/scheduler/preview",
+            "effective_cron_expression",
+            "cron_source",
+            "scheduler_timezone",
+            "next_scheduled_at",
+            "target_id",
+            "target_context",
+            "timeZone,",
+            "state.schedulerTimezone",
+        ):
+            self.assertIn(marker, self.source)
+        target_schedule = re.search(r"function renderTargetCronLabel\(target\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(target_schedule)
+        self.assertIn("targetCronExpression(target)", target_schedule.group(0))
+        self.assertIn("target.next_scheduled_at", target_schedule.group(0))
+        preview = re.search(r"async function updateCronPreview\(inputId, previewId, targetId, targetContext\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(preview)
+        self.assertIn("api/v1/scheduler/preview", preview.group(0))
+        self.assertNotIn("cronNextRun(expr)", preview.group(0))
+
+    def test_cron_preview_has_no_unreachable_browser_schedule_helpers(self):
+        for helper in (
+            "function parseCronExpression",
+            "function cronMatchesParts",
+            "function zonedCronParts",
+            "function cronNextRun",
+        ):
+            self.assertNotIn(helper, self.source)
+        self.assertIn("function cronDescribe", self.source)
+        self.assertIn("/api/v1/scheduler/preview", self.source)
+
+    def test_jobs_history_renders_and_filters_job_origin(self):
+        for marker in (
+            "jobTriggerInfo",
+            "fmtJobTrigger",
+            'manual: { cls:',
+            'schedule: { cls:',
+            'automatic: { cls:',
+            'interactive: { cls:',
+            "Desconocido",
+            'data-col="origin"',
+            'sortAttrs("origin")',
+            "j.trigger",
+            'Origen${sortIcon("origin")}',
+            'colspan="8"',
+        ):
+            self.assertIn(marker, self.source)
+        trigger_info = re.search(r"function jobTriggerInfo\(trigger\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(trigger_info)
+        trigger_renderer = re.search(r"function fmtJobTrigger\(trigger\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(trigger_renderer)
+        self.assertIn("escapeHtml", trigger_renderer.group(0))
+
 
 if __name__ == "__main__":
     unittest.main()
