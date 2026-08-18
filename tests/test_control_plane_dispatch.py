@@ -17,7 +17,6 @@ from src.control_plane.domain.models import (
     IndexStatusRecord,
     JobStatus,
     SecretRecord,
-    SettingsRecord,
     SnapshotRecord,
     StorageProfileRecord,
     WorkerRecord,
@@ -391,19 +390,25 @@ class StorageAboutDispatchTests(unittest.TestCase):
             worker.last_seen_at = None
             workers.save(worker)
         profiles = InMemoryStorageProfileRepository()
-        profiles.save(StorageProfileRecord(name="profile-a", backend_type="rclone", id="profile-a"))
         secrets = InMemorySecretRepository()
         codec = SecretCodec(Fernet.generate_key())
         settings_repository = InMemorySettingsRepository()
         if with_remote:
             secrets.save(SecretRecord(
                 name="rclone-conf",
-                scope="settings",
+                scope="storage_profile",
                 secret_type="file",
                 id="rclone-conf-secret",
                 ciphertext=codec.encrypt(self.RCLONE_CONF),
             ))
-            settings_repository.save(SettingsRecord(id="default", rclone_conf_secret_id="rclone-conf-secret"))
+            profiles.save(StorageProfileRecord(
+                name="profile-a",
+                backend_type="rclone",
+                id="profile-a",
+                file_secret_refs={"/run/secrets/rclone.conf": "rclone-conf-secret"},
+            ))
+        else:
+            profiles.save(StorageProfileRecord(name="profile-a", backend_type="rclone", id="profile-a"))
         return ControlPlaneService(
             worker_repository=workers,
             inventory_repository=InMemoryInventoryRepository(),
@@ -450,6 +455,95 @@ class StorageAboutDispatchTests(unittest.TestCase):
             unconfigured.storage_about("profile-a"),
             {"profile_id": "profile-a", "state": "not-configured", "metrics": None, "error": None, "job_id": None},
         )
+
+    def test_storage_about_uses_selected_profile_config_over_conflicting_global_settings(self):
+        service = self.make_service(with_remote=False)
+        profile_configs = {
+            "profile-a": (
+                "[profile-a-remote]\n"
+                "type = s3\n"
+                "access_key_id = profile-a-access\n"
+                "secret_access_key = profile-a-secret\n"
+            ),
+            "profile-b": (
+                "[profile-b-remote]\n"
+                "type = s3\n"
+                "access_key_id = profile-b-access\n"
+                "secret_access_key = profile-b-secret\n"
+            ),
+        }
+        profile_a_secret = service.create_secret(
+            name="profile-a-rclone.conf",
+            scope="storage_profile",
+            secret_type="file",
+            plaintext=profile_configs["profile-a"],
+        )
+        profile_a = service.update_storage_profile(
+            "profile-a",
+            file_secret_refs={"/run/secrets/rclone.conf": profile_a_secret.id},
+        )
+        profile_b_secret = service.create_secret(
+            name="profile-b-rclone.conf",
+            scope="storage_profile",
+            secret_type="file",
+            plaintext=profile_configs["profile-b"],
+        )
+        profile_b = service.create_storage_profile(
+            name="profile-b",
+            backend_type="rclone",
+            file_secret_refs={"/run/secrets/rclone.conf": profile_b_secret.id},
+        )
+        global_config = (
+            "[global-settings-remote]\n"
+            "type = s3\n"
+            "access_key_id = global-access\n"
+            "secret_access_key = global-secret\n"
+        )
+        global_secret = service.create_secret(
+            name="global-rclone.conf",
+            scope="settings",
+            secret_type="file",
+            plaintext=global_config,
+        )
+        service.update_settings(rclone_conf_secret_id=global_secret.id)
+
+        for profile in (profile_a, profile_b):
+            with self.completed(service, "available", {"total": 1, "used": 0, "free": 1, "trashed": 0}):
+                response = service.storage_about(profile.id)
+            self.assertEqual(response["state"], "available")
+
+        expected = {
+            profile_a.id: ("profile-a-remote:", profile_configs["profile-a"]),
+            profile_b.id: ("profile-b-remote:", profile_configs["profile-b"]),
+        }
+        about_jobs = [job for job in service.job_repository.list() if job.command == "storage.about"]
+        self.assertEqual(len(about_jobs), 2)
+        for job in about_jobs:
+            remote, content = expected[job.payload["profile_id"]]
+            self.assertEqual(job.payload["remote"], remote)
+            self.assertEqual(job.payload["environment"]["RCLONE_CONF_CONTENT"], content)
+            self.assertEqual(job.payload["resolved_files"][0]["content"], content)
+            self.assertNotEqual(job.payload["remote"], "global-settings-remote:")
+            self.assertNotEqual(job.payload["environment"]["RCLONE_CONF_CONTENT"], global_config)
+
+    def test_storage_about_unconfigured_profiles_do_not_dispatch_jobs(self):
+        service = self.make_service(with_remote=False)
+        local_profile = service.create_storage_profile(name="local", backend_type="local")
+
+        for profile in (service.storage_profile_repository.get("profile-a"), local_profile):
+            with self.subTest(profile=profile.id):
+                self.assertEqual(
+                    service.storage_about(profile.id),
+                    {
+                        "profile_id": profile.id,
+                        "state": "not-configured",
+                        "metrics": None,
+                        "error": None,
+                        "job_id": None,
+                    },
+                )
+
+        self.assertFalse(any(job.command == "storage.about" for job in service.job_repository.list()))
 
     def test_storage_about_route_401_without_viewer_role(self):
         handler = object.__new__(ControlPlaneRequestHandler)

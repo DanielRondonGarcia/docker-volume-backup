@@ -550,17 +550,16 @@ class ControlPlaneService:
         }
 
     def storage_about(self, profile_id: str) -> Dict[str, Any]:
-        """Query the configured global rclone remote about a storage profile.
+        """Query the selected storage profile's configured rclone remote.
 
-        Resolves the global Settings rclone.conf secret, dispatches one durable
+        Resolves the profile-scoped rclone.conf secret, dispatches one durable
         ``storage.about`` job to the first online worker in repository order,
         waits for its completion, and returns the truthful per-card contract
         ``{profile_id, state, metrics, error, job_id}``. Secrets, the remote
         name, and the job payload are never serialized into the response.
         """
         profile = self._require_storage_profile(profile_id)
-        settings = self.settings_repository.get() if self.settings_repository else None
-        remote = self._global_rclone_remote(settings)
+        remote = self._profile_rclone_remote(profile)
         if remote is None:
             return {
                 "profile_id": profile.id,
@@ -605,6 +604,27 @@ class ControlPlaneService:
         if not remote_name:
             return None
         return {"remote_name": remote_name, "rclone_content": rclone_content}
+
+    def _profile_rclone_remote(self, profile: StorageProfileRecord) -> Optional[Dict[str, str]]:
+        """Resolve a profile's rclone file secret into remote + content."""
+        if (profile.backend_type or "").strip().lower() != "rclone":
+            return None
+        resolved_files = self._resolve_file_secret_refs(profile.file_secret_refs or {})
+        rclone_file = next(
+            (
+                file_spec
+                for file_spec in resolved_files
+                if "rclone" in file_spec.get("secret_name", "").lower()
+                or file_spec.get("container_path", "").endswith("rclone.conf")
+            ),
+            None,
+        )
+        if not rclone_file:
+            return None
+        remote_name = self._extract_rclone_remote_name(rclone_file["secret_id"])
+        if not remote_name:
+            return None
+        return {"remote_name": remote_name, "rclone_content": rclone_file["content"]}
 
     def _storage_about_contract(self, profile_id: str, job_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
         status = result.get("status")
@@ -819,7 +839,7 @@ class ControlPlaneService:
         remote_name: str,
         rclone_content: str,
     ) -> Dict[str, Any]:
-        """Build the durable ``storage.about`` payload for the global Settings remote.
+        """Build the durable ``storage.about`` payload for a profile's remote.
 
         The payload carries only the validated remote name, the rclone.conf
         secret content needed by the worker runtime, and the runtime image.

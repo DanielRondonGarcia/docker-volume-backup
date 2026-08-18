@@ -387,6 +387,29 @@ class WorkerReadPathTests(unittest.TestCase):
         self.assertNotIn("metrics", result.result_summary)
         self.assertNotIn("error", result.result_summary)
 
+    def test_storage_about_exact_doesnt_support_contraction_is_about_unsupported(self):
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": False,
+            "status_code": 1,
+            "logs": "S3 root doesn't support about",
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {"command": "storage.about", "payload": {"remote": "rem:"}}
+        )
+
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertEqual(result.result_summary["state"], "about-unsupported")
+        self.assertNotIn("metrics", result.result_summary)
+        self.assertNotIn("error", result.result_summary)
+
     def test_storage_about_transient_failure_is_retryable_and_redacts_secrets(self):
         runtime = Mock()
         runtime.run_runtime_job.return_value = {

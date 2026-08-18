@@ -459,6 +459,7 @@ class WorkerAgentService:
                 "not supported by this backend",
                 "about is not supported",
                 "does not support about",
+                "doesn't support about",
                 "about: not supported",
             )
         )
