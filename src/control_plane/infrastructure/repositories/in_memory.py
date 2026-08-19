@@ -2,7 +2,7 @@ import hmac
 import secrets
 from datetime import timedelta, timezone
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.control_plane.application.ports.ports import (
     CacheRepository,
@@ -130,6 +130,9 @@ class InMemoryTargetRepository(TargetRepository):
 
 
 class InMemoryJobRepository(JobRepository):
+    MAX_LOG_LINES = 1000
+    MAX_LOG_CHARS = 512 * 1024
+
     def __init__(self):
         self._items: Dict[str, JobRecord] = {}
         self._lock = Lock()
@@ -204,6 +207,51 @@ class InMemoryJobRepository(JobRepository):
             ):
                 return None
             job.lease_expires_at = now + timedelta(seconds=lease_duration_seconds)
+            job.updated_at = now
+            return job
+
+    def update_progress(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        sequence: int,
+        progress: Dict[str, Any],
+        log_lines: List[str],
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobRecord]:
+        with self._lock:
+            now = utcnow()
+            job = self._items.get(job_id)
+            lease_expires_at = job.lease_expires_at if job else None
+            if lease_expires_at and lease_expires_at.tzinfo:
+                lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if (
+                job is None
+                or job.status != JobStatus.IN_PROGRESS
+                or job.owner_worker_id != worker_id
+                or not hmac.compare_digest(job.lease_token or "", lease_token or "")
+                or not lease_expires_at
+                or lease_expires_at <= now
+            ):
+                return None
+
+            current_summary = dict(job.result_summary or {})
+            try:
+                current_sequence = int(current_summary.get("progress_sequence", 0) or 0)
+            except (TypeError, ValueError):
+                current_sequence = 0
+            if sequence <= current_sequence:
+                return job
+
+            if isinstance(result_summary, dict):
+                current_summary.update(result_summary)
+            current_summary["progress"] = dict(progress)
+            current_summary["progress_sequence"] = sequence
+            job.result_summary = current_summary
+            job.log_lines = (list(job.log_lines or []) + list(log_lines or []))[-self.MAX_LOG_LINES :]
+            while job.log_lines and sum(len(line) for line in job.log_lines if isinstance(line, str)) > self.MAX_LOG_CHARS:
+                job.log_lines.pop(0)
             job.updated_at = now
             return job
 

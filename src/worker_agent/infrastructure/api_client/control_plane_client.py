@@ -180,6 +180,25 @@ class ControlPlaneClient:
             },
         )
 
+    def update_job_progress(
+        self,
+        worker_id: str,
+        job_id: str,
+        sequence: int,
+        progress: Dict[str, Any],
+        log_lines: List[str],
+        lease_token: str | None = None,
+    ) -> Dict[str, Any]:
+        return self._post(
+            f"/api/v1/workers/{worker_id}/jobs/{job_id}/progress",
+            {
+                "sequence": sequence,
+                "progress": progress,
+                "log_lines": log_lines,
+                "lease_token": lease_token,
+            },
+        )
+
     def renew_job_lease(self, worker_id: str, job_id: str, lease_token: str) -> Dict[str, Any]:
         return self._post(
             f"/api/v1/workers/{worker_id}/jobs/{job_id}/renew-lease",

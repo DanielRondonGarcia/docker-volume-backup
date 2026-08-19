@@ -1,9 +1,10 @@
+import hmac
 import json
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.control_plane.application.ports.ports import (
     CacheRepository,
@@ -510,6 +511,9 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
 
 
 class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
+    MAX_LOG_LINES = 1000
+    MAX_LOG_CHARS = 512 * 1024
+
     def save(self, job: JobRecord) -> JobRecord:
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -669,6 +673,85 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                 renewed = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
                 connection.commit()
                 return self._row_to_job(renewed) if renewed else None
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
+    def update_progress(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        sequence: int,
+        progress: Dict[str, Any],
+        log_lines: List[str],
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobRecord]:
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                now = utcnow()
+                row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                lease_expires_at = _dt(row["lease_expires_at"]) if row else None
+                if lease_expires_at and lease_expires_at.tzinfo:
+                    lease_expires_at = lease_expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+                if (
+                    row is None
+                    or JobStatus.normalize(row["status"]) != JobStatus.IN_PROGRESS
+                    or row["owner_worker_id"] != worker_id
+                    or not hmac.compare_digest(row["lease_token"] or "", lease_token or "")
+                    or not lease_expires_at
+                    or lease_expires_at <= now
+                ):
+                    connection.commit()
+                    return None
+
+                current_summary = _json_load(row["result_summary_json"], None)
+                current_summary = dict(current_summary) if isinstance(current_summary, dict) else {}
+                try:
+                    current_sequence = int(current_summary.get("progress_sequence", 0) or 0)
+                except (TypeError, ValueError):
+                    current_sequence = 0
+                if sequence <= current_sequence:
+                    connection.commit()
+                    return self._row_to_job(row)
+
+                if isinstance(result_summary, dict):
+                    current_summary.update(result_summary)
+                current_summary["progress"] = dict(progress)
+                current_summary["progress_sequence"] = sequence
+                current_logs = _json_load(row["log_lines_json"], [])
+                current_logs = list(current_logs) if isinstance(current_logs, list) else []
+                current_logs = (current_logs + list(log_lines or []))[-self.MAX_LOG_LINES :]
+                while current_logs and sum(len(line) for line in current_logs if isinstance(line, str)) > self.MAX_LOG_CHARS:
+                    current_logs.pop(0)
+                updated = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET result_summary_json = ?, log_lines_json = ?, updated_at = ?
+                    WHERE id = ? AND status = ? AND owner_worker_id = ?
+                      AND lease_token = ? AND lease_expires_at > ?
+                    """,
+                    (
+                        json.dumps(current_summary),
+                        json.dumps(current_logs),
+                        now.isoformat(),
+                        job_id,
+                        JobStatus.IN_PROGRESS,
+                        worker_id,
+                        lease_token,
+                        now.isoformat(),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    connection.commit()
+                    return None
+                saved = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                connection.commit()
+                return self._row_to_job(saved) if saved else None
             except Exception:
                 connection.rollback()
                 raise

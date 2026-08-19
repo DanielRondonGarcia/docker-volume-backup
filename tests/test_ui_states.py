@@ -316,6 +316,35 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn("await refreshAll();", self.source)
         self.assertIn('["succeeded", "failed", "canceled", "cancelled"]', self.source)
 
+    def test_job_logs_render_progress_storage_context_and_normalize_in_progress(self):
+        for marker in (
+            "function normalizeJobStatus(status)",
+            'if (value === "running") return "in_progress"',
+            "function renderJobProgress(job)",
+            "role=\"progressbar\"",
+            "job-progress-fill indeterminate",
+            "function renderJobStorageContext(job)",
+            "function jobPhaseLabel(phase)",
+            'initializing: "Inicializando"',
+            'finalizing: "Finalizando"',
+            'phaseLabel ? `Estado: ${phaseLabel}`',
+            "Storage no configurado",
+            "Repositorio no configurado",
+            "j.updated_at",
+            "j.progress",
+            "renderJobProgress(job)",
+            "renderJobStorageContext(job)",
+            "function pollJobLogs(jobId)",
+            "apiGet(`/api/v1/jobs/${jobId}`)",
+            "function pollAccordionJobLogs(jobId)",
+            'apiGet(\"/api/v1/jobs/\" + jobId)',
+            "setInterval(fetchJob, 2000)",
+            "setInterval(fetchJobLogs, 3000)",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertIn(".job-progress-fill.indeterminate", self.css)
+        self.assertIn("prefers-reduced-motion", self.css)
+
     def test_log_polling_surfaces_bounded_fetch_failures_in_both_panels(self):
         for marker in (
             "LOG_POLL_MAX_FAILURES = 5",
@@ -424,6 +453,71 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         trigger_renderer = re.search(r"function fmtJobTrigger\(trigger\) \{.*?\n    \}", self.source, re.S)
         self.assertIsNotNone(trigger_renderer)
         self.assertIn("escapeHtml", trigger_renderer.group(0))
+
+    def test_open_job_logs_use_sse_with_bounded_polling_fallback_for_both_panels(self):
+        for marker in (
+            "function connectJobEvents(jobId",
+            "new EventSource(`/api/v1/jobs/${encodeURIComponent(jobId)}/events`",
+            "source.onmessage",
+            "JSON.parse(event.data)",
+            "source.onerror",
+            "source.close()",
+            "function mergeJobProjection(job)",
+            "data-job-live-state",
+            "En vivo",
+            "Actualizando por polling",
+            "function startTargetJobEvents(jobId)",
+            "function startAccordionJobEvents(jobId)",
+            "pollJobLogs(jobId)",
+            "pollAccordionJobLogs(jobId)",
+            "stopTargetJobEvents();",
+            "stopAccordionJobEvents();",
+            "if (isTerminalJobStatus(job.status))",
+        ):
+            self.assertIn(marker, self.source)
+
+        target = re.search(r"function startTargetJobEvents\(jobId\) \{.*?\n    \}\n\n    function pollJobLogs", self.source, re.S)
+        self.assertIsNotNone(target)
+        self.assertIn("renderJobLogs(job)", target.group(0))
+        self.assertIn("void refreshAll();", target.group(0))
+
+        accordion = re.search(r"function startAccordionJobEvents\(jobId\) \{.*?\n    \}\n\n    function toggleJobLogAccordion", self.source, re.S)
+        self.assertIsNotNone(accordion)
+        self.assertIn("renderJobLogsInto(job, container)", accordion.group(0))
+        self.assertIn("mergeJobProjection(job)", accordion.group(0))
+
+    def test_job_live_state_uses_accessible_dot_without_visible_status_text(self):
+        indicators = re.findall(
+            r'<span class="job-live-indicator"[^>]*data-job-live-state[^>]*></span>',
+            self.source,
+        )
+        self.assertEqual(len(indicators), 2)
+        for indicator in indicators:
+            self.assertIn('data-state="connecting"', indicator)
+            self.assertIn('role="status"', indicator)
+            self.assertIn('aria-live="polite"', indicator)
+            self.assertIn('aria-label="Conectando…"', indicator)
+            self.assertIn('title="Conectando…"', indicator)
+
+        live_state = re.search(r"function setJobLiveState\(root, text, stateName\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(live_state)
+        self.assertNotIn("textContent", live_state.group(0))
+        for marker in ('status.dataset.state = stateName || "idle"', 'status.setAttribute("aria-label", label)', "status.title = label"):
+            self.assertIn(marker, live_state.group(0))
+        for marker in (
+            ".job-live-indicator",
+            '.job-live-indicator[data-state="connecting"]',
+            '.job-live-indicator[data-state="fallback"]',
+            '.job-live-indicator[data-state="live"]',
+            '.job-live-indicator[data-state="terminal"]',
+            '.job-live-indicator[data-state="error"]',
+            "@keyframes job-live-pulse",
+            "prefers-reduced-motion",
+            "width: 8px",
+            "height: 8px",
+        ):
+            self.assertIn(marker, self.css)
+        self.assertNotIn('data-job-live-state role="status" aria-live="polite">Conectando…</span>', self.source)
 
 
 class StorageCardsUiStateTests(unittest.TestCase):

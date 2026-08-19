@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import queue
 import ssl
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
@@ -22,6 +23,7 @@ from src.control_plane.application.services.scheduler_service import (
     SCHEDULER_TIMEZONE_ENV,
     SchedulerService,
 )
+from src.control_plane.domain.models import JobStatus
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
     InMemoryCacheRepository,
@@ -57,6 +59,7 @@ from src.control_plane.infrastructure.security.worker_auth import WorkerAuthStat
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 UI_ROOT = Path(__file__).resolve().parent / "ui"
+JOB_EVENT_HEARTBEAT_SECONDS = 15
 
 
 def _to_jsonable(value):
@@ -377,16 +380,12 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 limit_str = qs.get("limit", [None])[0]
                 offset_str = qs.get("offset", ["0"])[0]
-                include_logs_str = qs.get("include_logs", ["false"])[0]
-                include_payload_str = qs.get("include_payload", ["false"])[0]
                 try:
                     limit = int(limit_str) if limit_str else None
                     offset = int(offset_str) if offset_str else 0
                 except ValueError:
                     limit, offset = None, 0
-                include_logs = include_logs_str.lower() in ("true", "1", "yes")
-                include_payload = include_payload_str.lower() in ("true", "1", "yes")
-                jobs, total = self._control_plane_service().list_jobs(limit=limit, offset=offset, include_logs=include_logs, include_payload=include_payload)
+                jobs, total = self._control_plane_service().list_job_views(limit=limit, offset=offset)
                 return self._write_json(200, {"items": _to_jsonable(jobs), "total": total, "limit": limit, "offset": offset}, head_only=head_only)
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
@@ -449,13 +448,15 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
             parts = self._path_parts(path)
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "jobs"] and parts[4] == "events" and not head_only:
+                return self._stream_job_events(parts[3])
             if len(parts) == 4 and parts[:3] == ["api", "v1", "jobs"]:
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
                 job = self._control_plane_service().get_job(parts[3])
                 if job is None:
                     return self._write_json(404, {"error": "job not found"}, head_only=head_only)
-                return self._write_json(200, _to_jsonable(job), head_only=head_only)
+                return self._write_json(200, _to_jsonable(self._control_plane_service().get_job_view(parts[3])), head_only=head_only)
             if len(parts) == 5 and parts[:3] == ["api", "v1", "workers"] and parts[4] == "inventory":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
@@ -766,7 +767,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     target_id=body.get("target_id"),
                     trigger=body.get("trigger") or "manual",
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4] == "jobs" and parts[5] == "fetch":
                 if not self._require_worker_identity(parts[3]):
@@ -824,6 +825,24 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 )
                 return self._write_json(200, _to_jsonable(job))
 
+            if (
+                len(parts) == 7
+                and parts[:3] == ["api", "v1", "workers"]
+                and parts[4] == "jobs"
+                and parts[6] == "progress"
+            ):
+                if not self._require_worker_identity(parts[3]):
+                    return
+                job = self._control_plane_service().update_job_progress(
+                    worker_id=parts[3],
+                    job_id=parts[5],
+                    sequence=body.get("sequence"),
+                    progress=body.get("progress"),
+                    log_lines=body.get("log_lines"),
+                    lease_token=body.get("lease_token"),
+                )
+                return self._write_json(200, _to_jsonable(job))
+
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "backup":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
                     return
@@ -832,7 +851,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     requested_by=body.get("requested_by") or "api",
                     backup_mode=body.get("backup_mode"),
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 5 and parts[:3] == ["api", "v1", "jobs"] and parts[4] == "cancel":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
@@ -841,7 +860,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     job = self._control_plane_service().cancel_job(parts[3])
                 except ValueError as exc:
                     return self._write_json(409, {"error": str(exc)})
-                return self._write_json(200, _to_jsonable(job))
+                return self._write_json(200, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "snapshots-sync":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
@@ -850,7 +869,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     parts[3],
                     requested_by=body.get("requested_by") or "api",
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "snapshot-ls":
                 if not self._require_auth(ROLE_VIEWER, api_mode=True):
@@ -879,7 +898,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     parts[3],
                     requested_by=body.get("requested_by") or "api",
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "retention-run":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
@@ -888,7 +907,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     parts[3],
                     requested_by=body.get("requested_by") or "api",
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             if len(parts) == 6 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "restore":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
@@ -905,7 +924,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     layout=body.get("layout"),
                     snapshot_id=body.get("snapshot_id"),
                 )
-                return self._write_json(202, _to_jsonable(job))
+                return self._write_json(202, self._control_plane_service().public_job_view(job))
 
             return self._write_json(404, {"error": "not found"})
         except KeyError as exc:
@@ -1047,6 +1066,71 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
+
+    @staticmethod
+    def _is_terminal_job_view(view) -> bool:
+        return JobStatus.normalize((view or {}).get("status")) in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELED,
+        }
+
+    def _write_sse_event(self, view) -> None:
+        body = json.dumps(_to_jsonable(view), ensure_ascii=False, separators=(",", ":"))
+        self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _write_sse_comment(self, value: str = "heartbeat") -> None:
+        self.wfile.write(f": {value}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_job_events(self, job_id: str):
+        if not self._require_auth(ROLE_VIEWER, api_mode=True):
+            return
+        service = self._control_plane_service()
+        initial_view = service.get_job_view(job_id)
+        if initial_view is None:
+            return self._write_json(404, {"error": "job not found"})
+
+        subscription = service.job_event_broker.subscribe(job_id)
+        try:
+            view = service.get_job_view(job_id) or initial_view
+            if view is None:
+                return self._write_json(404, {"error": "job not found"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self._write_sse_event(view)
+            last_updated_at = view.get("updated_at")
+            if self._is_terminal_job_view(view):
+                return
+
+            while True:
+                try:
+                    event = subscription.get(timeout=JOB_EVENT_HEARTBEAT_SECONDS)
+                except queue.Empty:
+                    current_view = service.get_job_view(job_id)
+                    if current_view is None:
+                        return
+                    if current_view.get("updated_at") != last_updated_at or self._is_terminal_job_view(current_view):
+                        self._write_sse_event(current_view)
+                        last_updated_at = current_view.get("updated_at")
+                        if self._is_terminal_job_view(current_view):
+                            return
+                    self._write_sse_comment()
+                    continue
+
+                self._write_sse_event(event)
+                last_updated_at = event.get("updated_at")
+                if self._is_terminal_job_view(event):
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            logger.debug("SSE client disconnected for job %s", job_id)
+        finally:
+            subscription.close()
 
     def _write_file(self, file_path: Path, content_type: str, head_only: bool = False):
         if not file_path.exists():

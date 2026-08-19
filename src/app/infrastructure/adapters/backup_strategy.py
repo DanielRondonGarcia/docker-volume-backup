@@ -5,8 +5,10 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, Optional
 from src.app.domain.models import BackupConfig, BackupResult, RestoreConfig, RestoreResult
 from src.app.application.ports.ports import BackupStrategy, RestoreStrategy
 
@@ -240,7 +242,80 @@ class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
-    def perform_backup(self, config: BackupConfig) -> BackupResult:
+    @staticmethod
+    def _emit_process_line(line: Any, output_stream, callback: Optional[Callable[[str], None]]) -> str:
+        text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else str(line or "")
+        if callback is not None:
+            try:
+                callback(text)
+            except Exception:
+                logger.debug("Restic output callback failed", exc_info=True)
+        try:
+            output_stream.write(text)
+            output_stream.flush()
+        except Exception:
+            pass
+        return text
+
+    def _run_incremental_backup(
+        self,
+        command: list[str],
+        env: dict[str, str],
+        output_callback: Optional[Callable[[str], None]] = None,
+    ) -> tuple[str, str, int]:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def consume(stream, lines: list[str], output_stream) -> None:
+            if stream is None:
+                return
+            readline = getattr(stream, "readline", None)
+            if callable(readline):
+                while True:
+                    raw_line = readline()
+                    if raw_line in ("", b""):
+                        break
+                    text = self._emit_process_line(raw_line, output_stream, output_callback)
+                    lines.append(text)
+                return
+            else:
+                iterator = iter(stream)
+            for raw_line in iterator:
+                text = self._emit_process_line(raw_line, output_stream, output_callback)
+                lines.append(text)
+
+        stdout_thread = threading.Thread(
+            target=consume,
+            args=(getattr(process, "stdout", None), stdout_lines, sys.stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=consume,
+            args=(getattr(process, "stderr", None), stderr_lines, sys.stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        return_code = process.wait()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        if not isinstance(return_code, int):
+            return_code = getattr(process, "returncode", 1)
+        return "".join(stdout_lines), "".join(stderr_lines), int(return_code or 0)
+
+    def perform_backup(
+        self,
+        config: BackupConfig,
+        output_callback: Optional[Callable[[str], None]] = None,
+    ) -> BackupResult:
         timestamp = datetime.now()
         env = os.environ.copy()
         if config.restic_repository:
@@ -271,19 +346,21 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
                     raise e
 
             cmd = ["restic", "backup", "--json"] + sources
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
-            
-            # Parse last line of JSON output for summary
+            stdout, stderr, return_code = self._run_incremental_backup(cmd, env, output_callback)
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, cmd, output=stdout, stderr=stderr)
+
+            # Parse streamed JSON output for the final summary.
             # Restic outputs multiple JSON objects, one per line.
             # The last one usually has summary.
-            lines = result.stdout.strip().split('\n')
+            lines = stdout.strip().split("\n")
             summary = {}
             for line in lines:
                 try:
                     data = json.loads(line)
                     if data.get("message_type") == "summary":
                         summary = data
-                except:
+                except (TypeError, ValueError):
                     pass
             
             size = summary.get("data_added", 0)
@@ -312,13 +389,13 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
                 artifact_path=None
             )
         except subprocess.CalledProcessError as e:
-            logger.error(f"Restic backup failed: {e.stderr}")
+            logger.error(f"Restic backup failed: {e.stderr or e.output or e}")
             return BackupResult(
                 timestamp=timestamp,
                 duration=0,
                 size=0,
                 success=False,
-                error=f"Restic failed: {e.stderr}"
+                error=f"Restic failed: {e.stderr or e.output or e}"
             )
         except Exception as e:
             logger.error(f"Restic backup error: {e}")

@@ -6,8 +6,9 @@ import posixpath
 import re
 import shutil
 import tempfile
+import threading
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import logging
 
@@ -734,6 +735,149 @@ class DockerRuntimeAdapter:
                 raise
             return result, False
 
+    @staticmethod
+    def _iter_output_chunks(stream: Any):
+        if isinstance(stream, (bytes, str)):
+            yield stream
+            return
+        try:
+            iterator = iter(stream)
+        except TypeError:
+            if stream is not None:
+                yield stream
+            return
+        for chunk in iterator:
+            yield chunk
+
+    def _start_log_stream(
+        self,
+        container: Any,
+        secrets: set[str],
+        limit: int,
+        output_callback: Callable[[str], None] | None,
+    ) -> tuple[Dict[str, Any], threading.Thread]:
+        state: Dict[str, Any] = {
+            "started": False,
+            "exceeded": False,
+            "error": None,
+            "logs": "",
+            "stream": None,
+        }
+
+        def consume() -> None:
+            pending = ""
+            safe_parts: List[str] = []
+            raw_size = 0
+            max_secret_tail = max((len(secret) - 1 for secret in secrets if secret), default=0)
+
+            def safe_cutoff(value: str) -> int:
+                hold = 0
+                for secret in secrets:
+                    if not secret:
+                        continue
+                    maximum_overlap = min(len(secret) - 1, max_secret_tail, len(value))
+                    for overlap in range(maximum_overlap, 0, -1):
+                        if value.endswith(secret[:overlap]):
+                            hold = max(hold, overlap)
+                            break
+                cutoff = len(value) - hold
+
+                # A complete secret may overlap the suffix held for another
+                # secret. Keep it whole so _redact_text can remove it atomically.
+                while True:
+                    crossing_end = cutoff
+                    for secret in secrets:
+                        if not secret:
+                            continue
+                        start = value.find(secret)
+                        while start >= 0:
+                            end = start + len(secret)
+                            if start < cutoff < end:
+                                crossing_end = max(crossing_end, end)
+                            start = value.find(secret, start + 1)
+                    if crossing_end == cutoff:
+                        return max(0, cutoff)
+                    cutoff = crossing_end
+
+            try:
+                stream = container.logs(stdout=True, stderr=True, timestamps=False, stream=True, follow=True)
+                state["stream"] = stream
+                state["started"] = True
+                for chunk in self._iter_output_chunks(stream):
+                    raw = chunk if isinstance(chunk, bytes) else str(chunk or "").encode("utf-8", errors="replace")
+                    if raw_size >= limit:
+                        state["exceeded"] = True
+                        break
+                    remaining = limit - raw_size
+                    bounded = raw[:remaining]
+                    raw_size += len(bounded)
+                    text = bounded.decode("utf-8", errors="replace")
+                    pending += text
+                    cutoff = safe_cutoff(pending)
+                    if cutoff:
+                        emit = pending[:cutoff]
+                        pending = pending[cutoff:]
+                        safe = self._redact_text(emit, secrets)
+                        safe_parts.append(safe)
+                        if output_callback and safe:
+                            try:
+                                output_callback(safe)
+                            except Exception:
+                                logger.debug("Runtime output callback failed", exc_info=True)
+                    if len(bounded) < len(raw):
+                        state["exceeded"] = True
+                        break
+                safe = self._redact_text(pending, secrets)
+                safe_parts.append(safe)
+                if output_callback and safe:
+                    try:
+                        output_callback(safe)
+                    except Exception:
+                        logger.debug("Runtime output callback failed", exc_info=True)
+                state["logs"] = "".join(safe_parts)
+            except Exception as exc:
+                state["error"] = exc
+                state["logs"] = "".join(safe_parts) + self._redact_text(pending, secrets)
+
+        thread = threading.Thread(target=consume, daemon=True, name="runtime-log-stream")
+        thread.start()
+        return state, thread
+
+    @staticmethod
+    def _finish_log_stream(state: Optional[Dict[str, Any]], thread: Optional[threading.Thread]) -> None:
+        if thread is None:
+            return
+        thread.join(timeout=2)
+        if thread.is_alive():
+            stream = state.get("stream") if isinstance(state, dict) else None
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            thread.join(timeout=0.5)
+
+    def _fallback_container_logs(
+        self,
+        container: Any,
+        secrets: set[str],
+        limit: int,
+        output_callback: Callable[[str], None] | None,
+    ) -> tuple[str, bool]:
+        try:
+            raw_logs = container.logs(stdout=True, stderr=True, timestamps=False)
+            bounded, exceeded = self._bounded_bytes(raw_logs, limit)
+            combined = self._redact_text(bounded, secrets)
+            if output_callback and combined:
+                try:
+                    output_callback(combined)
+                except Exception:
+                    logger.debug("Runtime output callback failed", exc_info=True)
+            return combined, exceeded
+        except Exception:
+            return "", False
+
     def _prepare_runtime(self, payload: Dict[str, Any], binary: bool):
         environment = dict(payload.get("environment") or {})
         volumes = self._validate_runtime_volumes(payload.get("volumes") or {})
@@ -1067,6 +1211,7 @@ class DockerRuntimeAdapter:
         image: str,
         payload: Dict[str, Any],
         cancel_check: Callable[[], bool] | None = None,
+        output_callback: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
         if self.client is None:
             return {"success": False, "error": "docker unavailable"}
@@ -1074,6 +1219,8 @@ class DockerRuntimeAdapter:
         temp_dirs = None
         container = None
         container_exited = False
+        stream_state = None
+        stream_thread = None
         try:
             environment, volumes, command, network_mode, timeout, temp_dirs = self._prepare_runtime(payload, binary=False)
             if self._callback_is_true(cancel_check):
@@ -1089,24 +1236,45 @@ class DockerRuntimeAdapter:
                 remove=False,
                 labels=self._runtime_container_labels(payload),
             )
+            output_limit = self._bounded_limit(
+                payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES
+            )
+            stream_state, stream_thread = self._start_log_stream(
+                container,
+                secrets,
+                output_limit,
+                output_callback,
+            )
             try:
                 result, canceled = self._wait_for_container(container, timeout, cancel_check)
             except Exception as exc:
                 if not self._is_timeout_error(exc):
                     raise
+                self._finish_log_stream(stream_state, stream_thread)
                 return self._failure_result(f"runtime timed out after {timeout:g} seconds", False, secrets, 124)
             container_exited = not canceled
             if canceled:
+                self._finish_log_stream(stream_state, stream_thread)
                 return self._failure_result("runtime canceled", False, secrets, 130)
-            raw_logs, exceeded = self._bounded_bytes(container.logs(stdout=True, stderr=True, timestamps=False), self._bounded_limit(payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES))
+            self._finish_log_stream(stream_state, stream_thread)
+            if stream_state and stream_state.get("started") and not stream_state.get("error"):
+                combined = stream_state.get("logs", "")
+                exceeded = bool(stream_state.get("exceeded"))
+            else:
+                combined, exceeded = self._fallback_container_logs(
+                    container,
+                    secrets,
+                    output_limit,
+                    output_callback,
+                )
             if exceeded:
                 return self._failure_result("runtime logs exceeded the permitted limit", False, secrets, 413)
-            combined = self._redact_text(raw_logs, secrets)
             status_code = result.get("StatusCode", 1)
             return {"success": status_code == 0, "status_code": status_code, "logs": combined, "stderr": ""}
         except Exception as exc:
             return self._failure_result(f"runtime execution failed: {exc}", False, secrets)
         finally:
+            self._finish_log_stream(stream_state, stream_thread)
             if container is not None:
                 self._cleanup_container(
                     container,
@@ -1120,8 +1288,14 @@ class DockerRuntimeAdapter:
         image: str,
         payload: Dict[str, Any],
         cancel_check: Callable[[], bool] | None = None,
+        output_callback: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
-        summary = self.run_runtime_job(image=image, payload=payload, **({"cancel_check": cancel_check} if cancel_check else {}))
+        kwargs = {}
+        if cancel_check:
+            kwargs["cancel_check"] = cancel_check
+        if output_callback:
+            kwargs["output_callback"] = output_callback
+        summary = self.run_runtime_job(image=image, payload=payload, **kwargs)
         logs = summary.get("logs", "")
         snapshots = []
         if summary.get("success"):
@@ -1157,8 +1331,14 @@ class DockerRuntimeAdapter:
         image: str,
         payload: Dict[str, Any],
         cancel_check: Callable[[], bool] | None = None,
+        output_callback: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
-        summary = self.run_runtime_job(image=image, payload=payload, **({"cancel_check": cancel_check} if cancel_check else {}))
+        kwargs = {}
+        if cancel_check:
+            kwargs["cancel_check"] = cancel_check
+        if output_callback:
+            kwargs["output_callback"] = output_callback
+        summary = self.run_runtime_job(image=image, payload=payload, **kwargs)
         logs = summary.get("logs", "")
         stats = {}
         if summary.get("success"):

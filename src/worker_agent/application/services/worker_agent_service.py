@@ -1,4 +1,5 @@
 import base64
+import inspect
 import json
 import logging
 import threading
@@ -16,6 +17,155 @@ from src.worker_agent.infrastructure.security.job_recovery_journal import Worker
 logger = logging.getLogger(__name__)
 
 
+def _phase_from_line(line: str) -> Optional[str]:
+    text = " ".join(str(line or "").split())[:2048].casefold()
+    phase_markers = (
+        ("pruning finished successfully", "finalizing"),
+        ("pruning old snapshots", "pruning"),
+        ("repository not initialized", "initializing"),
+        ("repository initialized successfully", "initializing"),
+        ("running restic backup", "backup"),
+        ("performing backup strategy", "preparing"),
+        ("backup starting", "preparing"),
+    )
+    for marker, phase in phase_markers:
+        if marker in text:
+            return phase
+    return None
+
+
+def _restic_progress_from_line(line: str) -> Optional[Dict[str, Any]]:
+    phase = _phase_from_line(line)
+    try:
+        record = json.loads(line)
+    except (TypeError, ValueError):
+        return {"phase": phase} if phase else None
+    if not isinstance(record, dict) or record.get("message_type") != "status":
+        return {"phase": phase} if phase else None
+    progress: Dict[str, Any] = {"phase": "backup"}
+    numeric_fields = ("percent_done", "files_done", "total_files", "bytes_done", "total_bytes")
+    for field in numeric_fields:
+        value = record.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            progress[field] = value
+    current_file = record.get("current_file")
+    if not isinstance(current_file, str):
+        current_files = record.get("current_files")
+        if isinstance(current_files, list) and current_files and isinstance(current_files[-1], str):
+            current_file = current_files[-1]
+    if isinstance(current_file, str):
+        progress["current_file"] = current_file[:512]
+    percent = progress.get("percent_done")
+    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+        progress["percent_done"] = min(99.9, max(0.0, float(percent)))
+    return progress
+
+
+class _JobProgressReporter:
+    """Coalesce runtime output into non-fatal, leased progress updates."""
+
+    # Keep live updates responsive without issuing one request for every runtime line.
+    FLUSH_INTERVAL_SECONDS = 0.25
+    MAX_PENDING_LINES = 32
+
+    def __init__(self, client, worker_id: str, job: Dict[str, Any]):
+        self.client = client
+        self.worker_id = worker_id
+        self.job_id = job.get("id")
+        self.lease_token = job.get("lease_token")
+        self.sequence = 0
+        self.latest_progress: Dict[str, Any] = {}
+        self._pending_lines: List[str] = []
+        self._partial_line = ""
+        self._last_inferred_phase: Optional[str] = None
+        self._last_sent = 0.0
+        self._lock = threading.Lock()
+        method = getattr(type(client), "update_job_progress", None)
+        if callable(method):
+            self._send_method = getattr(client, "update_job_progress")
+        else:
+            values = getattr(client, "__dict__", {})
+            configured = values.get("update_job_progress") if isinstance(values, dict) else None
+            self._send_method = configured if callable(configured) else None
+
+    @property
+    def callback(self) -> Optional[Callable[[str], None]]:
+        return self.emit if self._send_method is not None else None
+
+    def start(self) -> None:
+        self.emit("", {"phase": "starting"}, force=True)
+
+    def emit(self, chunk: Any, progress: Optional[Dict[str, Any]] = None, force: bool = False) -> None:
+        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk or "")
+        with self._lock:
+            if text:
+                text = self._partial_line + text
+                parts = text.splitlines(keepends=True)
+                self._partial_line = ""
+                if parts and not parts[-1].endswith(("\n", "\r")):
+                    self._partial_line = parts.pop()
+                for part in parts:
+                    line = part.rstrip("\r\n")
+                    if line:
+                        self._pending_lines.append(line[:16 * 1024])
+                self._pending_lines = self._pending_lines[-self.MAX_PENDING_LINES :]
+                phase_changed = False
+                for line in parts:
+                    parsed = _restic_progress_from_line(line.rstrip("\r\n"))
+                    if parsed:
+                        inferred_phase = parsed.get("phase")
+                        if inferred_phase and inferred_phase != self._last_inferred_phase:
+                            self._last_inferred_phase = inferred_phase
+                            phase_changed = True
+                        self.latest_progress = parsed
+            else:
+                phase_changed = False
+            if progress:
+                self.latest_progress = dict(progress)
+            now = time.monotonic()
+            should_flush = (
+                force
+                or phase_changed
+                or len(self._pending_lines) >= self.MAX_PENDING_LINES
+                or now - self._last_sent >= self.FLUSH_INTERVAL_SECONDS
+            )
+            if not should_flush:
+                return
+            lines = self._pending_lines
+            self._pending_lines = []
+            self.sequence += 1
+            sequence = self.sequence
+            progress_payload = dict(self.latest_progress)
+            self._last_sent = now
+        self._send(sequence, progress_payload, lines)
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._partial_line:
+                self._pending_lines.append(self._partial_line[:16 * 1024])
+                self._partial_line = ""
+        self.emit("", force=True)
+
+    def _send(self, sequence: int, progress: Dict[str, Any], lines: List[str]) -> None:
+        if not callable(self._send_method) or not self.job_id or not isinstance(self.lease_token, str):
+            return
+        try:
+            self._send_method(
+                worker_id=self.worker_id,
+                job_id=self.job_id,
+                sequence=sequence,
+                progress=progress,
+                log_lines=lines,
+                lease_token=self.lease_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Job progress update failed for %s (error_type=%s)",
+                self.job_id,
+                exc.__class__.__name__,
+            )
+
+
 class WorkerAgentService:
     MAX_LOG_LINES = 1000
     MAX_LOG_CHARS = 4 * 1024 * 1024
@@ -23,6 +173,9 @@ class WorkerAgentService:
     MISSING_RESTIC_REPOSITORY_ERROR = (
         "Restic repository is not initialized or RESTIC_REPOSITORY points to the wrong path. "
         "Verify the target repository configuration before running restic init."
+    )
+    UNCONFIGURED_RESTIC_REPOSITORY_ERROR = (
+        "Restic repository is not configured. Set RESTIC_REPOSITORY on the target, storage profile, or Settings before running this job."
     )
     JOB_LEASE_RENEWAL_INTERVAL_SECONDS = 60.0
     INTERACTIVE_COMMANDS = frozenset(
@@ -391,9 +544,19 @@ class WorkerAgentService:
         command: str,
         payload: Dict[str, Any],
         cancel_check: Callable[[], bool] | None,
+        progress_reporter: _JobProgressReporter | None = None,
     ) -> WorkerJobExecutionResult:
         image = payload.get("image") or self.config.backup_runtime_image
-        direct_log_lines: List[str] = []
+        context_line = self._storage_context_log_line(payload)
+        direct_log_lines: List[str] = [context_line] if context_line else []
+
+        if self._storage_repository_unconfigured(payload):
+            error = self.UNCONFIGURED_RESTIC_REPOSITORY_ERROR
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={"target_id": payload.get("target_id"), "storage_context": self._storage_context(payload), "error": error},
+                log_lines=direct_log_lines + [error],
+            )
 
         def compute() -> Dict[str, Any]:
             if command == "snapshots.list":
@@ -402,6 +565,7 @@ class WorkerAgentService:
                     image,
                     payload,
                     cancel_check,
+                    progress_reporter.callback if progress_reporter else None,
                 )
                 status = self._runtime_status(summary)
                 error = (
@@ -419,7 +583,7 @@ class WorkerAgentService:
                 if error:
                     value["error"] = error
                 if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
-                    direct_log_lines[:] = [error]
+                    direct_log_lines[:] = ([context_line] if context_line else []) + [error]
                 else:
                     direct_log_lines.extend(
                         self._bounded_log_lines(
@@ -432,7 +596,13 @@ class WorkerAgentService:
                         direct_log_lines.append(error)
                 return value
 
-            summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, payload, cancel_check)
+            summary = self._invoke_runtime(
+                self.docker_runtime.run_runtime_job,
+                image,
+                payload,
+                cancel_check,
+                progress_reporter.callback if progress_reporter else None,
+            )
             status = self._runtime_status(summary)
             error = (
                 self._classify_snapshot_runtime_error(command, payload, summary)
@@ -455,7 +625,7 @@ class WorkerAgentService:
             if error:
                 value["error"] = error
             if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
-                direct_log_lines[:] = [error]
+                direct_log_lines[:] = ([context_line] if context_line else []) + [error]
             else:
                 direct_log_lines.extend(
                     self._bounded_log_lines(
@@ -487,13 +657,18 @@ class WorkerAgentService:
             "cache_hit": bool(cache_hit),
             "source": source,
         }
+        storage_context = self._storage_context(payload)
+        if storage_context:
+            result_summary["storage_context"] = storage_context
+        if progress_reporter and progress_reporter.latest_progress:
+            result_summary["progress"] = dict(progress_reporter.latest_progress)
         if command == "snapshots.list":
             result_summary["snapshots"] = value.get("snapshots", [])
         else:
             result_summary["entries"] = value.get("entries", [])
         if value.get("error"):
             result_summary["error"] = value["error"]
-        log_lines = direct_log_lines if not cache_hit else ["Snapshot metadata served from Redis"]
+        log_lines = direct_log_lines if not cache_hit else direct_log_lines + ["Snapshot metadata served from Redis"]
         return WorkerJobExecutionResult(
             status=value.get("status", JobStatus.FAILED),
             result_summary=result_summary,
@@ -514,6 +689,45 @@ class WorkerAgentService:
         if summary.get("canceled") or summary.get("status_code") == 130:
             return JobStatus.CANCELED
         return JobStatus.SUCCEEDED if summary.get("success") else JobStatus.FAILED
+
+    @staticmethod
+    def _storage_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+        context = payload.get("storage_context") if isinstance(payload, dict) else None
+        if not isinstance(context, dict):
+            return {}
+        allowed = (
+            "storage_profile_id",
+            "storage_profile_name",
+            "backend_type",
+            "repository_source",
+            "repository_kind",
+            "repository_display",
+            "rclone_config_source",
+        )
+        result = {}
+        for key in allowed:
+            value = context.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                result[key] = " ".join(value.split())[:256]
+        return result
+
+    @classmethod
+    def _storage_repository_unconfigured(cls, payload: Dict[str, Any]) -> bool:
+        context = cls._storage_context(payload)
+        return context.get("repository_source") == "unconfigured"
+
+    @classmethod
+    def _storage_context_log_line(cls, payload: Dict[str, Any]) -> Optional[str]:
+        context = cls._storage_context(payload)
+        if not context:
+            return None
+        if context.get("repository_source") == "unconfigured" or not context.get("repository_display"):
+            return "Storage no configurado; Repositorio no configurado."
+        profile = context.get("storage_profile_name") or context.get("storage_profile_id") or "sin perfil"
+        backend = context.get("backend_type") or context.get("repository_kind") or "unknown"
+        return f"Storage profile: {profile}; backend: {backend}; repository: {context.get('repository_display')}"
 
     @staticmethod
     def _about_metrics(value: Any) -> Dict[str, int]:
@@ -654,10 +868,27 @@ class WorkerAgentService:
         return check
 
     @staticmethod
-    def _invoke_runtime(method: Callable[..., Dict[str, Any]], image: str, payload: Dict[str, Any], cancel_check):
-        if cancel_check is None:
-            return method(image=image, payload=payload)
-        return method(image=image, payload=payload, cancel_check=cancel_check)
+    def _invoke_runtime(
+        method: Callable[..., Dict[str, Any]],
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check,
+        output_callback=None,
+    ):
+        kwargs: Dict[str, Any] = {"image": image, "payload": payload}
+        if cancel_check is not None:
+            kwargs["cancel_check"] = cancel_check
+        if output_callback is not None:
+            try:
+                parameters = inspect.signature(method).parameters
+                accepts_callback = "output_callback" in parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+                )
+            except (TypeError, ValueError):
+                accepts_callback = True
+            if accepts_callback:
+                kwargs["output_callback"] = output_callback
+        return method(**kwargs)
 
     def _start_lease_renewal(self, worker_id: str, job: Dict[str, Any]):
         renew = self._optional_method(self.control_plane_client, "renew_job_lease")
@@ -705,9 +936,12 @@ class WorkerAgentService:
         for job in jobs or []:
             self._persist_recovery_record(worker_id, job)
             renewal = self._start_lease_renewal(worker_id, job)
+            progress_reporter = _JobProgressReporter(self.control_plane_client, worker_id, job)
+            progress_reporter.start()
             try:
-                execution = self.execute_job(job)
+                execution = self.execute_job(job, progress_reporter=progress_reporter)
             finally:
+                progress_reporter.finish()
                 self._stop_lease_renewal(renewal)
             try:
                 updated = self.control_plane_client.update_job_status(
@@ -754,6 +988,7 @@ class WorkerAgentService:
         self,
         job: Dict[str, Any],
         cancel_check: Callable[[], bool] | None = None,
+        progress_reporter: _JobProgressReporter | None = None,
     ) -> WorkerJobExecutionResult:
         command = job.get("command")
         payload = job.get("payload") or {}
@@ -812,23 +1047,51 @@ class WorkerAgentService:
                 )
 
             if command == "backup.run":
+                if self._storage_repository_unconfigured(payload):
+                    error = self.UNCONFIGURED_RESTIC_REPOSITORY_ERROR
+                    context_line = self._storage_context_log_line(payload)
+                    return WorkerJobExecutionResult(
+                        status=JobStatus.FAILED,
+                        result_summary={
+                            "target_id": payload.get("target_id"),
+                            "compose_project": payload.get("compose_project"),
+                            "storage_context": self._storage_context(payload),
+                            "error": error,
+                        },
+                        log_lines=([context_line] if context_line else []) + [error],
+                    )
                 image = payload.get("image") or self.config.backup_runtime_image
-                summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, payload, cancel_check)
+                summary = self._invoke_runtime(
+                    self.docker_runtime.run_runtime_job,
+                    image,
+                    payload,
+                    cancel_check,
+                    progress_reporter.callback if progress_reporter else None,
+                )
+                result_summary = {
+                    "status_code": summary.get("status_code"),
+                    "target_id": payload.get("target_id"),
+                    "compose_project": payload.get("compose_project"),
+                }
+                storage_context = self._storage_context(payload)
+                if storage_context:
+                    result_summary["storage_context"] = storage_context
+                if progress_reporter and progress_reporter.latest_progress:
+                    result_summary["progress"] = dict(progress_reporter.latest_progress)
+                log_lines = self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr"))
+                if context_line := self._storage_context_log_line(payload):
+                    log_lines = [context_line] + log_lines
                 return WorkerJobExecutionResult(
                     status=self._runtime_status(summary),
-                    result_summary={
-                        "status_code": summary.get("status_code"),
-                        "target_id": payload.get("target_id"),
-                        "compose_project": payload.get("compose_project"),
-                    },
-                    log_lines=self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")),
+                    result_summary=result_summary,
+                    log_lines=log_lines,
                 )
 
             if command == "snapshots.list":
-                return self._execute_snapshot_metadata(command, payload, cancel_check)
+                return self._execute_snapshot_metadata(command, payload, cancel_check, progress_reporter)
 
             if command in ("snapshot.ls", "snapshot.search", "snapshot.find"):
-                return self._execute_snapshot_metadata(command, payload, cancel_check)
+                return self._execute_snapshot_metadata(command, payload, cancel_check, progress_reporter)
 
             if command == "snapshot.dump":
                 image = payload.get("image") or self.config.backup_runtime_image
@@ -848,7 +1111,13 @@ class WorkerAgentService:
 
             if command == "stats.get":
                 image = payload.get("image") or self.config.backup_runtime_image
-                summary = self._invoke_runtime(self.docker_runtime.get_restic_stats, image, payload, cancel_check)
+                summary = self._invoke_runtime(
+                    self.docker_runtime.get_restic_stats,
+                    image,
+                    payload,
+                    cancel_check,
+                    progress_reporter.callback if progress_reporter else None,
+                )
                 return WorkerJobExecutionResult(
                     status=self._runtime_status(summary),
                     result_summary={
@@ -864,7 +1133,13 @@ class WorkerAgentService:
 
             if command == "retention.run":
                 image = payload.get("image") or self.config.backup_runtime_image
-                summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, payload, cancel_check)
+                summary = self._invoke_runtime(
+                    self.docker_runtime.run_runtime_job,
+                    image,
+                    payload,
+                    cancel_check,
+                    progress_reporter.callback if progress_reporter else None,
+                )
                 return WorkerJobExecutionResult(
                     status=self._runtime_status(summary),
                     result_summary={
@@ -877,7 +1152,13 @@ class WorkerAgentService:
 
             if command in ("restore.dry_run", "restore.run"):
                 image = payload.get("image") or self.config.backup_runtime_image
-                summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, payload, cancel_check)
+                summary = self._invoke_runtime(
+                    self.docker_runtime.run_runtime_job,
+                    image,
+                    payload,
+                    cancel_check,
+                    progress_reporter.callback if progress_reporter else None,
+                )
                 status = self._runtime_status(summary)
                 safe_error = self._safe_job_text(payload, summary.get("error", ""))
                 safe_stderr = self._safe_job_text(payload, summary.get("stderr", ""))

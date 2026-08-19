@@ -26,6 +26,7 @@ from src.control_plane.application.ports.ports import (
     TargetRepository,
     WorkerRepository,
 )
+from src.control_plane.application.services.job_event_broker import JobEventBroker
 from src.control_plane.domain.models import (
     BackupTargetRecord,
     InventorySnapshot,
@@ -57,6 +58,12 @@ class ControlPlaneService:
     MAX_WORKER_OFFLINE_AFTER_SECONDS = 3600.0
     JOB_LEASE_DURATION_SECONDS = 300
     MAX_SNAPSHOT_ENTRIES = 10_000
+    MAX_PROGRESS_LOG_LINES = 100
+    MAX_PROGRESS_LOG_CHARS = 64 * 1024
+    MAX_JOB_LOG_LINES = 1000
+    MAX_JOB_LOG_CHARS = 512 * 1024
+    MAX_REPOSITORY_DISPLAY_LENGTH = 256
+    MAX_PUBLIC_SUMMARY_ITEMS = 200
     MAX_REQUEST_ID_LENGTH = 128
     MAX_SEARCH_QUERY_LENGTH = 256
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
@@ -71,6 +78,17 @@ class ControlPlaneService:
         {"backup.run", "retention.run", "forget", "prune", "restore.run", "restore.write", "write"}
     )
     CATALOG_MUTATING_COMMANDS = frozenset({"backup.run", "retention.run", "forget", "prune"})
+    PROGRESS_FIELDS = frozenset(
+        {
+            "percent_done",
+            "files_done",
+            "total_files",
+            "bytes_done",
+            "total_bytes",
+            "current_file",
+            "phase",
+        }
+    )
 
     def __init__(
         self,
@@ -87,6 +105,7 @@ class ControlPlaneService:
         settings_repository: Optional[SettingsRepository] = None,
         cache_repository: Optional[CacheRepository] = None,
         index_repository: Optional[IndexRepository] = None,
+        job_event_broker: Optional[JobEventBroker] = None,
     ):
         self.worker_repository = worker_repository
         self.inventory_repository = inventory_repository
@@ -101,6 +120,7 @@ class ControlPlaneService:
         self.settings_repository = settings_repository
         self.cache_repository = cache_repository
         self.index_repository = index_repository
+        self.job_event_broker = job_event_broker or JobEventBroker()
         self.worker_auth = None
 
     def register_worker(
@@ -886,6 +906,186 @@ class ControlPlaneService:
         cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", (name or "").strip("/"))
         return cleaned or "root"
 
+    @classmethod
+    def _repository_kind(cls, repository: Any) -> str:
+        value = str(repository or "").strip().lower()
+        if value.startswith("rclone:"):
+            return "rclone"
+        if value.startswith("s3:") or value.startswith("s3://"):
+            return "s3"
+        if (
+            value.startswith("local:")
+            or value.startswith("file:")
+            or value.startswith("/")
+            or ("/" in value and "://" not in value and not re.match(r"^[a-z][a-z0-9+.-]*:", value))
+        ):
+            return "local"
+        return "unknown"
+
+    @classmethod
+    def _repository_display(cls, repository: Any) -> Optional[str]:
+        text = " ".join(str(repository or "").split())
+        if not text:
+            return None
+        text = text.split("?", 1)[0].split("#", 1)[0]
+        text = re.sub(r"(?i)(://)[^/\s@]+@", r"\1<redacted>@", text)
+        text = re.sub(r"(?i)(^|[:/])[^/\s:@]+:[^/@\s]+@", r"\1<redacted>@", text)
+        text = re.sub(r"(?i)(password|passphrase|token|secret|access[_-]?key|secret[_-]?key|credential)\s*[:=]\s*[^\s,;]+", r"\1=<redacted>", text)
+        if len(text) > cls.MAX_REPOSITORY_DISPLAY_LENGTH:
+            return f"{text[: cls.MAX_REPOSITORY_DISPLAY_LENGTH - 3]}..."
+        return text
+
+    def _profile_has_rclone_file(
+        self,
+        profile: Optional[StorageProfileRecord],
+        resolved_files: Optional[List[Dict[str, str]]] = None,
+    ) -> bool:
+        if profile is None:
+            return False
+        if resolved_files is not None:
+            for file_spec in resolved_files:
+                path = str(file_spec.get("container_path") or "").lower()
+                name = str(file_spec.get("secret_name") or "").lower()
+                if "rclone" in path or "rclone" in name or path.endswith(".conf"):
+                    return True
+        if (profile.backend_type or "").strip().lower() == "rclone" and profile.file_secret_refs:
+            return True
+        for path in (profile.file_secret_refs or {}):
+            if "rclone" in str(path).lower() or str(path).lower().endswith(".conf"):
+                return True
+        return False
+
+    def _settings_repository_for_target(
+        self,
+        target: BackupTargetRecord,
+        settings: Optional[SettingsRecord],
+    ) -> Optional[str]:
+        if target.backup_strategy != "restic" or not settings or not settings.restic_repository_base:
+            return None
+        base = settings.restic_repository_base.strip("/")
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", target.name or target.id)
+        safe_name = safe_name or "root"
+        if re.match(r"^[a-z]+:", base, re.IGNORECASE):
+            return f"{base}/{safe_name}"
+        if settings.rclone_conf_secret_id:
+            remote_name = self._extract_rclone_remote_name(settings.rclone_conf_secret_id)
+            if remote_name:
+                return f"rclone:{remote_name}:{base}/{safe_name}"
+        return f"{base}/{safe_name}"
+
+    def _storage_context(
+        self,
+        target: BackupTargetRecord,
+        environment: Optional[Dict[str, str]] = None,
+        resolved_files: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        environment = environment if isinstance(environment, dict) else {}
+        profile = self.storage_profile_repository.get(target.storage_profile_id) if target.storage_profile_id else None
+        settings = self.get_settings()
+        target_environment = target.runtime_environment or {}
+        profile_environment = profile.environment if profile else {}
+        profile_secret_refs = profile.secret_refs if profile else {}
+        repository = None
+        repository_source = "unconfigured"
+
+        if "RESTIC_REPOSITORY" in target_environment:
+            repository = target_environment.get("RESTIC_REPOSITORY")
+            repository_source = "target" if repository else "unconfigured"
+        elif "RESTIC_REPOSITORY" in profile_environment or "RESTIC_REPOSITORY" in profile_secret_refs:
+            repository = environment.get("RESTIC_REPOSITORY")
+            repository_source = "profile" if repository else "unconfigured"
+        else:
+            repository = environment.get("RESTIC_REPOSITORY") or self._settings_repository_for_target(target, settings)
+            repository_source = "settings" if repository else "unconfigured"
+
+        repository_kind = self._repository_kind(repository) if repository else "unknown"
+        backend_type = None
+        if profile is not None:
+            backend_type = str(profile.backend_type or "").strip().lower() or None
+        elif repository:
+            backend_type = repository_kind
+        rclone_source = "none"
+        if self._profile_has_rclone_file(profile, resolved_files):
+            rclone_source = "profile"
+        elif settings and settings.rclone_conf_secret_id:
+            rclone_source = "settings"
+
+        return {
+            "storage_profile_id": profile.id if profile else target.storage_profile_id,
+            "storage_profile_name": profile.name if profile else None,
+            "backend_type": backend_type,
+            "repository_source": repository_source,
+            "repository_kind": repository_kind,
+            "repository_display": self._repository_display(repository),
+            "rclone_config_source": rclone_source,
+        }
+
+    @classmethod
+    def _safe_storage_context(cls, context: Any) -> Dict[str, Any]:
+        if not isinstance(context, dict):
+            return {}
+        allowed = (
+            "storage_profile_id",
+            "storage_profile_name",
+            "backend_type",
+            "repository_source",
+            "repository_kind",
+            "repository_display",
+            "rclone_config_source",
+        )
+        result = {key: context.get(key) for key in allowed}
+        for key in ("storage_profile_id", "storage_profile_name", "backend_type", "repository_display"):
+            value = result.get(key)
+            if value is not None:
+                result[key] = " ".join(str(value).split())[: cls.MAX_REPOSITORY_DISPLAY_LENGTH]
+        if result.get("repository_display"):
+            result["repository_display"] = cls._repository_display(result["repository_display"])
+        for key in ("repository_source", "repository_kind", "rclone_config_source"):
+            value = str(result.get(key) or "")
+            result[key] = value if value in {"target", "profile", "settings", "unconfigured", "rclone", "s3", "local", "unknown", "none"} else "unknown"
+        return result
+
+    @classmethod
+    def _validate_progress_payload(
+        cls,
+        sequence: Any,
+        progress: Any,
+        log_lines: Any,
+    ) -> tuple[int, Dict[str, Any], List[str]]:
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0 or sequence > 1_000_000_000:
+            raise ValueError("progress sequence is outside the permitted bounds")
+        if not isinstance(progress, dict) or len(progress) > len(cls.PROGRESS_FIELDS):
+            raise ValueError("progress must be a bounded object")
+        normalized: Dict[str, Any] = {}
+        numeric_fields = {"percent_done", "files_done", "total_files", "bytes_done", "total_bytes"}
+        for key, value in progress.items():
+            if key not in cls.PROGRESS_FIELDS:
+                raise ValueError(f"unsupported progress field: {key}")
+            if key in numeric_fields:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise ValueError(f"progress field {key} must be numeric")
+                if value < 0 or value > 100_000_000_000_000:
+                    raise ValueError(f"progress field {key} is outside the permitted bounds")
+                if key == "percent_done" and value > 100:
+                    raise ValueError("progress percent_done must be between 0 and 100")
+                normalized[key] = round(float(value), 3) if isinstance(value, float) else int(value)
+            else:
+                if not isinstance(value, str) or len(value) > 512 or any(ord(character) < 32 for character in value):
+                    raise ValueError(f"progress field {key} is invalid")
+                normalized[key] = value
+        if not isinstance(log_lines, list) or len(log_lines) > cls.MAX_PROGRESS_LOG_LINES:
+            raise ValueError("progress log_lines are outside the permitted bounds")
+        lines: List[str] = []
+        total_chars = 0
+        for line in log_lines:
+            if not isinstance(line, str) or len(line) > 16 * 1024 or any(ord(character) < 9 for character in line):
+                raise ValueError("progress log line is invalid")
+            total_chars += len(line)
+            if total_chars > cls.MAX_PROGRESS_LOG_CHARS:
+                raise ValueError("progress log_lines exceed the permitted size")
+            lines.append(line)
+        return sequence, normalized, lines
+
     def _normalize_runtime_volumes(self, volumes: Dict[str, Dict[str, str]], target: BackupTargetRecord) -> Dict[str, Dict[str, str]]:
         normalized: Dict[str, Dict[str, str]] = {}
         for source, spec in (volumes or {}).items():
@@ -927,6 +1127,7 @@ class ControlPlaneService:
         environment["BACKUP_STOP_CONTAINERS"] = "true" if effective_mode == "cold" else "false"
         if effective_mode == "cold":
             environment.setdefault("BACKUP_CUSTOM_LABEL", f"control-plane.target={target.id}")
+        storage_context = self._storage_context(target, environment, resolved_files)
 
         payload = {
             "target_id": target.id,
@@ -941,12 +1142,14 @@ class ControlPlaneService:
             "network_mode": target.runtime_network_mode,
             "resolved_files": resolved_files,
             "labels": target.labels,
+            "storage_context": storage_context,
         }
         return payload
 
     def _build_snapshot_list_payload(self, target: BackupTargetRecord) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
         return {
             "target_id": target.id,
             "compose_project": target.compose_project,
@@ -958,6 +1161,7 @@ class ControlPlaneService:
             "network_mode": "bridge",
             "resolved_files": resolved_files,
             "labels": target.labels,
+            "storage_context": storage_context,
         }
 
     def _build_snapshot_ls_payload(self, target: BackupTargetRecord, snapshot_id: str, path: str = "") -> Dict[str, Any]:
@@ -1024,6 +1228,7 @@ class ControlPlaneService:
     ) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
         if operation in {"browse", "search", "find"}:
             command = ["restic", "ls", "--json", snapshot_id, path]
         elif operation == "dump" and archive:
@@ -1043,6 +1248,7 @@ class ControlPlaneService:
             "resolved_files": resolved_files,
             "labels": target.labels,
             "cache_generation": self._snapshot_cache_generation(target),
+            "storage_context": storage_context,
         }
         if request_id is not None:
             payload.update(
@@ -1081,6 +1287,7 @@ class ControlPlaneService:
     def _build_stats_payload(self, target: BackupTargetRecord) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
         return {
             "target_id": target.id,
             "compose_project": target.compose_project,
@@ -1091,11 +1298,13 @@ class ControlPlaneService:
             "network_mode": target.runtime_network_mode,
             "resolved_files": resolved_files,
             "labels": target.labels,
+            "storage_context": storage_context,
         }
 
     def _build_retention_payload(self, target: BackupTargetRecord) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
         policy = self._require_retention_policy(target.retention_policy_id) if target.retention_policy_id else None
         if policy is None:
             raise ValueError(f"target {target.id} has no retention policy configured")
@@ -1126,6 +1335,7 @@ class ControlPlaneService:
             "network_mode": target.runtime_network_mode,
             "resolved_files": resolved_files,
             "labels": target.labels,
+            "storage_context": storage_context,
         }
 
     def _build_restore_payload(
@@ -1177,6 +1387,8 @@ class ControlPlaneService:
         environment = {}
         volumes = {}
         resolved_files = []
+        profile = None
+        profile_has_rclone_file = False
 
         if target.storage_profile_id:
             profile = self._require_storage_profile(target.storage_profile_id)
@@ -1184,6 +1396,7 @@ class ControlPlaneService:
             environment.update(self._resolve_secret_refs(profile.secret_refs))
             volumes.update(profile.runtime_volumes)
             resolved_files.extend(self._resolve_file_secret_refs(profile.file_secret_refs))
+            profile_has_rclone_file = self._profile_has_rclone_file(profile, resolved_files)
             for file_spec in resolved_files:
                 if "rclone" in file_spec.get("secret_name", "").lower() or file_spec.get("container_path", "").endswith("rclone.conf"):
                     environment["RCLONE_CONF_CONTENT"] = file_spec["content"]
@@ -1197,16 +1410,9 @@ class ControlPlaneService:
         if target.backup_strategy == "restic":
             settings = self.get_settings()
             if settings and settings.restic_repository_base and "RESTIC_REPOSITORY" not in environment:
-                base = settings.restic_repository_base.strip("/")
-                safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", target.name or target.id)
-                if re.match(r"^[a-z]+:", base, re.IGNORECASE):
-                    environment["RESTIC_REPOSITORY"] = f"{base}/{safe_name}"
-                elif settings.rclone_conf_secret_id:
-                    remote_name = self._extract_rclone_remote_name(settings.rclone_conf_secret_id)
-                    if remote_name:
-                        environment["RESTIC_REPOSITORY"] = f"rclone:{remote_name}:{base}/{safe_name}"
-                else:
-                    environment["RESTIC_REPOSITORY"] = f"{base}/{safe_name}"
+                repository = self._settings_repository_for_target(target, settings)
+                if repository:
+                    environment["RESTIC_REPOSITORY"] = repository
             if "RESTIC_PASSWORD" not in environment:
                 password_secret_id = target.restic_password_secret_id
                 if not password_secret_id and settings:
@@ -1215,7 +1421,7 @@ class ControlPlaneService:
                     secret = self.secret_repository.get(password_secret_id)
                     if secret:
                         environment["RESTIC_PASSWORD"] = self.secret_codec.decrypt(secret.ciphertext)
-            if settings and settings.rclone_conf_secret_id:
+            if settings and settings.rclone_conf_secret_id and not profile_has_rclone_file:
                 existing_paths = {f["container_path"] for f in resolved_files}
                 rclone_path = "/run/secrets/rclone.conf"
                 if rclone_path not in existing_paths:
@@ -1434,7 +1640,10 @@ class ControlPlaneService:
     def fetch_jobs_for_worker(self, worker_id: str) -> List[JobRecord]:
         self._require_eligible_worker(worker_id)
         self._reconcile_expired_jobs()
-        return self.job_repository.claim_pending_for_worker(worker_id)
+        jobs = self.job_repository.claim_pending_for_worker(worker_id)
+        for job in jobs:
+            self._publish_job_event(job)
+        return jobs
 
     def is_job_cancelled(self, worker_id: str, job_id: str) -> bool:
         """Return only cancellation state for an authenticated owning worker."""
@@ -1476,6 +1685,265 @@ class ControlPlaneService:
         self.worker_repository.save(worker)
         return renewed
 
+    def _job_storage_context(self, job: JobRecord) -> Dict[str, Any]:
+        summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+        context = summary.get("storage_context")
+        if not isinstance(context, dict):
+            payload = job.payload if isinstance(job.payload, dict) else {}
+            context = payload.get("storage_context")
+        if not isinstance(context, dict) and job.target_id:
+            target = self.target_repository.get(job.target_id)
+            if target is not None:
+                try:
+                    environment, _, resolved_files = self._resolve_runtime_dependencies(target)
+                    context = self._storage_context(target, environment, resolved_files)
+                except Exception:
+                    context = {}
+        return self._safe_storage_context(context)
+
+    @staticmethod
+    def _job_sensitive_values(job: JobRecord) -> set[str]:
+        values: set[str] = set()
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        markers = ("PASSWORD", "SECRET", "TOKEN", "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "PLAINTEXT")
+
+        def collect(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for nested_key, nested_value in value.items():
+                    collect(nested_value, str(nested_key))
+            elif isinstance(value, (list, tuple)):
+                for nested_value in value:
+                    collect(nested_value, key)
+            elif isinstance(value, str) and value and (
+                any(marker in key.upper() for marker in markers)
+                or "RCLONE" in key.upper()
+                or key in {"RESTIC_REPOSITORY", "content"}
+            ):
+                values.add(value)
+
+        collect(payload)
+        if job.lease_token:
+            values.add(job.lease_token)
+        return values
+
+    @classmethod
+    def _redact_job_text(cls, value: Any, secrets: set[str]) -> str:
+        text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+        for secret in sorted((item for item in secrets if item), key=len, reverse=True):
+            text = text.replace(secret, "<redacted>")
+        text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1<redacted>@", text)
+        text = re.sub(r"(?i)\brclone:[^\s\"'<>]+", "<redacted-repository>", text)
+        text = re.sub(r"(?i)\b(?:s3|local|file):[^\s\"'<>]+", "<redacted-repository>", text)
+        text = re.sub(
+            r"(?i)(password|passphrase|token|secret|access[_-]?key|secret[_-]?key|credential)\s*[:=]\s*[^\s,;]+",
+            r"\1=<redacted>",
+            text,
+        )
+        return text
+
+    def _bounded_job_log_lines(self, job: JobRecord, log_lines: Any = None) -> List[str]:
+        source = job.log_lines if log_lines is None else log_lines
+        if not isinstance(source, list):
+            return []
+        secrets = self._job_sensitive_values(job)
+        context = self._job_storage_context(job)
+        context_line = None
+        if context.get("repository_display"):
+            profile = context.get("storage_profile_name") or context.get("storage_profile_id") or "sin perfil"
+            backend = context.get("backend_type") or context.get("repository_kind") or "unknown"
+            context_line = f"Storage profile: {profile}; backend: {backend}; repository: {context['repository_display']}"
+        lines = []
+        for line in source:
+            if not isinstance(line, str):
+                continue
+            if context_line and line.startswith("Storage profile:"):
+                lines.append(context_line)
+            else:
+                lines.append(self._redact_job_text(line, secrets)[:16 * 1024])
+        lines = lines[-self.MAX_JOB_LOG_LINES :]
+        while lines and sum(len(line) for line in lines) > self.MAX_JOB_LOG_CHARS:
+            lines.pop(0)
+        return lines
+
+    def _safe_public_value(self, value: Any, job: JobRecord, depth: int = 0) -> Any:
+        if depth > 4:
+            return None
+        sensitive_names = {"payload", "lease_token", "ciphertext", "b64_content", "content"}
+        markers = ("PASSWORD", "SECRET", "TOKEN", "CREDENTIAL", "PRIVATE_KEY", "ACCESS_KEY")
+        if isinstance(value, dict):
+            safe: Dict[str, Any] = {}
+            for key, item in list(value.items())[: self.MAX_PUBLIC_SUMMARY_ITEMS]:
+                name = str(key)
+                if name.lower() in sensitive_names or "RCLONE" in name.upper() or any(marker in name.upper() for marker in markers):
+                    continue
+                safe[name[:128]] = self._safe_public_value(item, job, depth + 1)
+            return safe
+        if isinstance(value, list):
+            return [self._safe_public_value(item, job, depth + 1) for item in value[: self.MAX_PUBLIC_SUMMARY_ITEMS]]
+        if isinstance(value, str):
+            return self._redact_job_text(value, self._job_sensitive_values(job))[:16 * 1024]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return None
+
+    def _safe_result_summary(self, job: JobRecord) -> Dict[str, Any]:
+        raw = job.result_summary if isinstance(job.result_summary, dict) else {}
+        safe: Dict[str, Any] = {}
+        allowed_scalar = {
+            "status_code",
+            "target_id",
+            "compose_project",
+            "state",
+            "source",
+            "cache_hit",
+            "recovery",
+            "error",
+            "retention_command",
+        }
+        for key in allowed_scalar:
+            if key not in raw:
+                continue
+            value = raw[key]
+            if key == "error":
+                safe[key] = self._redact_job_text(value, self._job_sensitive_values(job))[:2048]
+            else:
+                safe[key] = self._safe_public_value(value, job)
+        context = self._safe_storage_context(raw.get("storage_context"))
+        if context:
+            safe["storage_context"] = context
+        progress = raw.get("progress")
+        if isinstance(progress, dict):
+            try:
+                _, normalized, _ = self._validate_progress_payload(
+                    max(1, int(raw.get("progress_sequence", 1) or 1)), progress, []
+                )
+                safe["progress"] = normalized
+            except (TypeError, ValueError):
+                pass
+        for key in ("entries", "snapshots"):
+            value = raw.get(key)
+            if not isinstance(value, list):
+                continue
+            safe[key] = [self._safe_public_value(item, job) for item in value[: self.MAX_PUBLIC_SUMMARY_ITEMS] if isinstance(item, dict)]
+        for key in ("metrics", "stats"):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                safe[key] = self._safe_public_value(value, job)
+        return safe
+
+    def _job_public_view(self, job: JobRecord) -> Dict[str, Any]:
+        summary = self._safe_result_summary(job)
+        context = summary.get("storage_context") or self._job_storage_context(job)
+        progress = summary.get("progress")
+        return {
+            "id": job.id,
+            "worker_id": job.worker_id,
+            "command": job.command,
+            "requested_by": job.requested_by,
+            "target_id": job.target_id,
+            "trigger": job.trigger,
+            "status": JobStatus.normalize(job.status),
+            "attempt_count": job.attempt_count,
+            "result_summary": summary,
+            "storage_context": context,
+            "progress": progress if isinstance(progress, dict) else None,
+            "log_lines": self._bounded_job_log_lines(job),
+            "submitted_at": job.submitted_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "updated_at": job.updated_at,
+        }
+
+    def _publish_job_event(self, job: JobRecord) -> None:
+        try:
+            self.job_event_broker.publish(job.id, self._job_public_view(job))
+        except Exception as exc:
+            logger.warning("Job event publication failed for %s (%s)", job.id, type(exc).__name__)
+
+    def get_job_view(self, job_id: str) -> Optional[Dict[str, Any]]:
+        job = self.get_job(job_id)
+        return self._job_public_view(job) if job is not None else None
+
+    def public_job_view(self, job: JobRecord) -> Dict[str, Any]:
+        return self._job_public_view(job)
+
+    def list_job_views(self, limit: Optional[int] = None, offset: int = 0) -> tuple:
+        self._reconcile_expired_jobs()
+        jobs = self.job_repository.list()
+        total = len(jobs)
+        views = [self._job_public_view(job) for job in jobs]
+        if limit is not None and limit > 0:
+            return views[offset:offset + limit], total
+        if offset > 0:
+            return views[offset:], total
+        return views, total
+
+    def update_job_progress(
+        self,
+        worker_id: str,
+        job_id: str,
+        sequence: Any,
+        progress: Any,
+        log_lines: Any = None,
+        lease_token: Optional[str] = None,
+    ) -> JobRecord:
+        self._require_worker(worker_id)
+        job = self._require_job(job_id, reconcile=False)
+        if job.owner_worker_id != worker_id:
+            raise ValueError(f"worker '{worker_id}' does not own job '{job_id}'")
+        if not isinstance(lease_token, str) or not hmac.compare_digest(job.lease_token or "", lease_token):
+            raise ValueError(f"job '{job_id}' lease token is invalid or stale")
+        if not job.lease_expires_at or job.lease_expires_at <= utcnow():
+            raise ValueError(f"job '{job_id}' lease has expired")
+        normalized_sequence, normalized_progress, normalized_lines = self._validate_progress_payload(
+            sequence, progress, [] if log_lines is None else log_lines
+        )
+        if isinstance(normalized_progress.get("percent_done"), (int, float)) and normalized_progress["percent_done"] >= 100:
+            normalized_progress["percent_done"] = 99.9
+        if JobStatus.normalize(job.status) != JobStatus.IN_PROGRESS:
+            return job
+
+        current_summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+        summary_context = self._safe_storage_context(current_summary.get("storage_context"))
+        if not summary_context:
+            summary_context = self._safe_storage_context(
+                (job.payload or {}).get("storage_context") if isinstance(job.payload, dict) else None
+            )
+        result_summary = {"storage_context": summary_context} if summary_context else None
+        updater = getattr(self.job_repository, "update_progress", None)
+        if callable(updater):
+            updated = updater(
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                sequence=normalized_sequence,
+                progress=normalized_progress,
+                log_lines=normalized_lines,
+                result_summary=result_summary,
+            )
+            if updated is None:
+                raise ValueError(f"job '{job_id}' progress lease is invalid or stale")
+            self._publish_job_event(updated)
+            return updated
+
+        try:
+            current_sequence = int(current_summary.get("progress_sequence", 0) or 0)
+        except (TypeError, ValueError):
+            current_sequence = 0
+        if normalized_sequence <= current_sequence:
+            return job
+        merged_summary = dict(current_summary)
+        if result_summary:
+            merged_summary.update(result_summary)
+        merged_summary["progress"] = normalized_progress
+        merged_summary["progress_sequence"] = normalized_sequence
+        job.result_summary = merged_summary
+        job.log_lines = self._bounded_job_log_lines(job, list(job.log_lines or []) + normalized_lines)
+        job.updated_at = utcnow()
+        saved_job = self.job_repository.save(job)
+        self._publish_job_event(saved_job)
+        return saved_job
+
     def update_job_status(
         self,
         worker_id: str,
@@ -1504,9 +1972,16 @@ class ControlPlaneService:
         job.status = status
         job.updated_at = utcnow()
         if result_summary is not None:
-            job.result_summary = result_summary
+            completed_summary = dict(result_summary) if isinstance(result_summary, dict) else {}
+            if "storage_context" not in completed_summary:
+                context = self._job_storage_context(job)
+                if context:
+                    completed_summary["storage_context"] = context
+            job.result_summary = completed_summary
         if log_lines:
-            job.log_lines.extend(log_lines)
+            job.log_lines = self._bounded_job_log_lines(job, list(job.log_lines or []) + list(log_lines))
+        else:
+            job.log_lines = self._bounded_job_log_lines(job)
         if status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELED):
             job.finished_at = utcnow()
             completed_summary = result_summary or job.result_summary or {}
@@ -1517,6 +1992,7 @@ class ControlPlaneService:
             if status == JobStatus.SUCCEEDED:
                 self._invalidate_explorer_metadata_after_success(job)
         saved_job = self.job_repository.save(job)
+        self._publish_job_event(saved_job)
         if status == JobStatus.SUCCEEDED:
             try:
                 self._schedule_snapshot_sync_after_mutation(saved_job)
@@ -1568,7 +2044,8 @@ class ControlPlaneService:
             }
         if not job.log_lines:
             job.log_lines = ["Job canceled by operator before terminal worker completion."]
-        self.job_repository.save(job)
+        saved_job = self.job_repository.save(job)
+        self._publish_job_event(saved_job)
         return job
 
     def list_targets(self) -> List[BackupTargetRecord]:

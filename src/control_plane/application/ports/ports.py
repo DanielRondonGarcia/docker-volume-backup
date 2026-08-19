@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.control_plane.domain.models import (
     BackupTargetRecord,
@@ -120,6 +120,19 @@ class JobRepository(ABC):
         worker_id: str,
         lease_token: str,
         lease_duration_seconds: int = 300,
+    ) -> Optional[JobRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_progress(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_token: str,
+        sequence: int,
+        progress: Dict[str, Any],
+        log_lines: List[str],
+        result_summary: Optional[Dict[str, Any]] = None,
     ) -> Optional[JobRecord]:
         raise NotImplementedError
 
