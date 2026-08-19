@@ -13,6 +13,17 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         cls.source = UI_PATH.read_text(encoding="utf-8")
         cls.css = UI_CSS_PATH.read_text(encoding="utf-8")
 
+    def test_worker_commands_modal_removes_http_warning_and_keeps_renewal_compose_markers(self):
+        self.assertNotIn("HTTP no es confidencial", self.source)
+        for marker in (
+            "data-renew-enrollment=",
+            "Renovar enrollment",
+            "Renovacion de enrollment",
+            "docker-compose.yml",
+            "/tmp:/tmp",
+        ):
+            self.assertIn(marker, self.source)
+
     def test_snapshot_explorer_contains_v2_routes_and_legacy_fallbacks(self):
         for route in ("/api/v2/targets/", "/snapshots`,", "/api/v2/jobs/", "/cancel`,"):
             self.assertIn(route, self.source)

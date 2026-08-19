@@ -1141,8 +1141,7 @@ docker compose up -d
              <button class="close" id="modalClose" aria-label="Cerrar">&times;</button>
             </div>
             <div class="modal-body">
-              <div class="alert warning" role="alert"><strong>HTTP no es confidencial.</strong> En redes privadas locales es el valor por defecto. HMAC autentica las solicitudes del worker, pero no cifra el trafico ni autentica las respuestas del Control Plane; usa HTTPS para redes remotas o confidenciales.</div>
-             ${isRenewal ? `<div class="alert info" role="status">El nuevo Compose conserva el mismo <code>worker_id</code> y no crea un registro duplicado. La credencial anterior se reemplazara cuando este token se consuma correctamente.</div>` : ""}
+              ${isRenewal ? `<div class="alert info" role="status">El nuevo Compose conserva el mismo <code>worker_id</code> y no crea un registro duplicado. La credencial anterior se reemplazara cuando este token se consuma correctamente.</div>` : ""}
              <div class="card compact"><div class="eyebrow">${isRenewal ? "Enrollment renovado" : "Credencial HMAC lista"}</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">Worker ID: ${escapeHtml(workerId)}</div><div class="meta">Nombre: ${escapeHtml(wName)}. Host: ${escapeHtml(wHost)}. Expira: ${escapeHtml(fmtDate(e.expires_at))}. El secreto no se muestra ni se incluye en los comandos.</div><button class="btn ghost sm" id="copyEnrollmentSecret">Copiar secreto de enrolamiento</button><div class="support">Guardalo en un gestor de secretos y elimina WORKER_ENROLLMENT_TOKEN después del primer arranque; conserva el archivo 0600.</div></div>
             <div class="card compact">
               <div class="eyebrow">URL del Control Plane en los comandos</div>
