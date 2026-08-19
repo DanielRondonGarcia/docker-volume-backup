@@ -73,6 +73,9 @@ services:
       WORKER_POLL_INTERVAL_SECONDS: "15"
       WORKER_HEALTH_PORT: "8081"
       BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup:latest}
+      # The helper mounts only the server-selected source read-only and has no
+      # network or Docker socket access.
+      LIVE_FILE_HELPER_IMAGE: ${LIVE_FILE_HELPER_IMAGE:-${WORKER_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest}}
       # Snapshot Explorer v2 feature flags and bounded Redis cache settings.
       SNAPSHOT_EXPLORER_NO_LOCK: ${SNAPSHOT_EXPLORER_NO_LOCK:-false}
       SNAPSHOT_EXPLORER_CACHE_DIR: ${SNAPSHOT_EXPLORER_CACHE_DIR:-/var/cache/restic-explorer}

@@ -137,6 +137,7 @@ class SQLiteRepositoryBase:
                     restore_defaults_json TEXT NOT NULL,
                     labels_json TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
+                    live_access_enabled INTEGER NOT NULL DEFAULT 0,
                     cron_expression TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -261,6 +262,7 @@ class SQLiteRepositoryBase:
             self._ensure_column(connection, "settings", "global_cron_expression", "TEXT")
             self._ensure_column(connection, "settings", "control_plane_public_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
+            self._ensure_column(connection, "targets", "live_access_enabled", "INTEGER NOT NULL DEFAULT 0")
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -437,8 +439,8 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                     id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
                     runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
                     storage_profile_id, retention_policy_id, execution_policy_id, restic_password_secret_id, restore_defaults_json, labels_json,
-                    enabled, cron_expression, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, live_access_enabled, cron_expression, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target.id,
@@ -460,6 +462,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                     json.dumps(target.restore_defaults),
                     json.dumps(target.labels),
                     1 if target.enabled else 0,
+                    1 if target.live_access_enabled else 0,
                     target.cron_expression,
                     target.created_at.isoformat(),
                     target.updated_at.isoformat(),
@@ -504,6 +507,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
             restore_defaults=_json_load(row["restore_defaults_json"], {}),
             labels=_json_load(row["labels_json"], {}),
             enabled=bool(row["enabled"]),
+            live_access_enabled=bool(row["live_access_enabled"]) if "live_access_enabled" in row.keys() else False,
             cron_expression=row["cron_expression"] if "cron_expression" in row.keys() else None,
             created_at=_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),

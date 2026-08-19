@@ -394,8 +394,12 @@
       const resp = await fetch(path, { ...options, method: "GET" });
       if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
       if (!resp.ok) {
-        const error = new Error(`${resp.status} ${resp.statusText}`);
+        const err = await resp.json().catch(() => ({}));
+        const error = new Error(typeof err.error === "string" ? err.error : `${resp.status} ${resp.statusText}`);
         error.status = resp.status;
+        error.code = typeof err.code === "string" ? err.code : "";
+        error.reason = typeof err.reason === "string" ? err.reason : "";
+        error.path = typeof err.path === "string" ? err.path : "";
         throw error;
       }
       return resp.json();
@@ -1286,6 +1290,7 @@ docker compose up -d
 
     let targetModalState = { mode: "create", target: null, volumeProject: null, isEditing: false };
     let targetsTableState = { sortKey: "name", sortDir: "asc", page: 1, pageSize: 25, filters: { name: "", worker: "", compose: "", mode: "", retention: "", cron: "" } };
+    let liveBrowserState = null;
 
     function renderTargets(content) {
       const canManageTargets = state.currentRole === "admin";
@@ -1569,6 +1574,8 @@ docker compose up -d
                  ${canRunTargets ? `<button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
                  ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
                   ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
+                 ${t.live_access_enabled ? `<button class="dropdown-item" data-action="live-browser" data-id="${escapeHtml(t.id)}">Ver archivos en vivo</button>` : `<span class="dropdown-item live-access-state" role="status">Live: deshabilitado</span>`}
+                 ${canManageTargets ? `<button class="dropdown-item" data-action="live-toggle" data-id="${escapeHtml(t.id)}" data-enabled="${t.live_access_enabled ? "false" : "true"}">${t.live_access_enabled ? "Deshabilitar acceso live" : "Habilitar acceso live"}</button>` : ""}
                  ${canManageTargets ? `<button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
                  <div class="dropdown-divider"></div>
                  <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>` : ""}
@@ -1664,6 +1671,12 @@ docker compose up -d
           if (action === "run") { await runBackupNow(id, e.currentTarget); }
           else if (action === "snapshots") { openSnapshotsModal(target); }
           else if (action === "logs") { openLogPanel(jobId, id); }
+          else if (action === "live-browser") { openLiveBrowser(target); }
+          else if (action === "live-toggle") {
+            if (state.currentRole !== "admin") return;
+            try { await apiPatch(`/api/v1/targets/${encodeURIComponent(id)}`, { live_access_enabled: btn.dataset.enabled === "true" }); await refreshAll(); }
+            catch (error) { alert(`Error cambiando acceso live: ${error.message}`); }
+          }
           else if (action === "edit") { openEditTargetModal(target); }
           else if (action === "delete") { openDeleteTargetModal(id, btn.dataset.name); }
         });
@@ -1682,6 +1695,146 @@ docker compose up -d
           }
         });
       });
+    }
+
+    function liveBrowserParent(path) {
+      const parts = String(path || "/").split("/").filter(Boolean);
+      parts.pop();
+      return parts.length ? `/${parts.join("/")}` : "/";
+    }
+
+    function setLiveBrowserStatus(kind, text) {
+      const status = document.getElementById("liveBrowserStatus");
+      if (!status) return;
+      status.dataset.state = kind;
+      status.textContent = text;
+    }
+
+    function liveBrowserErrorMessage(error, requestedPath, fallback) {
+      if (error?.code === "live_access_denied" && error.reason === "protected_volume") {
+        const path = typeof error.path === "string" && error.path.startsWith("/") ? error.path : requestedPath;
+        const context = path && path !== "/" ? ` Carpeta solicitada: ${path}.` : "";
+        return `Acceso restringido: este volumen está protegido por permisos del sistema y no se puede leer en modo seguro.${context}`;
+      }
+      return fallback;
+    }
+
+    async function downloadLiveBrowserFile(path, name) {
+      if (!liveBrowserState || liveBrowserState.closed) return;
+      setLiveBrowserStatus("connected", "Descargando bytes...");
+      try {
+        const response = await fetch(`/api/v1/targets/${encodeURIComponent(liveBrowserState.target.id)}/live/file?path=${encodeURIComponent(path)}`, { credentials: "same-origin" });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          const error = new Error(typeof body.error === "string" ? body.error : `${response.status} ${response.statusText}`);
+          error.status = response.status;
+          error.code = typeof body.code === "string" ? body.code : "";
+          error.reason = typeof body.reason === "string" ? body.reason : "";
+          error.path = typeof body.path === "string" ? body.path : "";
+          throw error;
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name || "download";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        setLiveBrowserStatus("connected", "Conectado · descarga iniciada");
+      } catch (error) {
+        const message = liveBrowserErrorMessage(error, path, "No se pudo descargar el archivo");
+        setLiveBrowserStatus(error?.code === "live_access_denied" ? "restricted" : "error", message);
+      }
+    }
+
+    function renderLiveBrowserEntries(entries) {
+      const container = document.getElementById("liveBrowserEntries");
+      if (!container) return;
+      container.innerHTML = entries.length ? entries.map(entry => {
+        const isDirectory = entry.type === "dir";
+        const label = `${isDirectory ? "Abrir" : "Descargar"} ${entry.name || "entrada"}`;
+        const meta = isDirectory ? "Directorio" : (formatJobBytes(entry.size) || "Archivo");
+        return `<button type="button" class="live-browser-entry" role="treeitem" data-live-path="${escapeHtml(entry.path)}" data-live-type="${isDirectory ? "dir" : "file"}" data-live-name="${escapeHtml(entry.name)}" aria-label="${escapeHtml(label)}"><span class="live-browser-entry-icon" aria-hidden="true">${isDirectory ? "▸" : "•"}</span><span class="live-browser-entry-name">${escapeHtml(entry.name)}</span><span class="live-browser-entry-meta">${escapeHtml(meta)}</span></button>`;
+      }).join("") : '<div class="live-browser-empty" role="status">Directorio vacio</div>';
+      container.querySelectorAll("[data-live-path]").forEach(button => button.addEventListener("click", () => {
+        const path = button.dataset.livePath;
+        if (button.dataset.liveType === "dir") void loadLiveBrowserEntries(path);
+        else void downloadLiveBrowserFile(path, button.dataset.liveName);
+      }));
+    }
+
+    async function loadLiveBrowserEntries(path = "/", cursor = null) {
+      const browser = liveBrowserState;
+      if (!browser || browser.closed) return;
+      setLiveBrowserStatus("connecting", "Cargando lista acotada...");
+      try {
+        const query = `?path=${encodeURIComponent(path)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const result = await apiGet(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/entries${query}`);
+        if (browser !== liveBrowserState || browser.closed) return;
+        browser.path = path;
+        browser.nextCursor = result.next_cursor || null;
+        const pathEl = document.getElementById("liveBrowserPath");
+        if (pathEl) pathEl.textContent = path;
+        renderLiveBrowserEntries(Array.isArray(result.entries) ? result.entries : []);
+        const next = document.getElementById("liveBrowserNext");
+        if (next) next.hidden = !browser.nextCursor;
+        setLiveBrowserStatus("connected", "Conectado · lista actualizada");
+      } catch (error) {
+        const message = liveBrowserErrorMessage(error, path, "No se pudo cargar la lista live");
+        setLiveBrowserStatus(error?.code === "live_access_denied" ? "restricted" : "error", message);
+      }
+    }
+
+    function connectLiveBrowserEvents() {
+      const browser = liveBrowserState;
+      if (!browser || browser.closed) return;
+      setLiveBrowserStatus(browser.reconnects ? "reconnecting" : "connecting", browser.reconnects ? "Reconectando eventos..." : "Conectando eventos...");
+      const source = new EventSource(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/events`, { withCredentials: true });
+      browser.eventSource = source;
+      source.onopen = () => { browser.reconnects = 0; setLiveBrowserStatus("connected", "Conectado · cambios en vivo activos"); };
+      source.addEventListener("changed", event => {
+        browser.lastEventId = event.lastEventId || browser.lastEventId;
+        setLiveBrowserStatus("connected", "Cambio detectado · actualizando lista...");
+        void loadLiveBrowserEntries(browser.path);
+      });
+      source.addEventListener("resync_required", () => {
+        browser.nextCursor = null;
+        setLiveBrowserStatus("resync", "Resincronizando lista autorizada...");
+        void loadLiveBrowserEntries(browser.path);
+      });
+      source.onerror = () => {
+        source.close();
+        browser.eventSource = null;
+        browser.reconnects += 1;
+        if (browser.reconnects > 4) { setLiveBrowserStatus("error", "Eventos live no disponibles; reintenta mas tarde"); return; }
+        setLiveBrowserStatus("reconnecting", "Conexion perdida · reintentando...");
+        browser.retryTimer = setTimeout(connectLiveBrowserEvents, Math.min(8000, 500 * 2 ** (browser.reconnects - 1)));
+      };
+    }
+
+    function closeLiveBrowser() {
+      if (!liveBrowserState) return;
+      liveBrowserState.closed = true;
+      liveBrowserState.eventSource?.close();
+      if (liveBrowserState.retryTimer) clearTimeout(liveBrowserState.retryTimer);
+      liveBrowserState = null;
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) { overlay.classList.remove("open", "active"); overlay.innerHTML = ""; }
+    }
+
+    function openLiveBrowser(target) {
+      closeLiveBrowser();
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay || !target || !target.live_access_enabled) return;
+      liveBrowserState = { target, path: "/", nextCursor: null, reconnects: 0, eventSource: null, retryTimer: null, closed: false };
+      overlay.innerHTML = `<div class="modal live-browser-modal" role="dialog" aria-modal="true" aria-labelledby="liveBrowserTitle" aria-describedby="liveBrowserHelp"><div class="modal-header"><h3 id="liveBrowserTitle">Archivos en vivo · ${escapeHtml(target.name)}</h3><button type="button" class="close" id="liveBrowserClose" aria-label="Cerrar archivos en vivo">&times;</button></div><div class="modal-body"><div class="helper" id="liveBrowserHelp">Solo lectura. El Control Plane limita la lista y descarga bytes sin abrir rutas del host.</div><div id="liveBrowserStatus" class="live-browser-status" data-state="connecting" role="status" aria-live="polite">Conectando...</div><div class="live-browser-toolbar"><button type="button" class="btn ghost sm" id="liveBrowserUp">Subir</button><code id="liveBrowserPath">/</code></div><div id="liveBrowserEntries" class="live-browser-entries" role="tree" tabindex="0" aria-label="Archivos y directorios del target"></div><div class="live-browser-pagination"><button type="button" class="btn ghost sm" id="liveBrowserNext" hidden>Siguiente pagina</button></div></div></div>`;
+      overlay.classList.add("open");
+      document.getElementById("liveBrowserClose").addEventListener("click", closeLiveBrowser);
+      document.getElementById("liveBrowserUp").addEventListener("click", () => void loadLiveBrowserEntries(liveBrowserParent(liveBrowserState.path)));
+      document.getElementById("liveBrowserNext").addEventListener("click", () => void loadLiveBrowserEntries(liveBrowserState.path, liveBrowserState.nextCursor));
+      void loadLiveBrowserEntries();
+      connectLiveBrowserEvents();
     }
 
     function openDeleteTargetModal(targetId, name) {

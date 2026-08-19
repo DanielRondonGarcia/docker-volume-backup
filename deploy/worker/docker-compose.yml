@@ -87,6 +87,10 @@ services:
       WORKER_HEALTH_PORT: "8081"
       # Imagen usada para ejecutar los jobs de backup/restore.
       BACKUP_RUNTIME_IMAGE: ${BACKUP_RUNTIME_IMAGE:-docker-volume-backup-runtime-local:dev}
+      # Live browsing starts a helper from this same worker image. The helper
+      # receives only the server-selected source as a read-only Docker mount;
+      # the worker does not need the host Docker volume tree mounted.
+      LIVE_FILE_HELPER_IMAGE: ${LIVE_FILE_HELPER_IMAGE:-docker-volume-backup-worker-local:dev}
       # Snapshot Explorer v2 feature flags and bounded Redis cache settings.
       SNAPSHOT_EXPLORER_NO_LOCK: ${SNAPSHOT_EXPLORER_NO_LOCK:-false}
       SNAPSHOT_EXPLORER_CACHE_DIR: ${SNAPSHOT_EXPLORER_CACHE_DIR:-/var/cache/restic-explorer}

@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 
@@ -247,6 +247,20 @@ def _poll_worker(service: WorkerAgentService):
     return service.poll_once()
 
 
+def start_live_lane(service: WorkerAgentService, interval: float):
+    poll = getattr(service, "poll_live_once", None)
+    if not callable(poll): return None
+    stop = Event()
+    def run():
+        while not stop.is_set():
+            try:
+                poll()
+            except Exception as exc:
+                logger.debug("Live worker lane failed (error_type=%s)", exc.__class__.__name__)
+            stop.wait(interval)
+    thread = Thread(target=run, daemon=True, name="worker-live-lane"); thread.start(); return stop, thread
+
+
 def build_service() -> WorkerAgentService:
     def _resolve_version():
         wv = (os.environ.get("WORKER_VERSION") or "").strip()
@@ -275,6 +289,11 @@ def build_service() -> WorkerAgentService:
             "ghcr.io/danielrondongarcia/docker-volume-backup",
         ),
         enrollment_token=os.environ.get("WORKER_ENROLLMENT_TOKEN") or os.environ.get("WORKER_SECRET") or None,
+        live_helper_image=(
+            os.environ.get("LIVE_FILE_HELPER_IMAGE")
+            or os.environ.get("WORKER_IMAGE")
+            or "docker-volume-backup-worker-local:dev"
+        ),
     )
     client = ControlPlaneClient(
         config.control_plane_url,
@@ -329,6 +348,7 @@ def main():
     )
     health_state.set_runtime(run_once=run_once, poll_interval_seconds=poll_interval)
     start_health_server(health_state)
+    live_lane = start_live_lane(service, interactive_interval)
 
     while True:
         try:
@@ -379,6 +399,8 @@ def main():
         finally:
             health_state.record_loop_completed()
         if run_once and attempts == 0:
+            if live_lane:
+                live_lane[0].set()
             break
         if attempts or not run_once:
             retry_delay = _bounded_interval(

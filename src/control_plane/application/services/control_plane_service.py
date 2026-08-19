@@ -66,6 +66,7 @@ class ControlPlaneService:
     MAX_PUBLIC_SUMMARY_ITEMS = 200
     MAX_REQUEST_ID_LENGTH = 128
     MAX_SEARCH_QUERY_LENGTH = 256
+    LIVE_REVISION_SCHEMA_VERSION = 1
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     SNAPSHOT_READ_COMMANDS = {
@@ -313,8 +314,11 @@ class ControlPlaneService:
         restore_defaults: Optional[Dict[str, Any]] = None,
         labels: Optional[Dict[str, str]] = None,
         cron_expression: Optional[str] = None,
+        live_access_enabled: bool = False,
     ) -> BackupTargetRecord:
         backup_mode = self._validate_backup_mode(backup_mode)
+        if not isinstance(live_access_enabled, bool):
+            raise ValueError("live_access_enabled must be a boolean")
         self._require_eligible_worker(worker_id)
         if storage_profile_id:
             self._require_storage_profile(storage_profile_id)
@@ -356,6 +360,7 @@ class ControlPlaneService:
             restic_password_secret_id=restic_password_secret_id,
             restore_defaults=restore_defaults or {},
             labels=labels or {},
+            live_access_enabled=live_access_enabled,
             cron_expression=(cron_expression.strip() if cron_expression else None),
         )
         return self.target_repository.save(target)
@@ -391,16 +396,21 @@ class ControlPlaneService:
         labels: Optional[Dict[str, str]] = None,
         cron_expression: Optional[str] = None,
         enabled: Optional[bool] = None,
+        live_access_enabled: Optional[bool] = None,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
         if backup_mode is not None:
             backup_mode = self._validate_backup_mode(backup_mode)
         if enabled is not None and not isinstance(enabled, bool):
             raise ValueError("enabled must be a boolean")
+        if live_access_enabled is not None and not isinstance(live_access_enabled, bool):
+            raise ValueError("live_access_enabled must be a boolean")
         effective_worker_id = worker_id if worker_id is not None else target.worker_id
         if worker_id is not None:
             self._require_eligible_worker(worker_id)
         if enabled is True:
+            self._require_eligible_worker(effective_worker_id)
+        if live_access_enabled is True:
             self._require_eligible_worker(effective_worker_id)
         if worker_id is not None:
             target.worker_id = worker_id
@@ -445,6 +455,8 @@ class ControlPlaneService:
             target.cron_expression = cron_expression.strip() or None
         if enabled is not None:
             target.enabled = bool(enabled)
+        if live_access_enabled is not None:
+            target.live_access_enabled = bool(live_access_enabled)
         target.updated_at = utcnow()
         return self.target_repository.save(target)
 
@@ -2224,6 +2236,103 @@ class ControlPlaneService:
                 repository = f"{base}/{safe_name}"
         repository = repository or f"target:{target.id}"
         return hashlib.sha256(str(repository).encode("utf-8")).hexdigest()
+
+    def get_live_target_revision(self, target_id: str) -> str:
+        return self._live_target_revision(self._require_target(target_id))
+
+    def get_live_target_context(self, target_id: str) -> Dict[str, Any]:
+        target = self._require_target(target_id)
+        worker = self.worker_repository.get(target.worker_id)
+        profile = (
+            self.storage_profile_repository.get(target.storage_profile_id)
+            if target.storage_profile_id
+            else None
+        )
+        eligible, reason = self._live_target_eligibility(target, worker, profile)
+        return {
+            "target_id": target.id,
+            "worker_id": target.worker_id,
+            "config_revision": self._live_target_revision(target, worker, profile),
+            "eligible": eligible,
+            "reason": reason,
+        }
+
+    def is_live_target_eligible(self, target_id: str) -> bool:
+        return bool(self.get_live_target_context(target_id)["eligible"])
+
+    def _live_target_revision(
+        self,
+        target: BackupTargetRecord,
+        worker: Optional[WorkerRecord] = None,
+        profile=None,
+    ) -> str:
+        worker = worker if worker is not None else self.worker_repository.get(target.worker_id)
+        if target.storage_profile_id and profile is None:
+            profile = self.storage_profile_repository.get(target.storage_profile_id)
+
+        revision_inputs = {
+            "schema_version": self.LIVE_REVISION_SCHEMA_VERSION,
+            "target": {
+                "id": target.id,
+                "worker_id": target.worker_id,
+                "enabled": bool(target.enabled),
+                "live_access_enabled": bool(target.live_access_enabled),
+                "compose_project": target.compose_project,
+                "volume_targets": list(target.volume_targets or []),
+                "runtime_volumes": dict(target.runtime_volumes or {}),
+                "runtime_image": target.runtime_image,
+                "runtime_network_mode": target.runtime_network_mode,
+                "updated_at": target.updated_at.isoformat() if target.updated_at else None,
+            },
+            "worker": (
+                {
+                    "id": worker.id,
+                    "name": worker.name,
+                    "host_name": worker.host_name,
+                    "version": worker.version,
+                    "labels": dict(worker.labels or {}),
+                    "status": worker.status,
+                }
+                if worker is not None
+                else {"id": target.worker_id, "missing": True}
+            ),
+            "storage_profile": (
+                {
+                    "id": profile.id,
+                    "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+                }
+                if profile is not None
+                else (
+                    {"id": target.storage_profile_id, "missing": True}
+                    if target.storage_profile_id
+                    else None
+                )
+            ),
+        }
+        try:
+            canonical = json.dumps(
+                revision_inputs,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("live target configuration cannot be canonicalized") from exc
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _live_target_eligibility(self, target, worker, profile):
+        if not target.live_access_enabled:
+            return False, "live_access_disabled"
+        if not target.enabled:
+            return False, "target_disabled"
+        if worker is None:
+            return False, "worker_missing"
+        worker_status = self._worker_status(worker)
+        if worker_status != WorkerStatus.ONLINE:
+            return False, f"worker_{worker_status}"
+        if target.storage_profile_id and profile is None:
+            return False, "storage_profile_missing"
+        return True, None
 
     def _invalidate_explorer_metadata_after_success(self, job: JobRecord) -> None:
         if not job.target_id:

@@ -520,6 +520,15 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertNotIn('data-job-live-state role="status" aria-live="polite">Conectando…</span>', self.source)
 
 
+    def test_live_file_browser_is_opt_in_read_only_safe_and_bounded(self):
+        for marker in ("live_access_enabled", "Habilitar acceso live", "Ver archivos en vivo", "function openLiveBrowser(target)", "/live/entries", "/live/file", "URL.createObjectURL", "Solo lectura", 'role="tree"', 'role="treeitem"', 'source.addEventListener("resync_required"', "browser.reconnects > 4", "escapeHtml(entry.name)", "status.textContent = text", "await resp.json()", "error.code", "error.reason", "function liveBrowserErrorMessage", "Acceso restringido: este volumen está protegido por permisos del sistema y no se puede leer en modo seguro."):
+            self.assertIn(marker, self.source)
+        self.assertNotIn("innerHTML = result.b64_content", self.source)
+        self.assertNotIn("contenteditable", self.source.lower())
+        for marker in (".live-browser-status[data-state=\"connected\"]", ".live-browser-status[data-state=\"resync\"]", ".live-browser-status[data-state=\"restricted\"]", ".live-browser-status[data-state=\"error\"]", ".live-browser-entry:focus-visible"):
+            self.assertIn(marker, self.css)
+
+
 class StorageCardsUiStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

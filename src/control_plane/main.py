@@ -2,13 +2,16 @@ import json
 import logging
 import os
 import queue
+import re
 import ssl
+import threading
+from collections import deque
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http import cookies
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 try:
@@ -18,6 +21,13 @@ except ImportError:
 
 from src.control_plane.auth import AuthService, ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 from src.control_plane.application.services.control_plane_service import ControlPlaneService, WorkerDeletionConflict
+from src.control_plane.application.services.live_file_service import (
+    LiveCursorError,
+    LiveFileService,
+    LiveLimitError,
+    LiveSessionError,
+    LiveSessionKey,
+)
 from src.control_plane.application.services.scheduler_service import (
     DEFAULT_SCHEDULER_TIMEZONE,
     SCHEDULER_TIMEZONE_ENV,
@@ -60,6 +70,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 UI_ROOT = Path(__file__).resolve().parent / "ui"
 JOB_EVENT_HEARTBEAT_SECONDS = 15
+LIVE_MOUNT_SOURCES_LIMIT = 64
+LIVE_MOUNT_FOLDER_LENGTH = 64
+
+
+class LiveAccessDeniedError(LiveSessionError):
+    def __init__(self, path: str):
+        super().__init__("live access denied")
+        self.path = path
 
 
 def _to_jsonable(value):
@@ -153,6 +171,8 @@ class ControlPlaneApplication:
     control_plane_service: ControlPlaneService
     tls_manager: TLSMaterialManager | None = None
     scheduler: "SchedulerService | None" = None
+    live_file_service: LiveFileService | None = None
+    live_lane: "LiveWorkerLane | None" = None
 
 
 class ControlPlaneHTTPServer(ThreadingHTTPServer):
@@ -181,6 +201,51 @@ class ControlPlaneHTTPSServer((NativeThreadingHTTPSServer or ThreadingHTTPServer
         self.socket = context.wrap_socket(self.socket, server_side=True)
         self.server_bind()
         self.server_activate()
+
+
+class LiveWorkerLane:
+    def __init__(self, max_pending=64):
+        self.max_pending, self._lock, self._pending, self._operations = max_pending, threading.Condition(), {}, {}
+    def submit(self, worker_id, payload, stream=None):
+        with self._lock:
+            if sum(map(len, self._pending.values())) >= self.max_pending: raise LiveLimitError("live request queue limit reached")
+            operation_id = uuid4().hex; self._pending.setdefault(worker_id, deque()).append({**payload, "operation_id": operation_id})
+            self._operations[operation_id] = {"worker_id": worker_id, "target_id": payload.get("target_id"), "result": None, "started": threading.Event(), "stream": stream}; return operation_id
+    def poll(self, worker_id, limit=4):
+        with self._lock:
+            pending = self._pending.get(worker_id, deque()); items = [pending.popleft() for _ in range(min(max(1, int(limit)), 16)) if pending]
+            if not pending: self._pending.pop(worker_id, None)
+            return items
+    def respond(self, worker_id, operation_id, result):
+        with self._lock:
+            operation = self._operations.get(operation_id)
+            if not operation or operation["worker_id"] != worker_id: raise LiveSessionError("live operation is unavailable")
+            if not isinstance(result, dict) or len(json.dumps(result, default=str)) > 1024 * 1024: raise LiveLimitError("live response exceeds the permitted bound")
+            operation["result"] = result; operation["started"].set()
+            if operation["stream"] is not None and int(result.get("status", 500)) != 200: operation["stream"].close()
+    def wait(self, operation_id, timeout=10.0):
+        operation = self._operations.get(operation_id)
+        if not operation or not operation["started"].wait(timeout): self.cancel(operation_id); return None
+        return operation["result"]
+    def chunk(self, worker_id, operation_id, data, final=False):
+        operation = self._operations.get(operation_id)
+        if not operation or operation["worker_id"] != worker_id or operation["stream"] is None: raise LiveSessionError("live stream is unavailable")
+        if data: operation["stream"].push(data)
+        if final: operation["stream"].close()
+    def cancel(self, operation_id):
+        with self._lock:
+            operation = self._operations.pop(operation_id, None)
+            if operation and operation["stream"] is not None: operation["stream"].cancel()
+            for worker_id, pending in list(self._pending.items()):
+                self._pending[worker_id] = deque(item for item in pending if item.get("operation_id") != operation_id)
+                if not self._pending[worker_id]: self._pending.pop(worker_id, None)
+    def finish(self, operation_id):
+        with self._lock:
+            operation = self._operations.pop(operation_id, None)
+            if operation and operation["stream"] is not None: operation["stream"].close()
+    def cancel_target(self, target_id):
+        for operation_id, operation in list(self._operations.items()):
+            if operation.get("target_id") == target_id: self.cancel(operation_id)
 
 
 class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
@@ -342,6 +407,16 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     },
                     head_only=head_only,
                 )
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "live":
+                if parts[5] == "events" and not head_only:
+                    return self._stream_live_events(parts[3])
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                if parts[5] == "entries":
+                    return self._live_entries(parts[3], head_only=head_only)
+                if parts[5] == "file" and not head_only:
+                    return self._live_file(parts[3])
+                return self._write_json(405, {"error": "live operation is not supported"}, head_only=head_only)
             if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] == "snapshots":
                 if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
                     return
@@ -492,8 +567,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        body = self._read_json_body()
         parts = self._path_parts(path)
+        if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4:] == ["live", "chunk"]:
+            try:
+                return self._handle_live_chunk(parts[3], self._read_raw_body(64 * 1024))
+            except ValueError:
+                return self._write_json(413, {"error": "live chunk exceeds the permitted bound"})
+        body = self._read_json_body()
         try:
             if path in ("/api/v1/workers/register", "/api/v1/worker-enrollments/sign"):
                 return self._write_json(404, {"error": "legacy worker trust path is unsupported"})
@@ -645,6 +725,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     restore_defaults=body.get("restore_defaults") or {},
                     labels=body.get("labels") or {},
                     cron_expression=body.get("cron_expression"),
+                    live_access_enabled=body.get("live_access_enabled", False),
                 )
                 return self._write_json(201, self._target_jsonable(target))
 
@@ -755,6 +836,47 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     return
                 snapshot = self._control_plane_service().sync_inventory(parts[3], body.get("inventory") or {})
                 return self._write_json(200, _to_jsonable(snapshot))
+
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4:] == ["live", "poll"]:
+                if not self._require_worker_identity(parts[3]):
+                    return
+                lane = self._live_lane()
+                if lane is None:
+                    return self._write_json(503, {"error": "live worker lane unavailable"})
+                return self._write_json(200, {"items": lane.poll(parts[3], body.get("limit", 4))})
+
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4:] == ["live", "response"]:
+                if not self._require_worker_identity(parts[3]):
+                    return
+                lane = self._live_lane()
+                if lane is None:
+                    return self._write_json(503, {"error": "live worker lane unavailable"})
+                lane.respond(parts[3], body.get("operation_id", ""), body.get("result") or {})
+                return self._write_json(202, {"ok": True})
+
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "workers"] and parts[4:] == ["live", "change"]:
+                if not self._require_worker_identity(parts[3]):
+                    return
+                try:
+                    if not isinstance(body, dict) or body.get("worker_id") != parts[3]:
+                        raise ValueError("live change worker identity is invalid")
+                    target_id = body.get("target_id")
+                    live_service, key, context = self._live_context(target_id)
+                    if body.get("config_revision") != context["config_revision"] or key.worker_id != parts[3]:
+                        raise ValueError("live change revision is stale")
+                    kind, entry_type = body.get("kind"), body.get("entry_type")
+                    if kind not in {"created", "modified", "deleted", "resync_required"} or entry_type not in {"file", "dir"}:
+                        raise ValueError("live change metadata is invalid")
+                    path = self._normalize_live_path(body.get("path"))
+                    size, mtime_ns = body.get("size"), body.get("mtime_ns")
+                    if any(value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2**63 - 1) for value in (size, mtime_ns)):
+                        raise ValueError("live change metadata is invalid")
+                    event = live_service.publish_change(key, kind, path, entry_type, size, mtime_ns)
+                    return self._write_json(202, {"ok": True, "event_id": event.event_id})
+                except LiveLimitError:
+                    return self._write_json(429, {"error": "live resource limit reached"})
+                except (LiveSessionError, ValueError, TypeError):
+                    return self._write_json(409, {"error": "live change rejected"})
 
             if len(parts) == 5 and parts[:3] == ["api", "v1", "workers"] and parts[4] == "jobs":
                 if not self._require_auth(ROLE_OPERATOR, api_mode=True):
@@ -963,7 +1085,12 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     labels=body.get("labels"),
                     cron_expression=body.get("cron_expression"),
                     enabled=body.get("enabled"),
+                    live_access_enabled=body.get("live_access_enabled"),
                 )
+                if self._live_service() is not None:
+                    self._live_service().invalidate_target(parts[3], "configuration_changed")
+                if self._live_lane() is not None:
+                    self._live_lane().cancel_target(parts[3])
                 return self._write_json(200, self._target_jsonable(target))
             if path == "/api/v1/settings":
                 settings = self._control_plane_service().update_settings(
@@ -1019,6 +1146,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 deleted = self._control_plane_service().delete_target(parts[3])
                 if not deleted:
                     return self._write_json(404, {"error": "target not found"})
+                if self._live_service() is not None:
+                    self._live_service().invalidate_target(parts[3], "target_deleted")
+                if self._live_lane() is not None:
+                    self._live_lane().cancel_target(parts[3])
                 return self._write_json(204, {})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:
                 self._control_plane_service().delete_secret(parts[3])
@@ -1042,6 +1173,282 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             logger.exception("Unhandled DELETE error")
             return self._write_json(500, {"error": str(exc)})
 
+    def _live_service(self):
+        return getattr(self.server.application, "live_file_service", None)
+    def _live_lane(self):
+        return getattr(self.server.application, "live_lane", None)
+    @staticmethod
+    def _normalize_live_path(value: str) -> str:
+        if value in (None, "", "/"): return "/"
+        if not isinstance(value, str) or len(value) > 4096 or not value.startswith("/") or "\\" in value or "\x00" in value: raise ValueError("live path is invalid")
+        parts = value.split("/")[1:]
+        if any(not part or part in (".", "..") for part in parts): raise ValueError("live path traversal is not allowed")
+        return "/" + "/".join(parts)
+
+    @staticmethod
+    def _raise_live_worker_error(path: str, result: dict):
+        if result.get("code") == "live_access_denied" and result.get("reason") == "protected_volume":
+            raise LiveAccessDeniedError(path)
+        raise LiveSessionError("live worker request failed")
+
+    @staticmethod
+    def _live_access_denied_payload(path: str):
+        return {
+            "error": "live access denied",
+            "code": "live_access_denied",
+            "reason": "protected_volume",
+            "path": path,
+        }
+
+    def _live_context(self, target_id: str):
+        try:
+            context = self._control_plane_service().get_live_target_context(target_id)
+        except ValueError:
+            raise LiveSessionError("live access unavailable") from None
+        if not context.get("eligible") or self._live_service() is None: raise LiveSessionError("live access unavailable")
+        live_service = self._live_service()
+        return live_service, LiveSessionKey(context["target_id"], context["config_revision"], context["worker_id"]), context
+
+    @staticmethod
+    def _live_mount_folder(destination: str) -> str:
+        if (
+            not isinstance(destination, str)
+            or not destination
+            or len(destination) > 4096
+            or "\x00" in destination
+            or "\\" in destination
+            or any(ord(character) < 32 for character in destination)
+            or not destination.startswith("/")
+        ):
+            raise LiveSessionError("live worker is unavailable")
+        trimmed = destination.strip("/")
+        parts = trimmed.split("/") if trimmed else []
+        normalized_destination = "/" + trimmed
+        if (
+            not parts
+            or any(not part or part in {".", ".."} for part in parts)
+            or normalized_destination in {"/var/lib/docker", "/var/lib/docker/volumes", "/proc", "/sys", "/dev"}
+            or normalized_destination.startswith(("/proc/", "/sys/", "/dev/", "/var/lib/docker/"))
+            or trimmed.endswith((".sock", ".socket"))
+        ):
+            raise LiveSessionError("live worker is unavailable")
+        folder = re.sub(r"[^A-Za-z0-9_-]+", "-", trimmed).strip("-")
+        if not folder:
+            raise LiveSessionError("live worker is unavailable")
+        return folder[:LIVE_MOUNT_FOLDER_LENGTH].rstrip("-") or folder[:LIVE_MOUNT_FOLDER_LENGTH]
+
+    def _live_mount_source(self, target_id: str) -> list[dict[str, str]]:
+        target = self._control_plane_service().target_repository.get(target_id)
+        if target is None: raise LiveSessionError("live access unavailable")
+        runtime_volumes = target.runtime_volumes or {}
+        if not isinstance(runtime_volumes, dict) or not runtime_volumes:
+            raise LiveSessionError("live worker is unavailable")
+        selected = target.volume_targets or []
+        if not isinstance(selected, list):
+            raise LiveSessionError("live worker is unavailable")
+        if (
+            len(selected) > LIVE_MOUNT_SOURCES_LIMIT
+            or any(not isinstance(destination, str) for destination in selected)
+            or len(set(selected)) != len(selected)
+        ):
+            raise LiveSessionError("live worker is unavailable")
+
+        by_destination = {}
+        for source, spec in runtime_volumes.items():
+            if not isinstance(source, str) or not source or len(source) > 4096 or "\x00" in source:
+                continue
+            destination = spec.get("bind") if isinstance(spec, dict) else None
+            if not isinstance(destination, str):
+                continue
+            if destination in by_destination:
+                by_destination[destination] = None
+            else:
+                by_destination[destination] = (source, spec)
+
+        if selected:
+            ordered = []
+            for destination in selected:
+                candidate = by_destination.get(destination)
+                if candidate is None:
+                    raise LiveSessionError("live worker is unavailable")
+                ordered.append(candidate)
+        else:
+            ordered = list(runtime_volumes.items())
+
+        if not ordered or len(ordered) > LIVE_MOUNT_SOURCES_LIMIT:
+            raise LiveSessionError("live worker is unavailable")
+        descriptors, used_sources, used_destinations, used_folders = [], set(), set(), set()
+        for source, spec in ordered:
+            if not isinstance(source, str) or not source or len(source) > 4096 or "\x00" in source:
+                raise LiveSessionError("live worker is unavailable")
+            if not isinstance(spec, dict):
+                raise LiveSessionError("live worker is unavailable")
+            destination = spec.get("bind")
+            if not isinstance(destination, str) or source in used_sources or destination in used_destinations:
+                raise LiveSessionError("live worker is unavailable")
+            folder = self._live_mount_folder(destination)
+            base_folder, suffix = folder, 2
+            while folder in used_folders:
+                suffix_text = f"-{suffix}"
+                folder = f"{base_folder[:LIVE_MOUNT_FOLDER_LENGTH - len(suffix_text)].rstrip('-')}{suffix_text}"
+                suffix += 1
+            used_sources.add(source)
+            used_destinations.add(destination)
+            used_folders.add(folder)
+            descriptors.append({"source": source, "folder": folder})
+        return descriptors
+
+    def _live_request(self, target_id: str, operation: str):
+        live_service, key, context = self._live_context(target_id)
+        lane = self._live_lane()
+        if lane is None: raise LiveSessionError("live worker lane unavailable")
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        path = self._normalize_live_path(query.get("path", ["/"])[0])
+        payload = {"target_id": target_id, "config_revision": context["config_revision"], "worker_id": context["worker_id"], "operation": operation, "path": path, "mount_sources": self._live_mount_source(target_id)}; stream = None
+        if operation in {"watch", "unwatch"}:
+            operation_id = lane.submit(context["worker_id"], payload)
+            result = lane.wait(operation_id)
+            lane.finish(operation_id)
+            if not result:
+                raise LiveSessionError("live watcher request failed")
+            if int(result.get("status", 500)) != 200:
+                self._raise_live_worker_error(path, result)
+            return None
+        if operation == "entries":
+            try:
+                limit = max(1, min(int(query.get("limit", [100])[0]), 1000))
+            except (TypeError, ValueError):
+                raise ValueError("live entry limit is invalid") from None
+            cursor = query.get("cursor", [""])[0]
+            payload.update(limit=limit, cursor=live_service.read_entry_cursor(key, path, cursor) if cursor else None); live_service.attach(key).close()
+        else:
+            stream = live_service.open_raw_stream(key); payload["max_bytes"] = 64 * 1024 * 1024
+        operation_id = lane.submit(context["worker_id"], payload, stream=stream)
+        result = lane.wait(operation_id)
+        if not result:
+            lane.finish(operation_id); raise LiveSessionError("live worker did not respond")
+        if operation == "entries":
+            lane.finish(operation_id)
+            if int(result.get("status", 500)) != 200:
+                self._raise_live_worker_error(path, result)
+            next_cursor = result.get("next_cursor")
+            return {"entries": result.get("entries") if isinstance(result.get("entries"), list) else [], "next_cursor": live_service.issue_entry_cursor(key, path, next_cursor) if next_cursor else None}
+        if int(result.get("status", 500)) != 200:
+            lane.finish(operation_id)
+            self._raise_live_worker_error(path, result)
+        try:
+            if not self._control_plane_service().is_live_target_eligible(target_id):
+                stream.cancel()
+                raise LiveSessionError("live access unavailable")
+            self.close_connection = True
+            self.send_response(200)
+            for name, value in (("Content-Type", "application/octet-stream"), ("Cache-Control", "no-store"), ("Connection", "close"), ("X-Accel-Buffering", "no")): self.send_header(name, value)
+            self.end_headers()
+            for chunk in stream:
+                if not self._control_plane_service().is_live_target_eligible(target_id):
+                    stream.cancel()
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            stream.cancel()
+        finally:
+            lane.finish(operation_id)
+        return None
+
+    def _live_entries(self, target_id: str, head_only: bool = False):
+        try:
+            return self._write_json(200, self._live_request(target_id, "entries"), head_only=head_only)
+        except LiveLimitError:
+            return self._write_json(429, {"error": "live resource limit reached"}, head_only=head_only)
+        except LiveAccessDeniedError as exc:
+            return self._write_json(403, self._live_access_denied_payload(exc.path), head_only=head_only)
+        except (LiveCursorError, LiveSessionError, ValueError):
+            return self._write_json(404, {"error": "live access unavailable"}, head_only=head_only)
+
+    def _live_file(self, target_id: str):
+        try:
+            return self._live_request(target_id, "file")
+        except LiveLimitError:
+            return self._write_json(429, {"error": "live resource limit reached"})
+        except LiveAccessDeniedError as exc:
+            return self._write_json(403, self._live_access_denied_payload(exc.path))
+        except (LiveSessionError, ValueError):
+            return self._write_json(404, {"error": "live access unavailable"})
+
+    def _write_live_event(self, event_name: str, payload: dict, event_id: int | None = None):
+        prefix = f"id: {event_id}\n" if event_id is not None else ""
+        self.wfile.write(f"{prefix}event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()); self.wfile.flush()
+
+    def _write_live_change_event(self, event):
+        event_name = "resync_required" if event.get("kind") == "resync_required" else "changed"
+        self._write_live_event(event_name, event, event.get("id"))
+
+    def _stream_live_events(self, target_id: str):
+        if not self._require_auth(ROLE_VIEWER, api_mode=True):
+            return
+        try:
+            self._live_request(target_id, "watch")
+            watching = True
+            live_service, key, _ = self._live_context(target_id)
+            subscription = live_service.attach(key)
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            cursor = query.get("cursor", [""])[0] or None
+            last_id = (self.headers.get("Last-Event-ID", "") or query.get("last_event_id", [""])[0]).strip()
+            if not cursor and last_id.isdigit():
+                cursor = live_service.issue_cursor(key, int(last_id))
+            replay = live_service.replay(key, cursor)
+            self.close_connection = True
+            self.send_response(200)
+            for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-cache, no-store"), ("Connection", "keep-alive"), ("X-Accel-Buffering", "no")): self.send_header(name, value)
+            self.end_headers()
+            if replay.get("resync_required"):
+                self._write_live_event("resync_required", {"reason": replay.get("reason", "replay_gap")})
+            for event in replay.get("events", []):
+                self._write_live_change_event(event)
+            while self._control_plane_service().is_live_target_eligible(target_id):
+                try:
+                    item = subscription.get(timeout=15)
+                except queue.Empty:
+                    self._write_sse_comment("heartbeat")
+                    continue
+                if item.get("type") == "resync_required":
+                    self._write_live_event("resync_required", {"reason": item.get("reason", "replay_gap")})
+                    continue
+                event = item.get("event") or {}
+                if isinstance(event.get("id"), int):
+                    subscription.acknowledge(event["id"])
+                self._write_live_change_event(event)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            logger.debug("SSE client disconnected for live target %s", target_id)
+        except LiveAccessDeniedError as exc:
+            try:
+                self._write_json(403, self._live_access_denied_payload(exc.path))
+            except OSError:
+                pass
+        except (LiveCursorError, LiveSessionError, ValueError):
+            try:
+                self._write_json(404, {"error": "live access unavailable"})
+            except OSError:
+                pass
+        finally:
+            if "subscription" in locals(): subscription.close()
+            if "watching" in locals():
+                try: self._live_request(target_id, "unwatch")
+                except Exception: pass
+
+    def _handle_live_chunk(self, worker_id: str, raw_body: bytes):
+        if not self._require_worker_identity(worker_id):
+            return
+        lane = self._live_lane()
+        if lane is None:
+            return self._write_json(503, {"error": "live worker lane unavailable"})
+        try:
+            lane.chunk(worker_id, self.headers.get("X-Live-Operation", ""), raw_body, self.headers.get("X-Live-Final", "0") == "1")
+        except (LiveLimitError, LiveSessionError):
+            return self._write_json(409, {"error": "live stream unavailable"})
+        return self._write_json(202, {"ok": True})
+
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
 
@@ -1054,6 +1461,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         self._raw_body = raw_bytes
         raw = raw_bytes.decode("utf-8")
         return json.loads(raw) if raw else {}
+
+    def _read_raw_body(self, max_bytes: int) -> bytes:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length < 0 or content_length > max_bytes: raise ValueError("body exceeds the permitted bound")
+        raw_bytes = self.rfile.read(content_length)
+        if len(raw_bytes) != content_length: raise ValueError("incomplete request body")
+        self._raw_body = raw_bytes; return raw_bytes
 
     def _write_json(self, status_code: int, payload, head_only: bool = False, extra_headers: dict | None = None):
         body = json.dumps(payload, default=_to_jsonable).encode("utf-8")
@@ -1163,6 +1577,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         cookie["cp_session"]["path"] = "/"
         cookie["cp_session"]["httponly"] = True
         cookie["cp_session"]["samesite"] = "Lax"
+        if _env_flag("CONTROL_PLANE_TLS_ENABLED"): cookie["cp_session"]["secure"] = True
         if max_age is not None:
             cookie["cp_session"]["max-age"] = str(max_age)
         return cookie.output(header="", sep="").strip()
@@ -1239,6 +1654,8 @@ def build_application() -> ControlPlaneApplication:
         control_plane_service=control_plane_service,
         tls_manager=_build_tls_manager(),
         scheduler=scheduler,
+        live_file_service=LiveFileService(),
+        live_lane=LiveWorkerLane(),
     )
     return app
 

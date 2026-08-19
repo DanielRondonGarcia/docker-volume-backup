@@ -12,6 +12,7 @@ class WorkerAgentConfig:
     worker_id: Optional[str] = None
     backup_runtime_image: str = "ghcr.io/danielrondongarcia/docker-volume-backup"
     enrollment_token: Optional[str] = None
+    live_helper_image: str = "docker-volume-backup-worker-local:dev"
 
 
 @dataclass

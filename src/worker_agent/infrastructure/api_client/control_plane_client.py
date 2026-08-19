@@ -205,9 +205,38 @@ class ControlPlaneClient:
             {"lease_token": lease_token},
         )
 
-    def _post(self, path: str, payload: Dict[str, Any], authenticate: bool = True) -> Dict[str, Any]:
-        data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+    def fetch_live_requests(self, worker_id: str, limit: int = 4) -> List[Dict[str, Any]]:
+        bounded = max(1, min(int(limit), 16))
+        return self._post(f"/api/v1/workers/{worker_id}/live/poll", {"limit": bounded}).get("items", [])
+
+    def send_live_response(self, worker_id: str, operation_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        return self._post(
+            f"/api/v1/workers/{worker_id}/live/response",
+            {"operation_id": operation_id, "result": result},
+        )
+
+    def send_live_chunk(self, worker_id: str, operation_id: str, chunk: bytes, final: bool = False) -> Dict[str, Any]:
+        data = bytes(chunk)
+        if len(data) > 64 * 1024:
+            raise ValueError("live chunk exceeds the permitted bound")
+        return self._post(
+            f"/api/v1/workers/{worker_id}/live/chunk",
+            data,
+            extra_headers={"X-Live-Operation": operation_id, "X-Live-Final": "1" if final else "0"},
+        )
+
+    def send_live_change(self, worker_id: str, target_id: str, config_revision: str, kind: str, path: str, entry_type: str, size=None, mtime_ns=None) -> Dict[str, Any]:
+        return self._post(
+            f"/api/v1/workers/{worker_id}/live/change",
+            {
+                "worker_id": worker_id, "target_id": target_id, "config_revision": config_revision,
+                "kind": kind, "path": path, "entry_type": entry_type, "size": size, "mtime_ns": mtime_ns,
+            },
+        )
+
+    def _post(self, path: str, payload: Any, authenticate: bool = True, extra_headers: Dict[str, str] | None = None) -> Dict[str, Any]:
+        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/octet-stream" if isinstance(payload, bytes) else "application/json", **(extra_headers or {})}
         if authenticate:
             credential = self.credential_store.load() if self.credential_store else None
             if credential is None or not self.worker_id:

@@ -2,6 +2,8 @@ import base64
 import inspect
 import json
 import logging
+import os
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -10,11 +12,15 @@ from urllib.error import HTTPError
 from src.control_plane.domain.models import JobStatus
 from src.worker_agent.domain.models import WorkerAgentConfig, WorkerJobExecutionResult
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
+from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
+from src.worker_agent.application.services.live_target_session_manager import LiveTargetSessionKey, LiveTargetSessionManager
 from src.worker_agent.infrastructure.security.job_recovery_journal import WorkerJobRecoveryJournal
 
 logger = logging.getLogger(__name__)
+LIVE_MOUNT_SOURCES_LIMIT = 64
+LIVE_MOUNT_FOLDER_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _phase_from_line(line: str) -> Optional[str]:
@@ -170,6 +176,8 @@ class WorkerAgentService:
     MAX_LOG_LINES = 1000
     MAX_LOG_CHARS = 4 * 1024 * 1024
     MAX_SNAPSHOT_ENTRIES = 10_000
+    MAX_LIVE_POLL_REQUESTS = 16
+    MAX_LIVE_FILE_BYTES = 64 * 1024 * 1024
     MISSING_RESTIC_REPOSITORY_ERROR = (
         "Restic repository is not initialized or RESTIC_REPOSITORY points to the wrong path. "
         "Verify the target repository configuration before running restic init."
@@ -190,6 +198,7 @@ class WorkerAgentService:
         snapshot_cache: Optional[RedisSnapshotCache] = None,
         recovery_file: Optional[str] = None,
         recovery_journal: Optional[WorkerJobRecoveryJournal] = None,
+        live_session_manager: Optional[LiveTargetSessionManager] = None,
     ):
         self.config = config
         self.control_plane_client = control_plane_client
@@ -198,6 +207,7 @@ class WorkerAgentService:
         self.recovery_journal = recovery_journal or (
             WorkerJobRecoveryJournal(recovery_file) if recovery_file else None
         )
+        self.live_sessions = live_session_manager or LiveTargetSessionManager(runtime_factory=self._live_runtime_factory, change_publisher=self._publish_live_change)
 
     def ensure_registered(self) -> str:
         if self.config.worker_id and self.control_plane_client.credential_store and self.control_plane_client.credential_store.load():
@@ -213,9 +223,139 @@ class WorkerAgentService:
         return self.config.worker_id
 
     def cleanup_orphaned_runtime_containers(self) -> Dict[str, Any]:
-        return self.docker_runtime.cleanup_orphaned_runtime_containers(
+        result = self.docker_runtime.cleanup_orphaned_runtime_containers(
             recover_callback=self._recover_orphaned_runtime_container
         )
+        client = getattr(self.docker_runtime, "client", None)
+        if client is not None:
+            try:
+                result["live_helpers"] = self.live_sessions.cleanup_orphaned(client)
+            except Exception:
+                result["live_helpers"] = {"error": "live helper sweep failed"}
+        return result
+
+    def _live_runtime_factory(self, root: Any) -> LiveFileRuntime:
+        store = getattr(self.control_plane_client, "credential_store", None)
+        credential = store.load() if store and callable(getattr(store, "load", None)) else None
+        secret = getattr(credential, "secret", None)
+        if not isinstance(secret, (str, bytes)) or len(secret) < 32: raise RuntimeError("live worker credential is unavailable")
+        return LiveFileRuntime(root, secret)
+
+    def _resolve_live_source(self, source: Any, folder: str = "") -> Any:
+        if not isinstance(source, str) or not source or len(source) > 4096 or "\x00" in source: raise ValueError("live mount source is invalid")
+        if not isinstance(folder, str) or (folder and not LIVE_MOUNT_FOLDER_PATTERN.fullmatch(folder)): raise ValueError("live mount folder is invalid")
+        helper_image = getattr(self.config, "live_helper_image", "docker-volume-backup-worker-local:dev")
+        if os.path.isabs(source):
+            normalized_source = source.rstrip("/") or "/"
+            if DockerRuntimeAdapter._is_ignored_bind_source(normalized_source) or normalized_source in {"/var/lib/docker", "/var/lib/docker/volumes"}:
+                raise ValueError("live mount source is unsafe")
+            return LiveFileSource("bind", source, getattr(self.docker_runtime, "client", None), helper_image, folder=folder)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", source): raise ValueError("live mount source is invalid")
+        client = getattr(self.docker_runtime, "client", None)
+        volumes = getattr(client, "volumes", None)
+        volume = volumes.get(source) if volumes and callable(getattr(volumes, "get", None)) else None
+        if volume is None: raise ValueError("live mount source is unavailable")
+        return LiveFileSource("volume", source, client, helper_image, folder=folder)
+
+    def _resolve_live_sources(self, descriptors: Any) -> list[LiveFileSource]:
+        if not isinstance(descriptors, list) or not descriptors or len(descriptors) > LIVE_MOUNT_SOURCES_LIMIT:
+            raise ValueError("live mount sources are invalid")
+        resolved, source_keys, folders = [], set(), set()
+        for descriptor in descriptors:
+            if not isinstance(descriptor, dict) or set(descriptor) != {"source", "folder"}:
+                raise ValueError("live mount sources are invalid")
+            source = descriptor.get("source")
+            folder = descriptor.get("folder")
+            if not isinstance(folder, str) or not LIVE_MOUNT_FOLDER_PATTERN.fullmatch(folder):
+                raise ValueError("live mount folder is invalid")
+            resolved_source = self._resolve_live_source(source, folder)
+            source_key = (resolved_source.kind, resolved_source.source)
+            if source_key in source_keys or folder in folders:
+                raise ValueError("live mount sources are ambiguous")
+            source_keys.add(source_key)
+            folders.add(folder)
+            resolved.append(resolved_source)
+        return resolved
+
+    def _publish_live_change(self, key, kind, path, entry_type, size, mtime_ns):
+        try:
+            self.control_plane_client.send_live_change(
+                worker_id=key.worker_id, target_id=key.target_id, config_revision=key.config_revision,
+                kind=kind, path=path, entry_type=entry_type, size=size, mtime_ns=mtime_ns,
+            )
+            return True
+        except Exception as exc:
+            logger.debug("Live change publication stopped (error_type=%s)", exc.__class__.__name__)
+            return False
+
+    def _process_live_request(self, worker_id: str, command: Dict[str, Any]) -> None:
+        operation_id = command.get("operation_id")
+        try:
+            if not isinstance(operation_id, str) or not operation_id or command.get("worker_id") != worker_id: raise ValueError("live request is invalid")
+            key = LiveTargetSessionKey(command["target_id"], command["config_revision"], worker_id)
+            operation = command.get("operation")
+            descriptors = command.get("mount_sources")
+            if descriptors is None:
+                legacy_source = command.get("mount_source")
+                root = self._resolve_live_source(legacy_source)
+            else:
+                root = self._resolve_live_sources(descriptors)
+            if operation == "watch":
+                self.live_sessions.begin_watch(key, target_root=root)
+                self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 200})
+                return
+            if operation == "unwatch":
+                self.live_sessions.end_watch(key)
+                self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 200})
+                return
+            handle = self.live_sessions.attach(key, target_root=root)
+            try:
+                if operation == "entries":
+                    limit = max(1, min(int(command.get("limit", 100)), 1000))
+                    result = handle.list_entries(command.get("path", "/"), limit, command.get("cursor"))
+                    self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 200, **result})
+                elif operation == "file":
+                    reader = iter(
+                        handle.read_file(
+                            command.get("path", "/"),
+                            max_bytes=min(int(command.get("max_bytes", self.MAX_LIVE_FILE_BYTES)), self.MAX_LIVE_FILE_BYTES),
+                        )
+                    )
+                    first_chunk = next(reader, None)
+                    self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 200, "content_type": "application/octet-stream"})
+                    try:
+                        if first_chunk is not None:
+                            self.control_plane_client.send_live_chunk(worker_id, operation_id, first_chunk)
+                        for chunk in reader:
+                            self.control_plane_client.send_live_chunk(worker_id, operation_id, chunk)
+                    finally:
+                        self.control_plane_client.send_live_chunk(worker_id, operation_id, b"", final=True)
+                else:
+                    raise ValueError("live operation is not supported")
+            finally:
+                handle.release()
+        except LiveAccessDeniedError:
+            try:
+                self.control_plane_client.send_live_response(
+                    worker_id,
+                    operation_id,
+                    {"status": 403, "code": "live_access_denied", "reason": "protected_volume"},
+                )
+            except Exception:
+                logger.warning("Live access-denied response failed")
+        except Exception as exc:
+            try:
+                self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 400, "code": "live_request_rejected"})
+            except Exception:
+                logger.warning("Live request response failed (error_type=%s)", exc.__class__.__name__)
+
+    def poll_live_once(self, limit: int = 4):
+        worker_id = self.ensure_registered()
+        self.live_sessions.cleanup()
+        requests = self.control_plane_client.fetch_live_requests(worker_id, min(limit, self.MAX_LIVE_POLL_REQUESTS))
+        for command in requests or []:
+            if isinstance(command, dict): self._process_live_request(worker_id, command)
+        return requests or []
 
     def _persist_recovery_record(self, worker_id: str, job: Dict[str, Any]) -> None:
         if self.recovery_journal is None:
