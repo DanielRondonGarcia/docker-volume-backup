@@ -11,6 +11,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = UI_PATH.read_text(encoding="utf-8")
+        cls.css = UI_CSS_PATH.read_text(encoding="utf-8")
 
     def test_snapshot_explorer_contains_v2_routes_and_legacy_fallbacks(self):
         for route in ("/api/v2/targets/", "/snapshots`,", "/api/v2/jobs/", "/cancel`,"):
@@ -47,6 +48,113 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn('worker_id: document.getElementById("etWorkerId").value', edit_source)
         self.assertIn("no elegible", edit_source)
         self.assertIn("Error guardando target", edit_source)
+
+    def test_blocked_targets_are_opaque_and_cannot_run_or_enable_on_ineligible_workers(self):
+        for marker in (
+            "target-execution-blocked",
+            "execution_blocked",
+            "worker_revoked",
+            "worker_missing",
+            "target_disabled",
+            "enableBlocked",
+            "toggleDisabled ? \"disabled\" : \"\"",
+            "aria-label=\"${escapeHtml(toggleTitle)}\"",
+            "state.currentRole === \"admin\"",
+            "state.currentRole === \"admin\" || state.currentRole === \"operator\"",
+            "startTargetsPolling();",
+            "apiGet(\"/api/v1/targets\")",
+        ):
+            self.assertIn(marker, self.source)
+
+    def test_targets_table_has_scoped_fixed_columns_and_responsive_scroll_contract(self):
+        table = re.search(r'<table class="table datatable targets-table">.*?</table>', self.source, re.S)
+        self.assertIsNotNone(table)
+        table_source = table.group(0)
+        for marker in (
+            "<colgroup>",
+            'class="target-col-name"',
+            'class="target-col-actions"',
+            'class="target-col-cron"',
+        ):
+            self.assertIn(marker, table_source)
+        for marker in (
+            ".targets-table { min-width:",
+            "table-layout: fixed",
+            ".targets-table col.target-col-actions",
+            ".targets-table .target-cron-cell",
+            ".targets-table .vol-cell code",
+            "overflow-x: auto",
+        ):
+            self.assertIn(marker, self.css)
+
+    def test_target_action_cell_keeps_table_layout_and_non_target_tables_keep_flex_actions(self):
+        self.assertIsNone(re.search(r"(?m)^\.action-cell\s*\{\s*display:\s*flex;", self.css))
+        self.assertIn(".targets-table td.action-cell { display: table-cell;", self.css)
+        self.assertIn(".targets-table .action-cell > .dropdown { display: flex;", self.css)
+        self.assertIn(".table:not(.targets-table) .action-cell { display: flex;", self.css)
+
+    def test_target_logs_use_exact_label_and_inline_detail_rows(self):
+        target_body = re.search(
+            r"function renderTargetsTableBody\(\) \{.*?\n    function renderVolumeTargetsCell",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(target_body)
+        target_source = target_body.group(0)
+        self.assertIn(">Ver ultimos logs</button>", target_source)
+        self.assertNotIn(">Ver logs</button>", target_source)
+        for marker in (
+            "renderTargetLogDetailRow(t)",
+            "return targetRow +",
+            'data-target-log-row',
+            '<td colspan="9">',
+            'role="region"',
+            'data-target-log-close',
+            "function targetLogContentId",
+            "function closeLogPanel()",
+        ):
+            self.assertIn(marker, self.source)
+
+    def test_target_log_selection_is_singleton_and_reopens_without_stale_poll_updates(self):
+        for marker in (
+            "let currentLogTargetId = null;",
+            "let currentLogJobSnapshot = null;",
+            "if (currentLogTargetId && !selectedTarget) closeLogPanel();",
+            "currentLogTargetId = null;",
+            "currentLogJobSnapshot = job;",
+            "reopenLogPanel(currentLogJobId, currentLogTargetId ||",
+            "if (currentLogJobId !== jobId) return;",
+            "renderTargetLogPanelInto(host, jobId, tid);",
+            "ensureTargetLogFallback",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertGreaterEqual(self.source.count("if (currentLogJobId !== jobId) return;"), 2)
+
+    def test_jobs_log_accordion_markers_remain_separate(self):
+        for marker in (
+            "function toggleJobLogAccordion(jobId, content)",
+            "log-accordion-",
+            "function closeJobLogAccordion()",
+            "function pollAccordionJobLogs(jobId)",
+            'data-view-logs',
+            "renderJobLogsInto(job, container)",
+        ):
+            self.assertIn(marker, self.source)
+
+    def test_manual_target_backup_uses_accessible_hot_cold_dialog_and_override_payload(self):
+        for marker in (
+            "function openBackupRunModal",
+            'role="dialog" aria-modal="true"',
+            'name="targetBackupMode"',
+            'value="hot"',
+            'value="cold"',
+            'aria-live="polite"',
+            "targetRunCancel",
+            "targetRunExecute",
+            "backup_mode: selectedMode",
+            "El modo seleccionado aplica solo a esta ejecucion",
+        ):
+            self.assertIn(marker, self.source)
 
     def test_snapshot_explorer_is_race_safe_and_cancellable(self):
         for marker in (
@@ -389,6 +497,62 @@ class StorageCardsUiStateTests(unittest.TestCase):
             self.assertIn(marker, css)
         self.assertIn("@media (max-width: 768px)", css)
         self.assertNotIn("storage-grid", self.source.split("renderStorage(content)", 1)[0])
+
+
+class WorkerUiStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = UI_PATH.read_text(encoding="utf-8")
+        cls.css = UI_CSS_PATH.read_text(encoding="utf-8")
+
+    def test_worker_labels_use_key_value_rows_with_validation_and_clear_action(self):
+        for marker in (
+            "renderWorkerLabelRows",
+            "data-label-key",
+            "data-label-value",
+            "data-add-label",
+            "data-remove-label",
+            "data-clear-labels",
+            "repetida",
+            "La clave de cada label es obligatoria",
+            "aria-invalid",
+            "role=\"dialog\"",
+            "aria-modal=\"true\"",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertNotIn("editLabelsTextarea", self.source)
+        self.assertNotIn("JSON invalido:", self.source)
+
+    def test_worker_labels_are_sorted_and_polling_detects_heartbeat_label_changes(self):
+        self.assertIn('Object.keys(labels).sort((a, b) => a.localeCompare(b, "es"))', self.source)
+        self.assertIn("function workerFingerprint(worker)", self.source)
+        self.assertIn("worker.labels[key]", self.source)
+        self.assertIn("newWorkers.map(workerFingerprint)", self.source)
+
+    def test_enrollment_compose_contains_shared_tmp_mount(self):
+        compose = re.search(r"const composeYml = `.*?`;", self.source, re.S)
+        self.assertIsNotNone(compose)
+        compose_source = compose.group(0)
+        self.assertIn("- /var/run/docker.sock:/var/run/docker.sock", compose_source)
+        self.assertIn("- /tmp:/tmp", compose_source)
+        self.assertIn("- worker_state:/data", compose_source)
+        self.assertIn("    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - /tmp:/tmp\n      - worker_state:/data", compose_source)
+
+    def test_worker_admin_actions_are_confirmed_and_have_refresh_feedback(self):
+        for marker in (
+            "data-revoke-worker",
+            "data-delete-worker",
+            "window.confirm",
+            "/api/v1/admin/workers/${encodeURIComponent(workerId)}/revoke",
+            "apiDelete(`/api/v1/workers/${encodeURIComponent(workerId)}`)",
+            "workersNotice",
+            "await refreshAll();",
+            "Worker revocado",
+            "worker-disabled-row",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertIn(".worker-notice", self.css)
+        self.assertIn(".pill.danger", self.css)
 
 
 if __name__ == "__main__":

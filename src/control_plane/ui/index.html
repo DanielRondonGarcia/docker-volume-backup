@@ -207,6 +207,7 @@
       latestVersionUrl: null,
       schedulerTimezone: null,
     };
+    let workersNotice = null;
 
     function escapeHtml(str) {
       if (str === null || str === undefined) return "";
@@ -230,8 +231,30 @@
       } catch (e) { return ts; }
     }
     function fmtStatus(status) {
-      const cls = status === "online" ? "ok" : status === "offline" ? "warn" : "muted";
-      return `<span class="pill ${cls}">${escapeHtml(status || "—")}</span>`;
+      const statusInfo = {
+        online: { cls: "ok", label: "online" },
+        offline: { cls: "warn", label: "offline" },
+        disabled: { cls: "danger", label: "Revocado", title: "Worker revocado y no elegible para nuevos jobs" },
+      }[status] || { cls: "muted", label: status || "—" };
+      return `<span class="pill ${statusInfo.cls}"${statusInfo.title ? ` title="${escapeHtml(statusInfo.title)}"` : ""}>${escapeHtml(statusInfo.label)}</span>`;
+    }
+
+    function fmtTargetWorkerState(target) {
+      const statusInfo = {
+        online: { cls: "ok", label: "Online" },
+        offline: { cls: "warn", label: "Offline" },
+        disabled: { cls: "danger", label: "Revocado" },
+        missing: { cls: "danger", label: "Eliminado" },
+        pending: { cls: "warn", label: "Pendiente" },
+      }[target.worker_status] || { cls: "muted", label: target.worker_status || "Sin estado" };
+      const reasonLabels = {
+        target_disabled: "Target deshabilitado",
+        worker_revoked: "Worker revocado",
+        worker_missing: "Worker eliminado",
+        worker_offline: "Worker offline",
+      };
+      const reason = reasonLabels[target.blocked_reason];
+      return `<div class="target-worker-state"><span class="pill ${statusInfo.cls}">${escapeHtml(statusInfo.label)}</span>${reason ? `<span class="target-blocked-reason">${escapeHtml(reason)}</span>` : ""}</div>`;
     }
 
     function fmtJobStatus(status) {
@@ -310,7 +333,9 @@
       if (resp.status === 401) { window.location.href = "/login"; throw new Error("auth"); }
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+        const error = new Error(err.error || `${resp.status} ${resp.statusText}`);
+        error.status = resp.status;
+        throw error;
       }
       return resp.json();
     }
@@ -320,7 +345,9 @@
       if (resp.status === 204) return null;
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `${resp.status} ${resp.statusText}`);
+        const error = new Error(err.error || `${resp.status} ${resp.statusText}`);
+        error.status = resp.status;
+        throw error;
       }
       return resp.json();
     }
@@ -437,6 +464,7 @@
       state.currentView = view;
       if (view !== "jobs") stopJobsPolling();
       if (view !== "workers") stopWorkersPolling();
+      if (view !== "targets") stopTargetsPolling();
       renderSidebar();
       renderTopbar();
       const content = document.getElementById("content");
@@ -447,6 +475,10 @@
       };
       const renderer = viewRenderers[view];
       if (renderer) renderer(content);
+      if (view !== "targets" && currentLogJobId) {
+        const existingJob = (state.jobs || []).find(j => j.id === currentLogJobId);
+        reopenLogPanel(currentLogJobId, currentLogTargetId || (existingJob ? existingJob.target_id : null));
+      }
     }
 
     function route() {
@@ -620,18 +652,29 @@
       };
       const labelsCell = (w) => {
         const labels = w.labels || {};
-        const keys = Object.keys(labels);
+        const keys = Object.keys(labels).sort((a, b) => a.localeCompare(b, "es"));
         if (keys.length === 0) return `<span class="mono muted">—</span>`;
         return keys.map(k => `<span class="label-chip" title="${escapeHtml(k)}=${escapeHtml(labels[k])}">${escapeHtml(k)}: ${escapeHtml(labels[k])}</span>`).join(" ");
       };
+      const noticeMarkup = workersNotice
+        ? `<div class="worker-notice ${workersNotice.kind === "success" ? "success" : "error"}" role="status" aria-live="polite">${escapeHtml(workersNotice.message)}</div>`
+        : "";
+      const actionCell = (w) => canEnroll ? `<td class="action-cell">
+        <button type="button" class="btn ghost xs" data-edit-labels="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Editar labels</button>
+        ${w.status === "disabled"
+          ? `<span class="worker-revoked-note">Revocado</span>`
+          : `<button type="button" class="btn danger xs" data-revoke-worker="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Revocar</button>`}
+        <button type="button" class="btn danger xs" data-delete-worker="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Eliminar</button>
+      </td>` : "";
       content.innerHTML = `
         <div class="page-header">
           <div><h2>Workers</h2><div class="subtitle">Agentes registrados en el Control Plane</div></div>
           ${canEnroll ? `<button class="btn primary sm" id="addWorkerBtn">+ Agregar worker</button>` : ""}
         </div>
+        ${noticeMarkup}
         <div class="table-wrap"><div class="sheet"><table class="table">
           <thead><tr><th>Nombre</th><th>Host</th><th>Status</th><th>Version</th><th>Labels</th><th>Ult. seen</th>${canEnroll ? "<th>Acciones</th>" : ""}</tr></thead>
-          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td>${versionCell(w.version)}</td><td>${labelsCell(w)}</td><td class="mono">${fmtDate(w.last_seen_at)}</td>${canEnroll ? `<td class="action-cell"><button class="btn ghost xs" data-edit-labels="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Editar labels</button></td>` : ""}</tr>`).join("") : `<tr><td colspan="${canEnroll ? 7 : 6}" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
+          <tbody id="workersBody">${state.workers.length ? state.workers.map(w => `<tr class="${w.status === "disabled" ? "worker-disabled-row" : ""}"><td>${escapeHtml(w.name)}</td><td class="mono">${escapeHtml(w.host_name || "—")}</td><td>${fmtStatus(w.status)}</td><td>${versionCell(w.version)}</td><td>${labelsCell(w)}</td><td class="mono">${fmtDate(w.last_seen_at)}</td>${actionCell(w)}</tr>`).join("") : `<tr><td colspan="${canEnroll ? 7 : 6}" class="empty-state">Sin workers registrados</td></tr>`}</tbody>
         </table></div></div>
       `;
       const addBtn = document.getElementById("addWorkerBtn");
@@ -639,63 +682,168 @@
       content.querySelectorAll("[data-edit-labels]").forEach(btn => {
         btn.addEventListener("click", () => openEditWorkerLabelsModal(btn.dataset.editLabels, btn.dataset.workerName));
       });
+      content.querySelectorAll("[data-revoke-worker]").forEach(btn => {
+        btn.addEventListener("click", () => revokeWorker(btn.dataset.revokeWorker, btn.dataset.workerName, btn));
+      });
+      content.querySelectorAll("[data-delete-worker]").forEach(btn => {
+        btn.addEventListener("click", () => deleteWorker(btn.dataset.deleteWorker, btn.dataset.workerName, btn));
+      });
       startWorkersPolling();
     }
 
     let _editLabelsWorkerId = null;
+    let _editLabelsRows = [];
+    let _editLabelsPreviousFocus = null;
+
+    function workerLabelRowsFromDom() {
+      const rows = document.querySelectorAll("#editLabelsRows [data-label-row]");
+      return Array.from(rows).map(row => ({
+        key: row.querySelector("[data-label-key]")?.value || "",
+        value: row.querySelector("[data-label-value]")?.value || "",
+      }));
+    }
+
+    function renderWorkerLabelRows() {
+      const container = document.getElementById("editLabelsRows");
+      if (!container) return;
+      if (!_editLabelsRows.length) {
+        container.innerHTML = `<div class="label-editor-empty">Este worker no tiene labels. Agrega una fila o guarda para quitarlas todas.</div>`;
+        return;
+      }
+      container.innerHTML = _editLabelsRows.map((row, index) => `
+        <div class="label-editor-row" data-label-row data-row-index="${index}" role="listitem">
+          <div class="field label-editor-field"><label for="workerLabelKey${index}">Clave</label><input id="workerLabelKey${index}" class="label-input" data-label-key type="text" name="label_key_${index}" autocomplete="off" spellcheck="false" placeholder="backup-tier" value="${escapeHtml(row.key)}" /></div>
+          <div class="field label-editor-field"><label for="workerLabelValue${index}">Valor</label><input id="workerLabelValue${index}" class="label-input" data-label-value type="text" name="label_value_${index}" autocomplete="off" placeholder="production" value="${escapeHtml(row.value)}" /></div>
+          <button type="button" class="btn ghost xs danger label-remove-button" data-remove-label aria-label="Quitar label ${escapeHtml(row.key || `numero ${index + 1}`)}">Quitar</button>
+        </div>
+      `).join("");
+    }
+
+    function clearWorkerLabelError() {
+      const errorDiv = document.getElementById("editLabelsError");
+      if (errorDiv) {
+        errorDiv.textContent = "";
+        errorDiv.style.display = "none";
+      }
+      document.querySelectorAll("#editLabelsRows [aria-invalid='true']").forEach(input => input.removeAttribute("aria-invalid"));
+    }
+
+    function addWorkerLabelRow() {
+      _editLabelsRows = workerLabelRowsFromDom();
+      _editLabelsRows.push({ key: "", value: "" });
+      renderWorkerLabelRows();
+      clearWorkerLabelError();
+      document.querySelector("#editLabelsRows [data-label-row]:last-child [data-label-key]")?.focus();
+    }
+
+    function collectWorkerLabels() {
+      const labels = {};
+      const seen = new Map();
+      const rows = document.querySelectorAll("#editLabelsRows [data-label-row]");
+      for (const row of rows) {
+        const keyInput = row.querySelector("[data-label-key]");
+        const valueInput = row.querySelector("[data-label-value]");
+        const key = (keyInput?.value || "").trim();
+        if (!key) {
+          keyInput?.setAttribute("aria-invalid", "true");
+          return { error: "La clave de cada label es obligatoria.", focus: keyInput };
+        }
+        if (seen.has(key)) {
+          keyInput?.setAttribute("aria-invalid", "true");
+          seen.get(key)?.setAttribute("aria-invalid", "true");
+          return { error: `La clave "${key}" esta repetida. Usa una clave distinta.`, focus: keyInput };
+        }
+        seen.set(key, keyInput);
+        labels[key] = valueInput?.value || "";
+      }
+      return { labels };
+    }
 
     function openEditWorkerLabelsModal(workerId, workerName) {
       const worker = (state.workers || []).find(w => w.id === workerId);
       const labels = worker && worker.labels ? worker.labels : {};
       _editLabelsWorkerId = workerId;
-      const labelsJson = Object.keys(labels).length > 0 ? JSON.stringify(labels, null, 2) : "{\n  \n}";
+      _editLabelsRows = Object.keys(labels)
+        .sort((a, b) => a.localeCompare(b, "es"))
+        .map(key => ({ key, value: labels[key] == null ? "" : String(labels[key]) }));
+      _editLabelsPreviousFocus = document.activeElement;
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       overlay.innerHTML = `
-        <div class="modal" style="max-width: 520px;">
-          <div class="modal-header"><h3>Editar labels — ${escapeHtml(workerName)}</h3><button class="close" id="closeEditLabelsBtn">&times;</button></div>
+        <div class="modal modal-worker-labels" role="dialog" aria-modal="true" aria-labelledby="editWorkerLabelsTitle" aria-describedby="editWorkerLabelsHelp" tabindex="-1">
+          <div class="modal-header"><h3 id="editWorkerLabelsTitle">Editar labels - ${escapeHtml(workerName)}</h3><button type="button" class="close" id="closeEditLabelsBtn" aria-label="Cerrar edicion de labels">&times;</button></div>
           <div class="modal-body">
-            <div class="helper">Labels del worker en formato JSON (clave: valor). Estas labels se usan para filtrar y agrupar workers.</div>
-            <textarea id="editLabelsTextarea" class="input mono" rows="8" spellcheck="false" style="font-size:13px;resize:vertical;">${escapeHtml(labelsJson)}</textarea>
-            <div id="editLabelsError" class="form-error" style="display:none;"></div>
+            <div class="helper" id="editWorkerLabelsHelp">Agrega una fila por label. Las claves deben ser unicas y no pueden estar vacias. Deja el valor vacio si necesitas una label sin valor.</div>
+            <form id="editWorkerLabelsForm" novalidate>
+              <div class="label-editor-toolbar"><strong>Labels del worker</strong><div class="btn-row"><button type="button" class="btn ghost xs" id="addWorkerLabelBtn" data-add-label>+ Agregar fila</button><button type="button" class="btn ghost xs danger" id="clearWorkerLabelsBtn" data-clear-labels>Quitar todas</button></div></div>
+              <div id="editLabelsRows" class="label-editor" role="list" aria-label="Labels del worker"></div>
+              <div id="editLabelsError" class="form-error" role="alert" aria-live="polite" style="display:none;"></div>
+            </form>
           </div>
           <div class="modal-footer">
-            <button class="btn" id="cancelEditLabelsBtn">Cancelar</button>
-            <button class="btn primary" id="saveEditLabelsBtn">Guardar</button>
+            <button type="button" class="btn" id="cancelEditLabelsBtn">Cancelar</button>
+            <button type="submit" class="btn primary" id="saveEditLabelsBtn" form="editWorkerLabelsForm">Guardar</button>
           </div>
         </div>
       `;
       overlay.classList.add("open");
+      renderWorkerLabelRows();
       document.getElementById("closeEditLabelsBtn").addEventListener("click", closeEditWorkerLabelsModal);
       document.getElementById("cancelEditLabelsBtn").addEventListener("click", closeEditWorkerLabelsModal);
-      overlay.addEventListener("click", (e) => { if (e.target === overlay) closeEditWorkerLabelsModal(); });
-      document.getElementById("saveEditLabelsBtn").addEventListener("click", saveEditWorkerLabels);
+      overlay.onclick = (e) => { if (e.target === overlay) closeEditWorkerLabelsModal(); };
+      overlay.onkeydown = (e) => { if (e.key === "Escape") closeEditWorkerLabelsModal(); };
+      document.getElementById("addWorkerLabelBtn").addEventListener("click", addWorkerLabelRow);
+      document.getElementById("clearWorkerLabelsBtn").addEventListener("click", () => {
+        _editLabelsRows = [];
+        renderWorkerLabelRows();
+        clearWorkerLabelError();
+        document.getElementById("addWorkerLabelBtn")?.focus();
+      });
+      document.getElementById("editLabelsRows").addEventListener("click", (e) => {
+        const removeButton = e.target.closest("[data-remove-label]");
+        if (!removeButton) return;
+        _editLabelsRows = workerLabelRowsFromDom();
+        _editLabelsRows.splice(Number(removeButton.closest("[data-label-row]")?.dataset.rowIndex), 1);
+        renderWorkerLabelRows();
+        clearWorkerLabelError();
+        document.getElementById("addWorkerLabelBtn")?.focus();
+      });
+      document.getElementById("editLabelsRows").addEventListener("input", clearWorkerLabelError);
+      document.getElementById("editWorkerLabelsForm").addEventListener("submit", (e) => {
+        e.preventDefault();
+        saveEditWorkerLabels();
+      });
+      requestAnimationFrame(() => document.querySelector("#editLabelsRows [data-label-key]")?.focus() || document.getElementById("addWorkerLabelBtn")?.focus());
     }
 
     function closeEditWorkerLabelsModal() {
       const overlay = document.getElementById("modalOverlay");
-      if (overlay) { overlay.classList.remove("open"); overlay.innerHTML = ""; }
+      if (overlay) {
+        overlay.classList.remove("open");
+        overlay.innerHTML = "";
+        overlay.onclick = null;
+        overlay.onkeydown = null;
+      }
       _editLabelsWorkerId = null;
+      _editLabelsRows = [];
+      if (_editLabelsPreviousFocus && document.contains(_editLabelsPreviousFocus)) _editLabelsPreviousFocus.focus();
+      _editLabelsPreviousFocus = null;
     }
 
     async function saveEditWorkerLabels() {
       if (!_editLabelsWorkerId) return;
-      const textarea = document.getElementById("editLabelsTextarea");
       const errorDiv = document.getElementById("editLabelsError");
       const saveBtn = document.getElementById("saveEditLabelsBtn");
-      let labels;
-      try {
-        labels = JSON.parse(textarea.value);
-        if (typeof labels !== "object" || labels === null || Array.isArray(labels)) {
-          throw new Error("Debe ser un objeto JSON");
-        }
-      } catch (e) {
-        errorDiv.textContent = "JSON invalido: " + e.message;
+      clearWorkerLabelError();
+      const result = collectWorkerLabels();
+      if (result.error) {
+        errorDiv.textContent = result.error;
         errorDiv.style.display = "block";
+        result.focus?.focus();
         return;
       }
       await withBtnLoading(saveBtn, async () => {
-        await apiPatch(`/api/v1/workers/${_editLabelsWorkerId}`, { labels });
+        await apiPatch(`/api/v1/workers/${_editLabelsWorkerId}`, { labels: result.labels });
         const resp = await apiGet("/api/v1/workers");
         state.workers = resp.items || [];
         closeEditWorkerLabelsModal();
@@ -705,6 +853,39 @@
         errorDiv.textContent = "Error: " + e.message;
         errorDiv.style.display = "block";
       });
+    }
+
+    function workerFingerprint(worker) {
+      const labels = Object.keys(worker.labels || {})
+        .sort((a, b) => a.localeCompare(b, "es"))
+        .map(key => [key, String(worker.labels[key])]);
+      return JSON.stringify([worker.id, worker.status, worker.last_seen_at || "", worker.version || "", labels]);
+    }
+
+    async function revokeWorker(workerId, workerName, button) {
+      if (!window.confirm(`Revocar el worker "${workerName}"? Dejara de autenticarse y no recibira nuevos jobs.`)) return;
+      try {
+        await withBtnLoading(button, () => apiPost(`/api/v1/admin/workers/${encodeURIComponent(workerId)}/revoke`, {}), "Revocando...");
+        workersNotice = { kind: "success", message: `Worker "${workerName}" revocado. Ya no es elegible para nuevos jobs.` };
+        await refreshAll();
+      } catch (error) {
+        workersNotice = { kind: "error", message: `No se pudo revocar el worker: ${error.message}` };
+        const content = document.getElementById("content");
+        if (content && state.currentView === "workers") renderWorkers(content);
+      }
+    }
+
+    async function deleteWorker(workerId, workerName, button) {
+      if (!window.confirm(`Eliminar el worker "${workerName}"? Esta accion revoca sus credenciales y deja deshabilitados sus targets asignados. Solo se bloquea si tiene jobs pendientes o activos.`)) return;
+      try {
+        await withBtnLoading(button, () => apiDelete(`/api/v1/workers/${encodeURIComponent(workerId)}`), "Eliminando...");
+        workersNotice = { kind: "success", message: `Worker "${workerName}" eliminado. Su historial de jobs y snapshots se conserva.` };
+        await refreshAll();
+      } catch (error) {
+        workersNotice = { kind: "error", message: `No se pudo eliminar el worker: ${error.message}` };
+        const content = document.getElementById("content");
+        if (content && state.currentView === "workers") renderWorkers(content);
+      }
     }
 
     let workersPollTimer = null;
@@ -718,7 +899,7 @@
         try {
           const resp = await apiGet("/api/v1/workers");
           const newWorkers = resp.items || [];
-          const hasChanged = JSON.stringify(newWorkers.map(w => w.id + w.status + (w.last_seen_at || "") + (w.version || ""))) !== JSON.stringify((state.workers || []).map(w => w.id + w.status + (w.last_seen_at || "") + (w.version || "")));
+          const hasChanged = JSON.stringify(newWorkers.map(workerFingerprint)) !== JSON.stringify((state.workers || []).map(workerFingerprint));
           state.workers = newWorkers;
           if (hasChanged) {
             const content = document.getElementById("content");
@@ -741,6 +922,55 @@
       if (workersPollTimer) {
         clearTimeout(workersPollTimer);
         workersPollTimer = null;
+      }
+    }
+
+    let targetsPollTimer = null;
+    let targetsPolling = false;
+
+    function targetFingerprint(target) {
+      return JSON.stringify([
+        target.id,
+        target.enabled,
+        target.worker_id,
+        target.worker_name || "",
+        target.worker_status || "",
+        Boolean(target.execution_blocked),
+        target.blocked_reason || "",
+        target.updated_at || "",
+      ]);
+    }
+
+    function startTargetsPolling() {
+      if (targetsPolling) return;
+      targetsPolling = true;
+      const tick = async () => {
+        if (!targetsPolling) return;
+        try {
+          const [targetsResponse, workersResponse] = await Promise.all([
+            apiGet("/api/v1/targets"),
+            apiGet("/api/v1/workers"),
+          ]);
+          const newTargets = targetsResponse.items || [];
+          const newWorkers = workersResponse.items || [];
+          const targetsChanged = JSON.stringify(newTargets.map(targetFingerprint)) !== JSON.stringify((state.targets || []).map(targetFingerprint));
+          const workersChanged = JSON.stringify(newWorkers.map(workerFingerprint)) !== JSON.stringify((state.workers || []).map(workerFingerprint));
+          state.targets = newTargets;
+          state.workers = newWorkers;
+          if ((targetsChanged || workersChanged) && state.currentView === "targets") renderTargetsTable();
+        } catch (e) {
+          // Keep the last target state visible when a polling request fails.
+        }
+        if (targetsPolling) targetsPollTimer = setTimeout(tick, 3000);
+      };
+      targetsPollTimer = setTimeout(tick, 3000);
+    }
+
+    function stopTargetsPolling() {
+      targetsPolling = false;
+      if (targetsPollTimer) {
+        clearTimeout(targetsPollTimer);
+        targetsPollTimer = null;
       }
     }
 
@@ -848,6 +1078,7 @@
       WORKER_CREDENTIAL_FILE: /data/worker_credentials.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp:/tmp
       - worker_state:/data
     healthcheck:
       test: ["CMD","curl","-fsS","http://127.0.0.1:8081/healthz"]
@@ -926,6 +1157,7 @@ docker compose up -d
     let targetsTableState = { sortKey: "name", sortDir: "asc", page: 1, pageSize: 25, filters: { name: "", worker: "", compose: "", mode: "", retention: "", cron: "" } };
 
     function renderTargets(content) {
+      const canManageTargets = state.currentRole === "admin";
       const eligibleWorkers = (state.workers || []).filter(w => w.status === "online");
       const workerOptions = eligibleWorkers.length
         ? eligibleWorkers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("")
@@ -935,51 +1167,53 @@ docker compose up -d
       const settings = state.settings || {};
       const hasDefaultPassword = !!(settings.restic_password_secret_id);
       const passwordSecretOptions = state.secrets.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      const createTargetSection = canManageTargets ? `
+         <details class="form-section"><summary>Crear target</summary><div class="form-body">
+           <form id="createTargetForm">
+             <div class="form-grid">
+               <div class="field"><label for="targetName">Nombre</label><input id="targetName" required /></div>
+                <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${eligibleWorkers.length ? "" : "disabled"}>${workerOptions}</select></div>
+                <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${eligibleWorkers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
+               <div class="field"><label for="targetBackupMode">Modo</label><select id="targetBackupMode"><option value="hot">hot</option><option value="cold">cold</option></select></div>
+               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
+               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
+               <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
+               <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = usa el cron global; si tampoco existe, solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
+               ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
+             </div>
+             <div class="field full">
+               <label>Volumenes a backupear</label>
+               <div id="targetVolumeList" class="volume-list"><div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div></div>
+             </div>
+             <div id="targetProjectSummary" class="helper">Selecciona un worker para ver sus compose projects y volumenes detectados.</div>
+             <details class="sub-section">
+               <summary>Opciones avanzadas</summary>
+               <div class="form-grid" style="margin-top:8px">
+                 ${hasDefaultPassword ? `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) — opcional</label><select id="targetResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${passwordSecretOptions}</select><div class="helper">Si lo dejas vacio, se usara el password default del Control Plane.</div></div>` : ""}
+                 <div class="field"><label for="targetRuntimeCommand">Comando de backup (opcional)</label><input id="targetRuntimeCommand" placeholder="Por defecto: /root/backup.sh" /></div>
+                 <div class="field full"><label for="targetRuntimeEnvironment">Runtime environment JSON (opcional)</label><textarea id="targetRuntimeEnvironment" placeholder="{}">{}</textarea></div>
+                 <div class="field full"><label for="targetRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="targetRestoreDefaults" placeholder="{}">{"layout":"auto"}</textarea></div>
+               </div>
+             </details>
+              <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${eligibleWorkers.length ? "" : "disabled"}>Crear target</button></div>
+              <div class="helper">${eligibleWorkers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "No hay workers elegibles online. Registra un worker y espera su heartbeat antes de crear un target."}</div>
+           </form>
+         </div></details>` : "";
       content.innerHTML = `
         <div class="page-header"><div><h2>Targets</h2><div class="subtitle">Configura que se va a backupear por worker y compose project</div></div></div>
-        <details class="form-section"><summary>Crear target</summary><div class="form-body">
-          <form id="createTargetForm">
-            <div class="form-grid">
-              <div class="field"><label for="targetName">Nombre</label><input id="targetName" required /></div>
-               <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${eligibleWorkers.length ? "" : "disabled"}>${workerOptions}</select></div>
-               <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${eligibleWorkers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
-              <div class="field"><label for="targetBackupMode">Modo</label><select id="targetBackupMode"><option value="hot">hot</option><option value="cold">cold</option></select></div>
-              <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
-              <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
-              <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
-              <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = usa el cron global; si tampoco existe, solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
-              ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
-            </div>
-            <div class="field full">
-              <label>Volumenes a backupear</label>
-              <div id="targetVolumeList" class="volume-list"><div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div></div>
-            </div>
-            <div id="targetProjectSummary" class="helper">Selecciona un worker para ver sus compose projects y volumenes detectados.</div>
-            <details class="sub-section">
-              <summary>Opciones avanzadas</summary>
-              <div class="form-grid" style="margin-top:8px">
-                ${hasDefaultPassword ? `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) — opcional</label><select id="targetResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${passwordSecretOptions}</select><div class="helper">Si lo dejas vacio, se usara el password default del Control Plane.</div></div>` : ""}
-                <div class="field"><label for="targetRuntimeCommand">Comando de backup (opcional)</label><input id="targetRuntimeCommand" placeholder="Por defecto: /root/backup.sh" /></div>
-                <div class="field full"><label for="targetRuntimeEnvironment">Runtime environment JSON (opcional)</label><textarea id="targetRuntimeEnvironment" placeholder="{}">{}</textarea></div>
-                <div class="field full"><label for="targetRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="targetRestoreDefaults" placeholder="{}">{"layout":"auto"}</textarea></div>
-              </div>
-            </details>
-             <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${eligibleWorkers.length ? "" : "disabled"}>Crear target</button></div>
-             <div class="helper">${eligibleWorkers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "No hay workers elegibles online. Registra un worker y espera su heartbeat antes de crear un target."}</div>
-          </form>
-        </div></details>
-        <div class="page-header"><div><h2>Targets configurados</h2></div></div>
-        <div id="targetsTableContainer"></div>
-        <div id="targetLogPanel"></div>
-      `;
+        ${createTargetSection}
+         <div class="page-header"><div><h2>Targets configurados</h2></div></div>
+         <div id="targetsTableContainer"></div>
+       `;
       bindTargetForm();
       renderTargetsTable();
+      startTargetsPolling();
       if (currentLogJobId) {
         const target = state.targets.find(t => {
           const jobs = (state.jobs || []).filter(j => j.id === currentLogJobId);
           return jobs.length ? t.id === jobs[0].target_id : false;
         });
-        reopenLogPanel(currentLogJobId, target ? target.id : null);
+        reopenLogPanel(currentLogJobId, currentLogTargetId || (target ? target.id : null));
       }
     }
 
@@ -1013,7 +1247,7 @@ docker compose up -d
       return (state.targets || []).filter(t => {
         const worker = state.workers.find(w => w.id === t.worker_id);
         const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
-        const wName = worker ? worker.name : (t.worker_id || "");
+        const wName = t.worker_name || (worker ? worker.name : (t.worker_id || ""));
         const rName = retention ? retention.name : "";
         const cron = targetCronExpression(t) || "manual";
         if (f.name && !(t.name || "").toLowerCase().includes(f.name.toLowerCase())) return false;
@@ -1035,7 +1269,7 @@ docker compose up -d
         else if (key === "worker") {
           const wa = state.workers.find(w => w.id === a.worker_id);
           const wb = state.workers.find(w => w.id === b.worker_id);
-          va = wa ? wa.name : (a.worker_id || ""); vb = wb ? wb.name : (b.worker_id || "");
+          va = a.worker_name || (wa ? wa.name : (a.worker_id || "")); vb = b.worker_name || (wb ? wb.name : (b.worker_id || ""));
         }
         else if (key === "compose") { va = a.compose_project || ""; vb = b.compose_project || ""; }
         else if (key === "mode") { va = a.backup_mode || ""; vb = b.backup_mode || ""; }
@@ -1059,7 +1293,18 @@ docker compose up -d
       const sortAttrs = (key) => `data-tsort="${key}" style="cursor:pointer; user-select:none;"`;
       const f = targetsTableState.filters;
       container.innerHTML = `
-        <div class="table-wrap"><div class="sheet"><table class="table datatable">
+        <div class="table-wrap"><div class="sheet"><table class="table datatable targets-table">
+          <colgroup>
+            <col class="target-col-name" />
+            <col class="target-col-worker" />
+            <col class="target-col-compose" />
+            <col class="target-col-mode" />
+            <col class="target-col-volumes" />
+            <col class="target-col-retention" />
+            <col class="target-col-cron" />
+            <col class="target-col-toggle" />
+            <col class="target-col-actions" />
+          </colgroup>
           <thead>
             <tr>
               <th ${sortAttrs("name")}>Nombre${sortIcon("name")}</th>
@@ -1146,40 +1391,61 @@ docker compose up -d
       if (targetsTableState.page < 1) targetsTableState.page = 1;
       const startIdx = (targetsTableState.page - 1) * pageSize;
       const paged = filtered.slice(startIdx, startIdx + pageSize);
+      const selectedTarget = currentLogTargetId
+        ? paged.find(t => String(t.id) === String(currentLogTargetId))
+        : null;
+      if (currentLogTargetId && !selectedTarget) closeLogPanel();
+      const activeLogTargetId = currentLogTargetId;
       tbody.innerHTML = paged.length ? paged.map(t => {
-        const worker = state.workers.find(w => w.id === t.worker_id);
+        const canManageTargets = state.currentRole === "admin";
+        const canRunTargets = state.currentRole === "admin" || state.currentRole === "operator";
+        const worker = state.workers.find(w => String(w.id) === String(t.worker_id));
         const retention = state.retentionPolicies.find(r => r.id === t.retention_policy_id);
         const lastJob = getLastJobForTarget(t.id);
         const cronLabel = renderTargetCronLabel(t);
-        return `<tr>
-          <td>${escapeHtml(t.name)}</td>
-          <td>${escapeHtml(worker ? worker.name : t.worker_id)}</td>
-          <td class="mono">${escapeHtml(t.compose_project || "—")}</td>
-          <td>${escapeHtml(t.backup_mode)}</td>
-          <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
-          <td>${escapeHtml(retention ? retention.name : "—")}</td>
-          <td>${cronLabel}</td>
-          <td class="toggle-cell">
-            <label class="switch" title="${t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target"}">
-              <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" ${t.enabled ? "checked" : ""} />
-              <span class="slider"></span>
-            </label>
-            <span class="toggle-label ${t.enabled ? "on" : ""}">${t.enabled ? "Si" : "No"}</span>
-          </td>
-          <td class="action-cell">
-            <div class="dropdown">
-              <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
-              <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
-                <button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${t.enabled ? "" : "disabled"}>Ejecutar backup</button>
-                ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
-                ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver logs</button>` : ""}
-                <button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
-                <div class="dropdown-divider"></div>
-                <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>
-              </div>
-            </div>
-          </td>
-        </tr>`;
+        const workerName = t.worker_name || (worker && worker.name) || t.worker_id || "—";
+        const workerStatus = t.worker_status || (worker && worker.status) || "missing";
+        const fallbackWorkerReason = { disabled: "worker_revoked", missing: "worker_missing" }[workerStatus] || "worker_offline";
+        const blockedReason = t.blocked_reason || (!t.enabled ? "target_disabled" : workerStatus !== "online" ? fallbackWorkerReason : null);
+        const executionBlocked = Boolean(t.execution_blocked || blockedReason);
+        const workerIneligible = workerStatus !== "online";
+        const enableBlocked = executionBlocked && blockedReason !== "target_disabled";
+        const toggleDisabled = !canManageTargets || enableBlocked;
+        const runDisabled = !canRunTargets || executionBlocked;
+        const targetStatusLabel = t.enabled && !executionBlocked ? "Si" : t.enabled ? "Bloqueado" : "No";
+        const toggleTitle = workerIneligible
+          ? "No se puede habilitar: el worker no es elegible"
+          : t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target";
+        const targetRow = `<tr class="${executionBlocked ? "target-execution-blocked" : ""}" title="${executionBlocked ? "Ejecucion bloqueada hasta resolver el estado del target o worker" : ""}">
+           <td>${escapeHtml(t.name)}</td>
+           <td><div class="target-worker-name">${escapeHtml(workerName)}</div>${fmtTargetWorkerState({ ...t, worker_status: workerStatus, blocked_reason: blockedReason })}</td>
+           <td class="mono target-compose-cell">${escapeHtml(t.compose_project || "—")}</td>
+           <td>${escapeHtml(t.backup_mode)}</td>
+           <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
+           <td>${escapeHtml(retention ? retention.name : "—")}</td>
+           <td class="target-cron-cell">${cronLabel}</td>
+           <td class="toggle-cell">
+             ${canManageTargets ? `<label class="switch" title="${escapeHtml(toggleTitle)}">
+               <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" aria-label="${escapeHtml(toggleTitle)}" ${t.enabled ? "checked" : ""} ${toggleDisabled ? "disabled" : ""} />
+               <span class="slider"></span>
+             </label>` : ""}
+             <span class="toggle-label ${t.enabled && !executionBlocked ? "on" : ""}">${targetStatusLabel}</span>
+           </td>
+           <td class="action-cell">
+             <div class="dropdown">
+               <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
+               <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
+                 ${canRunTargets ? `<button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
+                 ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                  ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
+                 ${canManageTargets ? `<button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
+                 <div class="dropdown-divider"></div>
+                 <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>` : ""}
+               </div>
+             </div>
+           </td>
+         </tr>`;
+        return targetRow + (currentLogJobId && String(activeLogTargetId) === String(t.id) ? renderTargetLogDetailRow(t) : "");
       }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets que coincidan con los filtros</td></tr>`;
       const infoEl = document.querySelector("#targetsTableContainer .pagination-info");
       if (infoEl) infoEl.textContent = total === 0 ? "Sin resultados" : `${startIdx + 1}-${Math.min(startIdx + pageSize, total)} de ${total}`;
@@ -1197,6 +1463,14 @@ docker compose up -d
         });
       }
       bindTargetActions();
+      const activeLogContent = activeLogTargetId ? document.getElementById(targetLogContentId(activeLogTargetId)) : null;
+      if (activeLogContent && currentLogJobId) {
+        bindTargetLogClose(activeLogContent);
+        const currentJob = currentLogJobSnapshot && currentLogJobSnapshot.id === currentLogJobId
+          ? currentLogJobSnapshot
+          : (state.jobs || []).find(j => j.id === currentLogJobId);
+        if (currentJob) renderTargetJobLogsInto(currentJob, activeLogContent);
+      }
     }
 
     function renderVolumeTargetsCell(target) {
@@ -1265,6 +1539,7 @@ docker compose up -d
       });
       container.querySelectorAll('input[type="checkbox"][data-action="toggle"]').forEach(cb => {
         cb.addEventListener("change", async () => {
+          if (state.currentRole !== "admin" || cb.disabled) return;
           const id = cb.dataset.id;
           const newEnabled = cb.checked;
           try {
@@ -1305,11 +1580,80 @@ docker compose up -d
       }, "Eliminando...").catch(() => {}));
     }
 
-    async function runBackupNow(targetId, btn) {
-      await withBtnLoading(btn, async () => {
-        const job = await apiPost(`/api/v1/targets/${targetId}/backup`, { requested_by: "ui" });
-        openLogPanel(job.id, targetId);
-      }, "Ejecutando...").catch(() => {});
+    let backupRunPreviousFocus = null;
+
+    function openBackupRunModal(targetId, triggerButton) {
+      const target = state.targets.find(item => String(item.id) === String(targetId));
+      if (!target || target.execution_blocked || !["admin", "operator"].includes(state.currentRole)) return;
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      backupRunPreviousFocus = triggerButton || document.activeElement;
+      const configuredMode = target.backup_mode === "cold" ? "cold" : "hot";
+      overlay.innerHTML = `
+        <div class="modal target-run-modal" role="dialog" aria-modal="true" aria-labelledby="targetRunTitle" aria-describedby="targetRunHelp">
+          <div class="modal-header"><h3 id="targetRunTitle">Ejecutar backup</h3><button type="button" class="close" id="targetRunClose" aria-label="Cerrar ejecucion de backup">&times;</button></div>
+          <div class="modal-body">
+            <div class="helper" id="targetRunHelp">Target: <strong>${escapeHtml(target.name)}</strong>. El modo seleccionado aplica solo a esta ejecucion y no cambia la configuracion del target.</div>
+            <fieldset class="backup-mode-options">
+              <legend>Selecciona el modo de ejecucion</legend>
+              <label class="backup-mode-option"><input type="radio" name="targetBackupMode" value="hot" ${configuredMode === "hot" ? "checked" : ""} /><span><strong>Hot</strong><small>Ejecuta sin detener los contenedores.</small></span></label>
+              <label class="backup-mode-option"><input type="radio" name="targetBackupMode" value="cold" ${configuredMode === "cold" ? "checked" : ""} /><span><strong>Cold</strong><small>Detiene y reinicia los contenedores durante el backup.</small></span></label>
+            </fieldset>
+            <div id="targetRunError" class="form-error" role="alert" aria-live="polite" hidden></div>
+          </div>
+          <div class="modal-footer"><button type="button" class="btn" id="targetRunCancel">Cancelar</button><button type="button" class="btn primary" id="targetRunExecute">Ejecutar backup</button></div>
+        </div>`;
+      overlay.classList.add("open");
+      const close = () => {
+        overlay.classList.remove("open", "active");
+        overlay.innerHTML = "";
+        overlay.onclick = null;
+        overlay.onkeydown = null;
+        if (backupRunPreviousFocus && document.contains(backupRunPreviousFocus)) backupRunPreviousFocus.focus();
+        backupRunPreviousFocus = null;
+      };
+      const closeButton = document.getElementById("targetRunClose");
+      const cancelButton = document.getElementById("targetRunCancel");
+      const executeButton = document.getElementById("targetRunExecute");
+      const errorElement = document.getElementById("targetRunError");
+      closeButton.addEventListener("click", close);
+      cancelButton.addEventListener("click", close);
+      overlay.onclick = event => { if (event.target === overlay) close(); };
+      overlay.onkeydown = event => { if (event.key === "Escape") close(); };
+      executeButton.addEventListener("click", async () => {
+        const selectedMode = overlay.querySelector('input[name="targetBackupMode"]:checked')?.value;
+        if (!["hot", "cold"].includes(selectedMode)) {
+          errorElement.textContent = "Selecciona un modo valido: hot o cold.";
+          errorElement.hidden = false;
+          return;
+        }
+        const originalText = executeButton.innerHTML;
+        executeButton.disabled = true;
+        cancelButton.disabled = true;
+        executeButton.setAttribute("aria-busy", "true");
+        executeButton.innerHTML = '<span class="btn-spinner"></span> Ejecutando...';
+        try {
+          const job = await apiPost(`/api/v1/targets/${encodeURIComponent(targetId)}/backup`, {
+            requested_by: "ui",
+            backup_mode: selectedMode,
+          });
+          close();
+          openLogPanel(job.id, targetId);
+        } catch (error) {
+          errorElement.textContent = `No se pudo ejecutar el backup: ${error.message}`;
+          errorElement.hidden = false;
+          executeButton.disabled = false;
+          cancelButton.disabled = false;
+          executeButton.removeAttribute("aria-busy");
+          executeButton.innerHTML = originalText;
+          executeButton.focus();
+        }
+      });
+      requestAnimationFrame(() => overlay.querySelector('input[name="targetBackupMode"]:checked')?.focus());
+    }
+
+    function runBackupNow(targetId, btn) {
+      openBackupRunModal(targetId, btn);
     }
 
     const SNAPSHOT_CACHE_LIMIT = 8;
@@ -2744,20 +3088,23 @@ docker compose up -d
     }
 
     function openEditTargetModal(target) {
+      if (state.currentRole !== "admin") return;
       targetModalState = { mode: "edit", target, isEditing: true };
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       const eligibleWorkers = (state.workers || []).filter(w => w.status === "online");
       const currentWorkerId = String(target.worker_id || "");
       const currentWorker = (state.workers || []).find(w => String(w.id) === currentWorkerId);
-      const currentWorkerEligible = Boolean(currentWorker && currentWorker.status === "online");
+      const currentWorkerStatus = target.worker_status || (currentWorker && currentWorker.status) || "missing";
+      const currentWorkerEligible = currentWorkerStatus === "online";
+      const currentWorkerStatusLabel = { disabled: "Revocado", missing: "Eliminado", offline: "Offline", pending: "Pendiente" }[currentWorkerStatus] || currentWorkerStatus;
       const currentWorkerOption = currentWorkerEligible || !currentWorkerId
         ? ""
-        : `<option value="${escapeHtml(currentWorkerId)}" selected disabled>${escapeHtml(currentWorker ? currentWorker.name : currentWorkerId)} — no elegible (${escapeHtml(currentWorker ? currentWorker.status : "no registrado")})</option>`;
+        : `<option value="${escapeHtml(currentWorkerId)}" selected disabled>${escapeHtml(currentWorker ? currentWorker.name : currentWorkerId)} — no elegible (${escapeHtml(currentWorkerStatusLabel)})</option>`;
       const workerOptions = `${currentWorkerOption}${eligibleWorkers.map(w => `<option value="${escapeHtml(w.id)}" ${String(w.id) === currentWorkerId ? "selected" : ""}>${escapeHtml(w.name)}</option>`).join("")}`;
       const workerWarning = currentWorkerEligible
         ? ""
-        : `<div id="etWorkerWarning" class="form-error" style="display:block;">El worker actual no tiene un heartbeat reciente. Selecciona un worker online para poder guardar y despachar este target. Reasignar no migra volumenes ni inventario automaticamente.</div>`;
+        : `<div id="etWorkerWarning" class="form-error" style="display:block;">El worker actual esta ${escapeHtml(currentWorkerStatusLabel)}. Selecciona un worker online para poder guardar y despachar este target. Reasignar no migra volumenes ni inventario automaticamente.</div>`;
       const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.storage_profile_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}" ${r.id === target.retention_policy_id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
       overlay.innerHTML = `
@@ -2858,6 +3205,8 @@ docker compose up -d
 
     let jobPollTimer = null;
     let currentLogJobId = null;
+    let currentLogTargetId = null;
+    let currentLogJobSnapshot = null;
     const LOG_POLL_MAX_FAILURES = 5;
     const LOG_POLL_FAILURE_WINDOW_MS = 60000;
 
@@ -2873,75 +3222,71 @@ docker compose up -d
       return ["succeeded", "failed", "canceled", "cancelled"].includes(String(status || "").toLowerCase());
     }
 
-    function openLogPanel(jobId, targetId) {
-      if (jobPollTimer) clearInterval(jobPollTimer);
-      currentLogJobId = jobId;
-      const panel = document.getElementById("targetLogPanel");
-      if (!panel) return;
+    function targetLogDomKey(value) {
+      return String(value || "job").replace(/[^a-zA-Z0-9_-]/g, "-");
+    }
+
+    function targetLogRowId(targetId) {
+      return `target-log-row-${targetLogDomKey(targetId)}`;
+    }
+
+    function targetLogContentId(targetId) {
+      return `target-log-content-${targetLogDomKey(targetId)}`;
+    }
+
+    function targetLogHeadingId(targetId) {
+      return `target-log-heading-${targetLogDomKey(targetId)}`;
+    }
+
+    function targetLogPanelMarkup(jobId, targetId) {
       const existingJob = (state.jobs || []).find(j => j.id === jobId);
-      const tid = targetId || (existingJob ? existingJob.target_id : null);
-      const target = tid ? state.targets.find(t => t.id === tid) : null;
-      const targetLabel = target ? target.name : (tid || "job");
+      const target = targetId ? state.targets.find(t => t.id === targetId) : null;
       const status = existingJob ? existingJob.status : "pending";
-      panel.innerHTML = `
+      const targetLabel = target ? target.name : (targetId || "job");
+      const key = targetLogDomKey(targetId || jobId);
+      const statusId = `target-log-status-${key}`;
+      const containerId = `target-log-container-${key}`;
+      const closeId = `target-log-close-${key}`;
+      return `
         <div class="log-panel">
           <div class="log-panel-header">
             <div class="log-panel-title">
-              <h3>Logs: ${escapeHtml(targetLabel)}</h3>
-              <div class="job-status-bar" id="jobStatusBar">
+              <h3 id="${targetLogHeadingId(targetId)}">Logs: ${escapeHtml(targetLabel)}</h3>
+              <div class="job-status-bar" id="${statusId}" data-target-log-status>
                 <span class="job-status-pill ${status}">${status}</span>
                 <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
               </div>
             </div>
-            <button class="btn ghost xs" id="logPanelClose">Cerrar</button>
+            <button type="button" class="btn ghost xs" id="${closeId}" data-target-log-close aria-label="Cerrar logs de ${escapeHtml(targetLabel)}">Cerrar</button>
           </div>
-          <div class="log-container" id="logContainer"><div class="log-line info">Cargando logs...</div></div>
+          <div class="log-container" id="${containerId}" data-target-log-container><div class="log-line info">Cargando logs...</div></div>
         </div>
       `;
-      panel.classList.add("active");
-      document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
-      pollJobLogs(jobId);
     }
 
-    function closeLogPanel() {
-      if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
-      currentLogJobId = null;
-      const panel = document.getElementById("targetLogPanel");
-      if (panel) { panel.innerHTML = ""; panel.classList.remove("active"); }
-    }
-
-    function reopenLogPanel(jobId, targetId) {
-      const panel = document.getElementById("targetLogPanel");
-      if (!panel) return;
-      const target = state.targets.find(t => t.id === targetId);
-      const existingJob = (state.jobs || []).find(j => j.id === jobId);
-      const status = existingJob ? existingJob.status : "pending";
-      panel.innerHTML = `
-        <div class="log-panel">
-          <div class="log-panel-header">
-            <div class="log-panel-title">
-              <h3>Logs: ${escapeHtml(target ? target.name : targetId || "—")}</h3>
-              <div class="job-status-bar" id="jobStatusBar">
-                <span class="job-status-pill ${status}">${status}</span>
-                <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
-              </div>
-            </div>
-            <button class="btn ghost xs" id="logPanelClose">Cerrar</button>
+    function renderTargetLogDetailRow(target) {
+      const targetId = target.id;
+      return `<tr class="target-log-row" id="${targetLogRowId(targetId)}" data-target-log-row="${escapeHtml(targetId)}">
+        <td colspan="9">
+          <div class="target-log-content" id="${targetLogContentId(targetId)}" role="region" aria-live="polite" aria-labelledby="${targetLogHeadingId(targetId)}">
+            ${targetLogPanelMarkup(currentLogJobId, targetId)}
           </div>
-          <div class="log-container" id="logContainer"><div class="log-line info">Cargando logs...</div></div>
-        </div>
-      `;
-      panel.classList.add("active");
-      document.getElementById("logPanelClose").addEventListener("click", closeLogPanel);
-      if (existingJob) renderJobLogs(existingJob);
+        </td>
+      </tr>`;
     }
 
-    function renderJobLogs(job) {
-      const statusEl = document.getElementById("jobStatusBar");
+    function bindTargetLogClose(root) {
+      const closeButton = root ? root.querySelector("[data-target-log-close]") : null;
+      if (closeButton) closeButton.addEventListener("click", closeLogPanel);
+    }
+
+    function renderTargetJobLogsInto(job, root) {
+      if (!root) return;
+      const statusEl = root.querySelector("[data-target-log-status]");
       if (statusEl) {
         statusEl.innerHTML = `<span class="job-status-pill ${job.status}">${job.status}</span><span class="job-meta">Job: ${escapeHtml(job.id)}</span>`;
       }
-      const container = document.getElementById("logContainer");
+      const container = root.querySelector("[data-target-log-container]");
       if (!container) return;
       const lines = job.log_lines || [];
       if (!lines.length) {
@@ -2960,6 +3305,103 @@ docker compose up -d
       container.scrollTop = container.scrollHeight;
     }
 
+    function getTargetLogHost() {
+      const targetsTable = document.querySelector(".targets-table");
+      if (targetsTable) {
+        return currentLogTargetId ? document.getElementById(targetLogContentId(currentLogTargetId)) : null;
+      }
+      return document.getElementById("targetLogPanel");
+    }
+
+    function ensureTargetLogFallback() {
+      let panel = document.getElementById("targetLogPanel");
+      if (panel) return panel;
+      const content = document.getElementById("content");
+      if (!content) return null;
+      panel = document.createElement("div");
+      panel.id = "targetLogPanel";
+      content.appendChild(panel);
+      return panel;
+    }
+
+    function renderTargetLogPanelInto(host, jobId, targetId) {
+      if (!host) return null;
+      host.innerHTML = targetLogPanelMarkup(jobId, targetId);
+      if (host.id === "targetLogPanel") host.classList.add("active");
+      bindTargetLogClose(host);
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const job = existingJob || (currentLogJobSnapshot && currentLogJobSnapshot.id === jobId ? currentLogJobSnapshot : null);
+      if (job) renderTargetJobLogsInto(job, host);
+      return host;
+    }
+
+    function openLogPanel(jobId, targetId) {
+      if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const tid = targetId || (existingJob ? existingJob.target_id : null);
+      currentLogJobId = jobId;
+      currentLogTargetId = tid || null;
+      currentLogJobSnapshot = existingJob || null;
+      const targetsTable = document.querySelector(".targets-table");
+      if (targetsTable) {
+        const target = tid ? state.targets.find(t => String(t.id) === String(tid)) : null;
+        if (!target) { closeLogPanel(); return; }
+        renderTargetsTableBody();
+        const host = getTargetLogHost();
+        if (!host) { closeLogPanel(); return; }
+        renderTargetLogPanelInto(host, jobId, tid);
+      } else {
+        const panel = ensureTargetLogFallback();
+        if (!panel) { closeLogPanel(); return; }
+        renderTargetLogPanelInto(panel, jobId, tid);
+      }
+      pollJobLogs(jobId);
+    }
+
+    function closeLogPanel() {
+      if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+      const targetId = currentLogTargetId;
+      currentLogJobId = null;
+      currentLogTargetId = null;
+      currentLogJobSnapshot = null;
+      if (targetId) {
+        const row = document.getElementById(targetLogRowId(targetId));
+        if (row) row.remove();
+      }
+      const panel = document.getElementById("targetLogPanel");
+      if (panel) { panel.innerHTML = ""; panel.classList.remove("active"); }
+    }
+
+    function reopenLogPanel(jobId, targetId) {
+      if (!jobId) return;
+      if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+      const existingJob = (state.jobs || []).find(j => j.id === jobId);
+      const tid = targetId || (existingJob ? existingJob.target_id : null);
+      currentLogJobId = jobId;
+      currentLogTargetId = tid || null;
+      currentLogJobSnapshot = existingJob || (currentLogJobSnapshot && currentLogJobSnapshot.id === jobId ? currentLogJobSnapshot : null);
+      const targetsTable = document.querySelector(".targets-table");
+      if (targetsTable) {
+        const target = tid ? state.targets.find(t => String(t.id) === String(tid)) : null;
+        if (!target) { closeLogPanel(); return; }
+        if (!document.getElementById(targetLogContentId(tid))) renderTargetsTableBody();
+        const host = getTargetLogHost();
+        if (!host) { closeLogPanel(); return; }
+        renderTargetLogPanelInto(host, jobId, tid);
+      } else {
+        const panel = ensureTargetLogFallback();
+        if (!panel) { closeLogPanel(); return; }
+        renderTargetLogPanelInto(panel, jobId, tid);
+      }
+      const knownJob = existingJob || currentLogJobSnapshot;
+      if (!knownJob || !isTerminalJobStatus(knownJob.status)) pollJobLogs(jobId);
+    }
+
+    function renderJobLogs(job) {
+      const host = getTargetLogHost();
+      if (host) renderTargetJobLogsInto(job, host);
+    }
+
     function pollJobLogs(jobId) {
       if (jobPollTimer) clearInterval(jobPollTimer);
       let failures = 0;
@@ -2968,8 +3410,10 @@ docker compose up -d
         if (currentLogJobId !== jobId) return;
         try {
           const job = await apiGet(`/api/v1/jobs/${jobId}`);
+          if (currentLogJobId !== jobId) return;
           failures = 0;
           firstFailureAt = 0;
+          currentLogJobSnapshot = job;
           renderJobLogs(job);
           if (isTerminalJobStatus(job.status)) {
             if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
@@ -2977,10 +3421,12 @@ docker compose up -d
             await refreshAll();
           }
         } catch (error) {
+          if (currentLogJobId !== jobId) return;
           failures += 1;
           if (!firstFailureAt) firstFailureAt = Date.now();
           const stopped = failures >= LOG_POLL_MAX_FAILURES || Date.now() - firstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS;
-          const container = document.getElementById("logContainer");
+          const host = getTargetLogHost();
+          const container = host ? host.querySelector("[data-target-log-container]") : null;
           renderLogPollingError(
             container,
             stopped
