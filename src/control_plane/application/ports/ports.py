@@ -37,6 +37,10 @@ class WorkerRepository(ABC):
     def find_by_name(self, name: str) -> Optional[WorkerRecord]:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete(self, worker_id: str) -> bool:
+        raise NotImplementedError
+
 
 class WorkerEnrollmentRepository(ABC):
     @abstractmethod
@@ -63,6 +67,10 @@ class InventoryRepository(ABC):
 
     @abstractmethod
     def get_by_worker(self, worker_id: str) -> Optional[InventorySnapshot]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_by_worker(self, worker_id: str) -> bool:
         raise NotImplementedError
 
 
@@ -183,6 +191,10 @@ class TargetStatsRepository(ABC):
 
     @abstractmethod
     def get_by_target(self, target_id: str) -> Optional[TargetStatsRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_by_worker(self, worker_id: str) -> bool:
         raise NotImplementedError
 
 

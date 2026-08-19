@@ -46,6 +46,10 @@ from src.control_plane.domain.models import (
 logger = logging.getLogger(__name__)
 
 
+class WorkerDeletionConflict(ValueError):
+    """Raised when deleting a worker would orphan active work."""
+
+
 class ControlPlaneService:
     SUPPORTED_SECRET_TYPES = {"generic", "env", "file"}
     DEFAULT_WORKER_OFFLINE_AFTER_SECONDS = 90.0
@@ -97,6 +101,7 @@ class ControlPlaneService:
         self.settings_repository = settings_repository
         self.cache_repository = cache_repository
         self.index_repository = index_repository
+        self.worker_auth = None
 
     def register_worker(
         self,
@@ -142,9 +147,89 @@ class ControlPlaneService:
     def update_worker(self, worker_id: str, labels: Optional[Dict[str, str]] = None) -> WorkerRecord:
         worker = self._require_worker(worker_id)
         if labels is not None:
-            worker.labels = labels
+            worker.labels = self._validate_worker_labels(labels)
         worker.updated_at = utcnow()
         return self.worker_repository.save(worker)
+
+    @staticmethod
+    def _validate_worker_labels(labels: Dict[str, str]) -> Dict[str, str]:
+        if not isinstance(labels, dict):
+            raise ValueError("worker labels must be an object")
+        normalized: Dict[str, str] = {}
+        for key, value in labels.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("worker label keys must not be blank")
+            normalized_key = key.strip()
+            if normalized_key in normalized:
+                raise ValueError(f"duplicate worker label key: {normalized_key}")
+            normalized[normalized_key] = "" if value is None else str(value)
+        return normalized
+
+    @staticmethod
+    def _validate_backup_mode(mode: str) -> str:
+        if mode not in ("hot", "cold"):
+            raise ValueError("backup_mode must be exactly 'hot' or 'cold'")
+        return mode
+
+    def revoke_worker(self, worker_id: str, version: Optional[str] = None) -> Dict[str, Any]:
+        worker = self._require_worker(worker_id)
+        auth = getattr(self, "worker_auth", None)
+        if auth is not None:
+            if version is None and callable(getattr(auth, "revoke_all", None)):
+                result = auth.revoke_all(worker_id)
+            else:
+                result = auth.revoke(worker_id, version)
+        else:
+            result = {"worker_id": worker_id, "credentials_revoked": 0}
+        worker.status = WorkerStatus.DISABLED
+        worker.updated_at = utcnow()
+        self.worker_repository.save(worker)
+        self._disable_targets_for_worker(worker_id)
+        result = dict(result or {})
+        result.update({"worker_id": worker_id, "status": "revoked", "worker_status": WorkerStatus.DISABLED})
+        return result
+
+    def delete_worker(self, worker_id: str) -> bool:
+        worker = self.worker_repository.get(worker_id)
+        if worker is None:
+            return False
+
+        self._reconcile_expired_jobs()
+        active_jobs = [
+            job
+            for job in self.job_repository.list()
+            if JobStatus.normalize(job.status) in (JobStatus.PENDING, JobStatus.IN_PROGRESS)
+            and (job.worker_id == worker_id or job.owner_worker_id == worker_id)
+        ]
+        if active_jobs:
+            job_ids = ", ".join(f"{job.id} ({JobStatus.normalize(job.status)})" for job in active_jobs)
+            raise WorkerDeletionConflict(
+                f"worker '{worker_id}' still has active or pending jobs: {job_ids}"
+            )
+
+        self._disable_targets_for_worker(worker_id)
+        auth = getattr(self, "worker_auth", None)
+        if auth is not None:
+            revoke_all = getattr(auth, "revoke_all", None)
+            if callable(revoke_all):
+                revoke_all(worker_id)
+            delete_auth_worker = getattr(auth, "delete_worker", None)
+            if callable(delete_auth_worker):
+                delete_auth_worker(worker_id)
+        self.inventory_repository.delete_by_worker(worker_id)
+        self.target_stats_repository.delete_by_worker(worker_id)
+        deleted = self.worker_repository.delete(worker_id)
+        if deleted:
+            self._cleanup_orphaned_explorer_metadata()
+        return deleted
+
+    def _disable_targets_for_worker(self, worker_id: str) -> None:
+        for target in self.target_repository.list():
+            if target.worker_id != worker_id or not target.enabled:
+                continue
+            target.enabled = False
+            target.updated_at = utcnow()
+            self.target_repository.save(target)
 
     def get_worker(self, worker_id: str) -> WorkerRecord:
         return self._worker_view(self._require_worker(worker_id))
@@ -180,6 +265,7 @@ class ControlPlaneService:
         labels: Optional[Dict[str, str]] = None,
         cron_expression: Optional[str] = None,
     ) -> BackupTargetRecord:
+        backup_mode = self._validate_backup_mode(backup_mode)
         self._require_eligible_worker(worker_id)
         if storage_profile_id:
             self._require_storage_profile(storage_profile_id)
@@ -258,8 +344,16 @@ class ControlPlaneService:
         enabled: Optional[bool] = None,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
+        if backup_mode is not None:
+            backup_mode = self._validate_backup_mode(backup_mode)
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        effective_worker_id = worker_id if worker_id is not None else target.worker_id
         if worker_id is not None:
             self._require_eligible_worker(worker_id)
+        if enabled is True:
+            self._require_eligible_worker(effective_worker_id)
+        if worker_id is not None:
             target.worker_id = worker_id
         if name is not None:
             target.name = name
@@ -332,6 +426,8 @@ class ControlPlaneService:
             target = self._require_target(target_id)
             if target.worker_id != worker_id:
                 raise ValueError(f"target '{target_id}' is assigned to worker '{target.worker_id}'")
+            if command == "backup.run" and not target.enabled:
+                raise ValueError(f"target '{target_id}' is disabled and cannot be dispatched")
         job = JobRecord(
             worker_id=worker_id,
             command=command,
@@ -342,9 +438,17 @@ class ControlPlaneService:
         )
         return self.job_repository.save(job)
 
-    def dispatch_backup_for_target(self, target_id: str, requested_by: str = "system", trigger: str = "manual") -> JobRecord:
+    def dispatch_backup_for_target(
+        self,
+        target_id: str,
+        requested_by: str = "system",
+        trigger: str = "manual",
+        backup_mode: Optional[str] = None,
+    ) -> JobRecord:
         target = self._require_target(target_id)
-        payload = self._build_backup_payload(target)
+        if not target.enabled:
+            raise ValueError(f"target '{target_id}' is disabled and cannot be dispatched")
+        payload = self._build_backup_payload(target, backup_mode=backup_mode)
         return self.dispatch_job(
             worker_id=target.worker_id,
             command="backup.run",
@@ -775,21 +879,27 @@ class ControlPlaneService:
                 sources.append(bind)
         return sources
 
-    def _build_backup_payload(self, target: BackupTargetRecord) -> Dict[str, Any]:
+    def _build_backup_payload(
+        self,
+        target: BackupTargetRecord,
+        backup_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        configured_mode = self._validate_backup_mode(target.backup_mode)
+        effective_mode = configured_mode if backup_mode is None else self._validate_backup_mode(backup_mode)
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         environment.setdefault("BACKUP_STRATEGY", target.backup_strategy)
         volumes = self._normalize_runtime_volumes(volumes, target)
         if target.volume_targets and "BACKUP_SOURCES" not in environment:
             environment["BACKUP_SOURCES"] = " ".join(self._normalized_backup_sources(volumes))
-        environment["BACKUP_STOP_CONTAINERS"] = "true" if target.backup_mode == "cold" else "false"
-        if target.backup_mode == "cold":
+        environment["BACKUP_STOP_CONTAINERS"] = "true" if effective_mode == "cold" else "false"
+        if effective_mode == "cold":
             environment.setdefault("BACKUP_CUSTOM_LABEL", f"control-plane.target={target.id}")
 
         payload = {
             "target_id": target.id,
             "compose_project": target.compose_project,
             "volume_targets": target.volume_targets,
-            "backup_mode": target.backup_mode,
+            "backup_mode": effective_mode,
             "backup_strategy": target.backup_strategy,
             "image": target.runtime_image,
             "command": target.runtime_command,

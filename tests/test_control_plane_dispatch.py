@@ -10,8 +10,8 @@ from urllib.error import HTTPError
 
 from cryptography.fernet import Fernet
 
-from src.control_plane.application.services.control_plane_service import ControlPlaneService
-from src.control_plane.auth import ROLE_OPERATOR, ROLE_VIEWER
+from src.control_plane.application.services.control_plane_service import ControlPlaneService, WorkerDeletionConflict
+from src.control_plane.auth import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 from src.control_plane.domain.models import (
     BackupTargetRecord,
     IndexStatusRecord,
@@ -20,6 +20,7 @@ from src.control_plane.domain.models import (
     SnapshotRecord,
     StorageProfileRecord,
     WorkerRecord,
+    WorkerStatus,
     utcnow,
 )
 from src.control_plane.infrastructure.security.secret_codec import SecretCodec
@@ -348,6 +349,35 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         service.worker_repository.save(missing)
         with self.assertRaisesRegex(ValueError, "not eligible"):
             service.register_target("new-target", "worker-b")
+
+    def test_disabled_targets_cannot_be_dispatched_as_backups(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+        target.enabled = False
+        service.target_repository.save(target)
+
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            service.dispatch_backup_for_target("target-a")
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            service.dispatch_job("worker-a", "backup.run", target_id="target-a")
+
+    def test_manual_backup_mode_override_changes_payload_only(self):
+        service = self.make_service()
+
+        cold_job = service.dispatch_backup_for_target("target-a", backup_mode="cold")
+        self.assertEqual(cold_job.payload["backup_mode"], "cold")
+        self.assertEqual(cold_job.payload["environment"]["BACKUP_STOP_CONTAINERS"], "true")
+        self.assertEqual(service.target_repository.get("target-a").backup_mode, "hot")
+
+        hot_job = service.dispatch_backup_for_target("target-a", backup_mode="hot")
+        self.assertEqual(hot_job.payload["backup_mode"], "hot")
+        self.assertEqual(hot_job.payload["environment"]["BACKUP_STOP_CONTAINERS"], "false")
+        with self.assertRaisesRegex(ValueError, "exactly 'hot' or 'cold'"):
+            service.dispatch_backup_for_target("target-a", backup_mode="warm")
+        with self.assertRaisesRegex(ValueError, "exactly 'hot' or 'cold'"):
+            service.register_target("invalid-mode", "worker-a", backup_mode="warm")
+        with self.assertRaisesRegex(ValueError, "exactly 'hot' or 'cold'"):
+            service.update_target("target-a", backup_mode="warm")
 
     def test_snapshot_sync_persists_catalog_and_deduplicates_pending_job(self):
         service = self.make_service()
@@ -766,6 +796,111 @@ class ControlPlaneRouteTests(unittest.TestCase):
             lease_token="lease-token",
         )
         self.assertEqual(handler._write_json.call_args.args[0], 200)
+
+    def test_admin_revoke_route_delegates_worker_state_change_to_service(self):
+        handler = self.make_handler("/api/v1/admin/workers/worker-a/revoke", "{}")
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.revoke_worker.return_value = {"worker_id": "worker-a", "status": "revoked"}
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_ADMIN, api_mode=True)
+        service.revoke_worker.assert_called_once_with("worker-a", None)
+        self.assertEqual(handler._write_json.call_args.args[0], 200)
+
+    def test_target_backup_route_forwards_manual_backup_mode(self):
+        handler = self.make_handler("/api/v1/targets/target-a/backup", '{"backup_mode":"cold"}')
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_OPERATOR}
+        service = Mock()
+        service.dispatch_backup_for_target.return_value = SimpleNamespace(id="job-1")
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_OPERATOR, api_mode=True)
+        service.dispatch_backup_for_target.assert_called_once_with(
+            "target-a",
+            requested_by="api",
+            backup_mode="cold",
+        )
+        self.assertEqual(handler._write_json.call_args.args[0], 202)
+
+    def test_target_backup_route_returns_bad_request_for_invalid_or_blocked_backup(self):
+        for error in (
+            "backup_mode must be exactly 'hot' or 'cold'",
+            "target 'target-a' is disabled and cannot be dispatched",
+        ):
+            with self.subTest(error=error):
+                handler = self.make_handler("/api/v1/targets/target-a/backup", '{"backup_mode":"warm"}')
+                handler._require_auth.reset_mock()
+                handler._require_auth.return_value = {"role": ROLE_ADMIN}
+                service = Mock()
+                service.dispatch_backup_for_target.side_effect = ValueError(error)
+                handler._control_plane_service = Mock(return_value=service)
+
+                handler.do_POST()
+
+                self.assertEqual(handler._write_json.call_args.args, (400, {"error": error}))
+
+    def test_target_jsonable_distinguishes_revoked_and_deleted_workers(self):
+        service = ControlPlaneDispatchTests().make_service()
+        revoked_worker = service.worker_repository.get("worker-a")
+        revoked_worker.status = WorkerStatus.DISABLED
+        service.worker_repository.save(revoked_worker)
+        revoked_target = service.target_repository.get("target-a")
+        revoked_target.enabled = False
+        service.target_repository.save(revoked_target)
+
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler._control_plane_service = Mock(return_value=service)
+        handler._scheduler = Mock(return_value=None)
+
+        revoked_payload = handler._target_jsonable(revoked_target)
+        self.assertEqual(revoked_payload["worker_name"], "worker-a")
+        self.assertEqual(revoked_payload["worker_status"], "disabled")
+        self.assertTrue(revoked_payload["execution_blocked"])
+        self.assertEqual(revoked_payload["blocked_reason"], "worker_revoked")
+
+        deleted_target = service.target_repository.get("target-b")
+        service.worker_repository.delete("worker-b")
+        deleted_payload = handler._target_jsonable(deleted_target)
+        self.assertEqual(deleted_payload["worker_status"], "missing")
+        self.assertTrue(deleted_payload["execution_blocked"])
+        self.assertEqual(deleted_payload["blocked_reason"], "worker_missing")
+        self.assertEqual(deleted_payload["worker_id"], "worker-b")
+
+    def test_admin_delete_worker_route_is_admin_only_and_returns_no_content(self):
+        handler = self.make_handler("/api/v1/workers/worker-a", "")
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.delete_worker.return_value = True
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_DELETE()
+
+        handler._require_auth.assert_called_once_with(ROLE_ADMIN, api_mode=True)
+        service.delete_worker.assert_called_once_with("worker-a")
+        self.assertEqual(handler._write_json.call_args.args[0], 204)
+
+    def test_admin_delete_worker_route_returns_conflict_for_dependency_error(self):
+        handler = self.make_handler("/api/v1/workers/worker-a", "")
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.delete_worker.side_effect = WorkerDeletionConflict("worker 'worker-a' still has active or pending jobs: job-a (pending)")
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_DELETE()
+
+        self.assertEqual(
+            handler._write_json.call_args.args,
+            (409, {"error": "worker 'worker-a' still has active or pending jobs: job-a (pending)", "code": "worker_deletion_conflict"}),
+        )
 
     def test_public_config_exposes_scheduler_timezone(self):
         handler = object.__new__(ControlPlaneRequestHandler)

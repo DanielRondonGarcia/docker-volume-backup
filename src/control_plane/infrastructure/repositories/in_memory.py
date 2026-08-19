@@ -60,6 +60,10 @@ class InMemoryWorkerRepository(WorkerRepository):
     def list(self) -> List[WorkerRecord]:
         return sorted(self._items.values(), key=lambda item: item.created_at)
 
+    def delete(self, worker_id: str) -> bool:
+        with self._lock:
+            return self._items.pop(worker_id, None) is not None
+
 
 class InMemoryWorkerEnrollmentRepository(WorkerEnrollmentRepository):
     def __init__(self):
@@ -96,6 +100,10 @@ class InMemoryInventoryRepository(InventoryRepository):
 
     def get_by_worker(self, worker_id: str) -> Optional[InventorySnapshot]:
         return self._items.get(worker_id)
+
+    def delete_by_worker(self, worker_id: str) -> bool:
+        with self._lock:
+            return self._items.pop(worker_id, None) is not None
 
 
 class InMemoryTargetRepository(TargetRepository):
@@ -306,6 +314,13 @@ class InMemoryTargetStatsRepository(TargetStatsRepository):
 
     def get_by_target(self, target_id: str) -> Optional[TargetStatsRecord]:
         return self._items.get(target_id)
+
+    def delete_by_worker(self, worker_id: str) -> bool:
+        with self._lock:
+            stale_targets = [target_id for target_id, item in self._items.items() if item.worker_id == worker_id]
+            for target_id in stale_targets:
+                self._items.pop(target_id, None)
+            return bool(stale_targets)
 
 
 class InMemorySettingsRepository(SettingsRepository):

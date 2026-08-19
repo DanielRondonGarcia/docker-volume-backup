@@ -87,3 +87,36 @@ class WorkerAuthState:
         if not c: raise ValueError("worker credential not found")
         c.status, c.revoked_at = "revoked", utcnow(); self._save(c)
         return {"worker_id": worker_id, "credential_version": c.version, "status": "revoked"}
+    def revoke_all(self, worker_id):
+        with self._lock:
+            now = utcnow()
+            if self.path:
+                with self._db() as db:
+                    updated = db.execute(
+                        "UPDATE worker_credentials SET status='revoked', revoked_at=? WHERE worker_id=? AND status!='revoked'",
+                        (now.isoformat(), worker_id),
+                    )
+                    count = updated.rowcount
+            else:
+                credentials = [c for (wid, _), c in self._credentials.items() if wid == worker_id and c.status != "revoked"]
+                for credential in credentials:
+                    credential.status, credential.revoked_at = "revoked", now
+                count = len(credentials)
+            return {"worker_id": worker_id, "status": "revoked", "credentials_revoked": count}
+    def delete_worker(self, worker_id):
+        with self._lock:
+            if self.path:
+                with self._db() as db:
+                    revoked = db.execute("SELECT COUNT(*) FROM worker_credentials WHERE worker_id=?", (worker_id,)).fetchone()[0]
+                    db.execute("DELETE FROM worker_credentials WHERE worker_id=?", (worker_id,))
+                    db.execute("DELETE FROM worker_nonces WHERE worker_id=?", (worker_id,))
+                    db.execute("DELETE FROM auth_enrollments WHERE worker_id=?", (worker_id,))
+                return {"worker_id": worker_id, "credentials_revoked": revoked}
+            credential_keys = [key for key in self._credentials if key[0] == worker_id]
+            for key in credential_keys:
+                self._credentials.pop(key, None)
+            self._nonces = {key for key in self._nonces if key[0] != worker_id}
+            enrollment_keys = [digest for digest, enrollment in self._enrollments.items() if enrollment.worker_id == worker_id]
+            for digest in enrollment_keys:
+                self._enrollments.pop(digest, None)
+            return {"worker_id": worker_id, "credentials_revoked": len(credential_keys)}

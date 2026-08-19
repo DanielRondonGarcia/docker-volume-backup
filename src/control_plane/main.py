@@ -16,7 +16,7 @@ except ImportError:
     NativeThreadingHTTPSServer = None
 
 from src.control_plane.auth import AuthService, ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
-from src.control_plane.application.services.control_plane_service import ControlPlaneService
+from src.control_plane.application.services.control_plane_service import ControlPlaneService, WorkerDeletionConflict
 from src.control_plane.application.services.scheduler_service import (
     DEFAULT_SCHEDULER_TIMEZONE,
     SCHEDULER_TIMEZONE_ENV,
@@ -196,6 +196,29 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
 
     def _target_jsonable(self, target):
         payload = _to_jsonable(target)
+        service = self._control_plane_service()
+        worker = service.worker_repository.get(target.worker_id)
+        if worker is None:
+            worker_name = None
+            worker_status = "missing"
+            blocked_reason = "worker_missing"
+        else:
+            worker_name = worker.name
+            worker_status = service._worker_status(worker)
+            if worker_status == "disabled":
+                blocked_reason = "worker_revoked"
+            elif worker_status != "online":
+                blocked_reason = "worker_offline"
+            else:
+                blocked_reason = "target_disabled" if not target.enabled else None
+        payload.update(
+            {
+                "worker_name": worker_name,
+                "worker_status": worker_status,
+                "execution_blocked": blocked_reason is not None,
+                "blocked_reason": blocked_reason,
+            }
+        )
         scheduler = self._scheduler()
         if scheduler is not None:
             payload.update(scheduler.preview(target=target))
@@ -588,8 +611,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     self._control_plane_service().get_worker(parts[4])
                     return self._write_json(200, self._worker_auth().rotate(parts[4], body.get("secret", "")))
                 if parts[5] == "revoke":
-                    self._control_plane_service().get_worker(parts[4])
-                    return self._write_json(200, self._worker_auth().revoke(parts[4], body.get("version")))
+                    return self._write_json(
+                        200,
+                        self._control_plane_service().revoke_worker(parts[4], body.get("version")),
+                    )
 
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
@@ -798,6 +823,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 job = self._control_plane_service().dispatch_backup_for_target(
                     parts[3],
                     requested_by=body.get("requested_by") or "api",
+                    backup_mode=body.get("backup_mode"),
                 )
                 return self._write_json(202, _to_jsonable(job))
 
@@ -976,7 +1002,14 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 if not deleted:
                     return self._write_json(404, {"error": "storage profile not found"})
                 return self._write_json(204, {})
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "workers"]:
+                deleted = self._control_plane_service().delete_worker(parts[3])
+                if not deleted:
+                    return self._write_json(404, {"error": "worker not found"})
+                return self._write_json(204, {})
             return self._write_json(404, {"error": "not found"})
+        except WorkerDeletionConflict as exc:
+            return self._write_json(409, {"error": str(exc), "code": "worker_deletion_conflict"})
         except ValueError as exc:
             return self._write_json(400, {"error": str(exc)})
         except Exception as exc:

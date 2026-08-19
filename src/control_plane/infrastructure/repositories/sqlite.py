@@ -316,6 +316,11 @@ class SQLiteWorkerRepository(SQLiteRepositoryBase, WorkerRepository):
             rows = connection.execute("SELECT * FROM workers ORDER BY created_at ASC").fetchall()
         return [self._row_to_worker(row) for row in rows]
 
+    def delete(self, worker_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
+            return cursor.rowcount > 0
+
     @staticmethod
     def _row_to_worker(row: sqlite3.Row) -> WorkerRecord:
         return WorkerRecord(
@@ -415,6 +420,11 @@ class SQLiteInventoryRepository(SQLiteRepositoryBase, InventoryRepository):
             created_at=_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
         )
+
+    def delete_by_worker(self, worker_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM inventories WHERE worker_id = ?", (worker_id,))
+            return cursor.rowcount > 0
 
 
 class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
@@ -996,6 +1006,11 @@ class SQLiteTargetStatsRepository(SQLiteRepositoryBase, TargetStatsRepository):
             stats=_json_load(row["stats_json"], {}),
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
         )
+
+    def delete_by_worker(self, worker_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM target_stats WHERE worker_id = ?", (worker_id,))
+            return cursor.rowcount > 0
 
 
 class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):

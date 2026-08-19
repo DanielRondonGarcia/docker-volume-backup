@@ -14,7 +14,7 @@ from src.control_plane.application.services.scheduler_service import (
     cron_next_run,
     resolve_scheduler_timezone,
 )
-from src.control_plane.domain.models import BackupTargetRecord, JobRecord, JobStatus, SettingsRecord, WorkerRecord, utcnow
+from src.control_plane.domain.models import BackupTargetRecord, JobRecord, JobStatus, SettingsRecord, WorkerRecord, WorkerStatus, utcnow
 from src.control_plane.infrastructure.repositories.in_memory import (
     InMemoryInventoryRepository,
     InMemoryJobRepository,
@@ -165,6 +165,34 @@ class SchedulerDeploymentTests(unittest.TestCase):
             clock.now.return_value = fixed_now
             scheduler._tick()
         self.assertEqual(len(service.job_repository.list()), 1)
+
+    def test_revoked_worker_is_not_eligible_for_new_scheduled_jobs(self):
+        service = self._service()
+        worker = service.worker_repository.get("worker-a")
+        worker.status = WorkerStatus.DISABLED
+        service.worker_repository.save(worker)
+        target = BackupTargetRecord(name="target", worker_id="worker-a", cron_expression="* * * * *")
+        service.target_repository.save(target)
+
+        scheduler = SchedulerService(service)
+        scheduler._tick()
+
+        self.assertFalse(service.is_worker_eligible("worker-a"))
+        self.assertEqual(service.job_repository.list(), [])
+        with self.assertRaisesRegex(ValueError, "not eligible"):
+            service.dispatch_job("worker-a", "backup.run", target_id=target.id)
+
+    def test_disabled_target_is_skipped_by_scheduler_and_manual_backup_dispatch(self):
+        service = self._service()
+        target = BackupTargetRecord(name="target", worker_id="worker-a", enabled=False, cron_expression="* * * * *")
+        service.target_repository.save(target)
+
+        scheduler = SchedulerService(service)
+        scheduler._tick()
+
+        self.assertEqual(service.job_repository.list(), [])
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            service.dispatch_backup_for_target(target.id)
 
     def test_compose_and_ci_defaults(self):
         worker_compose = (ROOT / "deploy/worker/docker-compose.yml").read_text()
