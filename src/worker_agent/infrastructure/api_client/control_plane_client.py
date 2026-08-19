@@ -1,4 +1,5 @@
 import json
+import re
 import ssl
 import secrets
 import time
@@ -6,9 +7,96 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib import request
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
 from src.security.hmac_protocol import digest_secret, sign_request
 from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
+
+
+_HTTP_ERROR_DETAIL_LIMIT = 512
+_HTTP_ERROR_BODY_READ_LIMIT = 4096
+
+
+def _safe_diagnostic_text(value: Any, limit: int = _HTTP_ERROR_DETAIL_LIMIT) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.sub(r"(?i)(?:https?|http\+docker)://[^\s]+", "<url>", text)
+    text = re.sub(
+        r"(?i)\b(?:authorization|bearer|token|secret|password|credential)\b\s*[:=]\s*[^\s,;]+",
+        "<redacted>",
+        text,
+    )
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 3]}..."
+
+
+def _safe_endpoint_path(path: str) -> str:
+    raw_path = str(path or "/").strip()
+    try:
+        parsed = urlsplit(raw_path)
+        raw_path = parsed.path or raw_path
+    except ValueError:
+        pass
+    raw_path = raw_path.split("?", 1)[0].split("#", 1)[0]
+    if not raw_path.startswith("/"):
+        raw_path = f"/{raw_path}"
+    return _safe_diagnostic_text(raw_path) or "/"
+
+
+class ControlPlaneHTTPError(HTTPError):
+    """A bounded, endpoint-only representation of a Control Plane rejection."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        status: int,
+        detail: str = "",
+        server_code: Any = None,
+    ):
+        self.method = str(method).upper()
+        self.path = _safe_endpoint_path(path)
+        self.detail = _safe_diagnostic_text(detail)
+        self.server_code = _safe_diagnostic_text(server_code) if server_code is not None else ""
+
+        message = f"Control Plane rejected {self.method} {self.path}: HTTP {status}"
+        if self.server_code:
+            message += f" (code={self.server_code})"
+        if self.detail:
+            message += f": {self.detail}"
+        self._diagnostic_message = message
+        super().__init__(self.path, status, message, {}, None)
+        self.close()
+
+    def __str__(self) -> str:
+        return self._diagnostic_message
+
+    @property
+    def status(self) -> int:
+        return self.code
+
+
+def _parse_http_error_detail(body: str, reason: Any) -> tuple[str, Any]:
+    payload = None
+    if body:
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            pass
+
+    server_code = None
+    detail = body
+    if isinstance(payload, dict):
+        server_code = payload.get("code")
+        for key in ("error", "message", "detail"):
+            if payload.get(key) is not None:
+                detail = payload[key]
+                break
+
+    safe_detail = _safe_diagnostic_text(detail)
+    if not safe_detail:
+        safe_detail = _safe_diagnostic_text(reason) or "no response detail"
+    return safe_detail, server_code
 
 
 class ControlPlaneClient:
@@ -126,8 +214,25 @@ class ControlPlaneClient:
             headers=headers,
         )
         ssl_context = self._build_ssl_context()
-        with request.urlopen(http_request, timeout=self.timeout_seconds, context=ssl_context) as response:
-            body = response.read().decode("utf-8")
+        try:
+            with request.urlopen(http_request, timeout=self.timeout_seconds, context=ssl_context) as response:
+                body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            try:
+                raw_body = exc.read(_HTTP_ERROR_BODY_READ_LIMIT)
+            except Exception:
+                raw_body = b""
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+            if isinstance(raw_body, bytes):
+                error_body = raw_body.decode("utf-8", errors="replace")
+            else:
+                error_body = str(raw_body or "")
+            detail, server_code = _parse_http_error_detail(error_body, exc.reason)
+            raise ControlPlaneHTTPError("POST", path, exc.code, detail, server_code) from exc
         return json.loads(body) if body else {}
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:

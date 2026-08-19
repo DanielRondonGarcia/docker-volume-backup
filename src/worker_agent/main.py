@@ -2,7 +2,9 @@ import json
 import logging
 import math
 import os
+import re
 import socket
+import ssl
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -10,12 +12,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
+from urllib.error import HTTPError, URLError
 
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
-from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
+from src.worker_agent.infrastructure.api_client.control_plane_client import (
+    ControlPlaneClient,
+    ControlPlaneHTTPError,
+)
 from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -151,6 +157,86 @@ def _runtime_orphan_sweep_interval() -> float:
     )
 
 
+_WORKER_ERROR_DETAIL_LIMIT = 512
+
+
+def _bounded_worker_error_detail(error: Exception) -> str:
+    detail = " ".join(str(error).split())
+    detail = re.sub(
+        r"(?i)(?:https?|http\+docker)://[^\s)]+",
+        lambda match: (
+            "http+docker://<redacted>"
+            if match.group(0).lower().startswith("http+docker://")
+            else "<url>"
+        ),
+        detail,
+    )
+    detail = re.sub(
+        r"(?i)\b(?:authorization|bearer|token|secret|password|credential)\b\s*[:=]\s*[^\s,;]+",
+        "<redacted>",
+        detail,
+    )
+    if len(detail) <= _WORKER_ERROR_DETAIL_LIMIT:
+        return detail
+    return f"{detail[:_WORKER_ERROR_DETAIL_LIMIT - 3]}..."
+
+
+def _is_docker_runtime_error(error: Exception) -> bool:
+    qualified_type = f"{error.__class__.__module__}.{error.__class__.__name__}".lower()
+    detail = str(error).lower()
+    return (
+        "docker.errors" in qualified_type
+        or "http+docker://" in detail
+        or "docker daemon" in detail
+        or "docker socket" in detail
+        or "no such image" in detail
+        or "docker api" in detail
+    )
+
+
+def _is_control_plane_connectivity_error(error: Exception) -> bool:
+    if isinstance(error, (URLError, socket.gaierror, ConnectionError, TimeoutError, ssl.SSLError)):
+        return True
+    detail = str(error).lower()
+    return any(
+        marker in detail
+        for marker in (
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname",
+            "getaddrinfo failed",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "tls handshake",
+            "ssl error",
+            "timed out",
+        )
+    )
+
+
+def _classify_worker_loop_error(error: Exception) -> str:
+    if isinstance(error, (ControlPlaneHTTPError, HTTPError)):
+        return "control_plane_rejection"
+    if _is_docker_runtime_error(error):
+        return "docker_runtime"
+    if _is_control_plane_connectivity_error(error):
+        return "control_plane_connectivity"
+    return "worker_loop"
+
+
+def _format_worker_loop_error(error: Exception) -> str:
+    category = _classify_worker_loop_error(error)
+    if category == "control_plane_rejection":
+        return str(error)
+    detail = _bounded_worker_error_detail(error) or error.__class__.__name__
+    if category == "control_plane_connectivity":
+        return f"Worker could not connect to the Control Plane: {detail}"
+    if category == "docker_runtime":
+        return f"Worker reached the Control Plane but the Docker runtime failed: {detail}"
+    return f"Worker loop failed ({error.__class__.__name__}): {detail}"
+
+
 def _poll_worker(service: WorkerAgentService):
     interactive_poll = getattr(service, "poll_interactive_once", None)
     if callable(interactive_poll):
@@ -284,10 +370,11 @@ def main():
             attempts = 0
         except Exception as exc:
             attempts += 1
-            health_state.record_control_plane_failure(str(exc))
-            logger.warning("Worker loop could not reach the Control Plane: %s", exc)
+            error_message = _format_worker_loop_error(exc)
+            health_state.record_control_plane_failure(error_message)
+            logger.warning("%s", error_message)
             if attempts >= 5:
-                health_state.record_not_ready(str(exc))
+                health_state.record_not_ready(error_message)
                 raise RuntimeError("worker startup failed after 5 attempts") from None
         finally:
             health_state.record_loop_completed()
