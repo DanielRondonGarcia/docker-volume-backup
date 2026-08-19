@@ -65,6 +65,85 @@ class SnapshotBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
         self.assertEqual(result.result_summary["entries"], [])
 
+    def test_missing_repository_config_is_actionable_and_secret_safe_for_metadata(self):
+        repository = "local:/sensitive/repository"
+        password = "restic-password-value"
+        rclone_config = "[remote]\npassword = rclone-secret-value"
+        raw_error = (
+            f"Fatal: unable to open config file: {repository}/config does not exist. "
+            f"Is there a repository at the following location? {repository} "
+            f"{password} {rclone_config}"
+        )
+        runtime = Mock()
+        failure = {
+            "success": False,
+            "status_code": 1,
+            "error": raw_error,
+            "logs": raw_error,
+            "stderr": "",
+            "snapshots": [],
+        }
+        runtime.run_runtime_job.return_value = failure
+        runtime.list_restic_snapshots.return_value = failure
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+        payload = {
+            "environment": {
+                "RESTIC_REPOSITORY": repository,
+                "RESTIC_PASSWORD": password,
+                "RCLONE_CONF_CONTENT": rclone_config,
+            }
+        }
+
+        for command in ("snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find"):
+            with self.subTest(command=command):
+                result = service.execute_job({"command": command, "payload": payload})
+
+                self.assertEqual(result.status, JobStatus.FAILED)
+                self.assertEqual(
+                    result.result_summary["error"],
+                    WorkerAgentService.MISSING_RESTIC_REPOSITORY_ERROR,
+                )
+                self.assertEqual(result.log_lines, [WorkerAgentService.MISSING_RESTIC_REPOSITORY_ERROR])
+                safe_output = "\n".join(result.log_lines) + repr(result.result_summary)
+                self.assertNotIn(repository, safe_output)
+                self.assertNotIn(password, safe_output)
+                self.assertNotIn(rclone_config, safe_output)
+
+    def test_generic_snapshot_runtime_error_remains_sanitized_and_available(self):
+        repository = "local:/sensitive/repository"
+        password = "restic-password-value"
+        generic_error = f"Fatal: unable to access {repository}: {password}"
+        runtime = Mock()
+        runtime.run_runtime_job.return_value = {
+            "success": False,
+            "status_code": 2,
+            "error": generic_error,
+            "logs": generic_error,
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {
+                "command": "snapshot.ls",
+                "payload": {"environment": {"RESTIC_REPOSITORY": repository, "RESTIC_PASSWORD": password}},
+            }
+        )
+
+        self.assertEqual(result.status, JobStatus.FAILED)
+        self.assertEqual(result.result_summary["error"], "Fatal: unable to access <redacted>: <redacted>")
+        self.assertIn("Fatal: unable to access", "\n".join(result.log_lines))
+        self.assertNotIn(repository, repr(result))
+        self.assertNotIn(password, repr(result))
+
     def test_control_plane_prefers_structured_entries(self):
         structured_entries = [{"struct_type": "node", "type": "dir", "path": "/root"}]
         service = object.__new__(ControlPlaneService)
@@ -83,6 +162,24 @@ class SnapshotBrowserTests(unittest.TestCase):
 
         self.assertEqual(result["entries"], structured_entries)
         self.assertEqual(result["job_id"], "job-1")
+
+    def test_control_plane_prefers_structured_error_over_last_log_line(self):
+        service = object.__new__(ControlPlaneService)
+        service._require_target = Mock(return_value=BackupTargetRecord(name="target", worker_id="worker"))
+        service._build_snapshot_ls_payload = Mock(return_value={})
+        service.dispatch_job = Mock(return_value=SimpleNamespace(id="job-1"))
+        service._wait_for_job_completion = Mock(
+            return_value={
+                "status": JobStatus.FAILED,
+                "result_summary": {"error": "Restic repository is not initialized."},
+                "logs": "Fatal: unable to open config file: raw terminal detail",
+            }
+        )
+
+        result = service.dispatch_snapshot_ls("target", "snapshot")
+
+        self.assertEqual(result["error"], "restic ls failed: Restic repository is not initialized.")
+        self.assertNotIn("raw terminal detail", result["error"])
 
 
 if __name__ == "__main__":

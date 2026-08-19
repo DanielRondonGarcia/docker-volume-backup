@@ -20,6 +20,10 @@ class WorkerAgentService:
     MAX_LOG_LINES = 1000
     MAX_LOG_CHARS = 4 * 1024 * 1024
     MAX_SNAPSHOT_ENTRIES = 10_000
+    MISSING_RESTIC_REPOSITORY_ERROR = (
+        "Restic repository is not initialized or RESTIC_REPOSITORY points to the wrong path. "
+        "Verify the target repository configuration before running restic init."
+    )
     JOB_LEASE_RENEWAL_INTERVAL_SECONDS = 60.0
     INTERACTIVE_COMMANDS = frozenset(
         {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "stats.get", "storage.about"}
@@ -325,6 +329,39 @@ class WorkerAgentService:
         return entries
 
     @staticmethod
+    def _is_missing_restic_repository_error(text: str) -> bool:
+        normalized = text.casefold()
+        return all(
+            marker in normalized
+            for marker in ("unable to open config file", "repository", "does not exist")
+        )
+
+    def _classify_snapshot_runtime_error(
+        self,
+        command: str,
+        payload: Dict[str, Any],
+        summary: Dict[str, Any],
+    ) -> str:
+        safe_sources = []
+        for source in (summary.get("error"), summary.get("stderr"), summary.get("logs")):
+            safe_source = self._safe_job_text(payload, source).strip()
+            if safe_source:
+                safe_sources.append(safe_source[: self.MAX_LOG_CHARS])
+
+        safe_text = "\n".join(safe_sources)[: self.MAX_LOG_CHARS]
+        if self._is_missing_restic_repository_error(safe_text):
+            return self.MISSING_RESTIC_REPOSITORY_ERROR
+
+        for source in safe_sources:
+            lines = [line.strip() for line in source.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+
+        status_code = summary.get("status_code")
+        code_text = str(status_code) if isinstance(status_code, int) else "unavailable"
+        return f"{command} runtime exited with status code {code_text}."
+
+    @staticmethod
     def _snapshot_cache_context(command: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         environment = payload.get("environment") or {}
         if not isinstance(environment, dict):
@@ -366,17 +403,42 @@ class WorkerAgentService:
                     payload,
                     cancel_check,
                 )
+                status = self._runtime_status(summary)
+                error = (
+                    self._classify_snapshot_runtime_error(command, payload, summary)
+                    if status != JobStatus.SUCCEEDED
+                    else None
+                )
                 value = {
                     "schema_version": 1,
-                    "status": self._runtime_status(summary),
+                    "status": status,
                     "status_code": summary.get("status_code"),
                     "target_id": payload.get("target_id"),
                     "snapshots": summary.get("snapshots", []),
                 }
-                direct_log_lines.extend(self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")))
+                if error:
+                    value["error"] = error
+                if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+                    direct_log_lines[:] = [error]
+                else:
+                    direct_log_lines.extend(
+                        self._bounded_log_lines(
+                            payload,
+                            summary.get("logs"),
+                            summary.get("stderr"),
+                        )
+                    )
+                    if error and not direct_log_lines:
+                        direct_log_lines.append(error)
                 return value
 
             summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, payload, cancel_check)
+            status = self._runtime_status(summary)
+            error = (
+                self._classify_snapshot_runtime_error(command, payload, summary)
+                if status != JobStatus.SUCCEEDED
+                else None
+            )
             entries = self._parse_snapshot_ls_entries(
                 summary.get("logs", ""),
                 None if command in ("snapshot.search", "snapshot.find") else payload.get("max_entries"),
@@ -385,12 +447,25 @@ class WorkerAgentService:
                 entries = self._filter_snapshot_entries(entries, payload.get("query"), payload.get("max_entries"))
             value = {
                 "schema_version": 1,
-                "status": self._runtime_status(summary),
+                "status": status,
                 "status_code": summary.get("status_code"),
                 "target_id": payload.get("target_id"),
                 "entries": entries,
             }
-            direct_log_lines.extend(self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")))
+            if error:
+                value["error"] = error
+            if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+                direct_log_lines[:] = [error]
+            else:
+                direct_log_lines.extend(
+                    self._bounded_log_lines(
+                        payload,
+                        summary.get("logs"),
+                        summary.get("stderr"),
+                    )
+                )
+                if error and not direct_log_lines:
+                    direct_log_lines.append(error)
             return value
 
         context = self._snapshot_cache_context(command, payload)
@@ -416,6 +491,8 @@ class WorkerAgentService:
             result_summary["snapshots"] = value.get("snapshots", [])
         else:
             result_summary["entries"] = value.get("entries", [])
+        if value.get("error"):
+            result_summary["error"] = value["error"]
         log_lines = direct_log_lines if not cache_hit else ["Snapshot metadata served from Redis"]
         return WorkerJobExecutionResult(
             status=value.get("status", JobStatus.FAILED),

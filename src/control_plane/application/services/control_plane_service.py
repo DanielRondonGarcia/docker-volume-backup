@@ -640,7 +640,11 @@ class ControlPlaneService:
         logs = result.get("logs", "") or ""
         result_summary = result.get("result_summary") or {}
         if job_status == "failed" or job_status == JobStatus.CANCELED:
-            error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
+            structured_error = result_summary.get("error")
+            if isinstance(structured_error, str) and structured_error.strip():
+                error_msg = structured_error.strip()
+            else:
+                error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
             return {"entries": [], "job_id": job.id, "error": f"restic ls failed: {error_msg}"}
         if job_status == "timeout":
             return {"entries": [], "job_id": job.id, "error": "restic ls timed out (60s)"}
