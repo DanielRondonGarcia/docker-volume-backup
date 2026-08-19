@@ -132,6 +132,35 @@ class ControlPlaneService:
         )
         return self.worker_repository.save(worker)
 
+    def create_worker_enrollment(
+        self,
+        worker_id: str,
+        secret: str,
+        ttl_minutes: int = 30,
+    ) -> Dict[str, Any]:
+        worker = self.worker_repository.get(worker_id)
+        if worker is None:
+            raise ValueError(f"worker not found: {worker_id}")
+        worker_auth = getattr(self, "worker_auth", None)
+        if worker_auth is None:
+            raise ValueError("worker authentication is not configured")
+        enrollment = worker_auth.create_enrollment(
+            name=worker.name,
+            host_name=worker.host_name,
+            labels=dict(worker.labels or {}),
+            secret=secret,
+            worker_id=worker.id,
+            ttl_minutes=ttl_minutes,
+            replace_pending=True,
+        )
+        return {
+            **enrollment,
+            "worker_id": worker.id,
+            "name": worker.name,
+            "host_name": worker.host_name,
+            "labels": dict(worker.labels or {}),
+        }
+
     def heartbeat(self, worker_id: str, version: Optional[str] = None, labels: Optional[Dict[str, str]] = None) -> WorkerRecord:
         worker = self._require_worker(worker_id)
         if worker.status != WorkerStatus.DISABLED:

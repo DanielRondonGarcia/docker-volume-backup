@@ -554,6 +554,24 @@ class WorkerUiStateTests(unittest.TestCase):
         self.assertIn(".worker-notice", self.css)
         self.assertIn(".pill.danger", self.css)
 
+    def test_worker_enrollment_renewal_preserves_stable_id_and_reuses_compose_flow(self):
+        for marker in (
+            "data-renew-enrollment",
+            "Renovar enrollment",
+            "/api/v1/admin/workers/${encodeURIComponent(workerId)}/enrollment",
+            "worker_id",
+            "readonly",
+            "TTL (minutos)",
+            "Si el worker ya existe",
+            "Este enrollment conserva el mismo",
+            "El token pendiente anterior se invalida",
+            "- /tmp:/tmp",
+        ):
+            self.assertIn(marker, self.source)
+        workers = re.search(r"function renderWorkers\(content\) \{.*?\n    let _editLabelsWorkerId", self.source, re.S)
+        self.assertIsNotNone(workers)
+        self.assertIn("openRenewWorkerModal(btn.dataset.renewEnrollment)", workers.group(0))
+
 
 if __name__ == "__main__":
     unittest.main()

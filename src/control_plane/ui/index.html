@@ -661,6 +661,7 @@
         : "";
       const actionCell = (w) => canEnroll ? `<td class="action-cell">
         <button type="button" class="btn ghost xs" data-edit-labels="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Editar labels</button>
+        <button type="button" class="btn ghost xs" data-renew-enrollment="${escapeHtml(w.id)}">Renovar enrollment</button>
         ${w.status === "disabled"
           ? `<span class="worker-revoked-note">Revocado</span>`
           : `<button type="button" class="btn danger xs" data-revoke-worker="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">Revocar</button>`}
@@ -681,6 +682,9 @@
       if (addBtn) addBtn.addEventListener("click", openAddWorkerModal);
       content.querySelectorAll("[data-edit-labels]").forEach(btn => {
         btn.addEventListener("click", () => openEditWorkerLabelsModal(btn.dataset.editLabels, btn.dataset.workerName));
+      });
+      content.querySelectorAll("[data-renew-enrollment]").forEach(btn => {
+        btn.addEventListener("click", () => openRenewWorkerModal(btn.dataset.renewEnrollment));
       });
       content.querySelectorAll("[data-revoke-worker]").forEach(btn => {
         btn.addEventListener("click", () => revokeWorker(btn.dataset.revokeWorker, btn.dataset.workerName, btn));
@@ -974,10 +978,24 @@
       }
     }
 
-    let addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
+    let addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose" };
 
     async function openAddWorkerModal() {
-      addWorkerState = { step: "form", enrollment: null, activeTab: "compose" };
+      addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose" };
+      renderAddWorkerModal();
+      const overlay = document.getElementById("modalOverlay");
+      if (overlay) overlay.classList.add("open");
+    }
+
+    async function openRenewWorkerModal(workerId) {
+      const worker = (state.workers || []).find(item => item.id === workerId);
+      if (!worker) {
+        workersNotice = { kind: "error", message: "No se encontro el worker para renovar su enrollment." };
+        const content = document.getElementById("content");
+        if (content && state.currentView === "workers") renderWorkers(content);
+        return;
+      }
+      addWorkerState = { mode: "renew", worker, step: "form", enrollment: null, activeTab: "compose" };
       renderAddWorkerModal();
       const overlay = document.getElementById("modalOverlay");
       if (overlay) overlay.classList.add("open");
@@ -992,18 +1010,33 @@
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       if (addWorkerState.step === "form") {
+        const isRenewal = addWorkerState.mode === "renew";
+        const worker = addWorkerState.worker || {};
+        const workerName = worker.name || "worker";
+        const workerHost = worker.host_name || "unknown-host";
         overlay.innerHTML = `
-          <div class="modal">
-            <div class="modal-header"><h3>Agregar worker con HMAC</h3><button class="close" id="modalClose" aria-label="Cerrar">&times;</button></div>
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="workerEnrollmentTitle">
+            <div class="modal-header"><h3 id="workerEnrollmentTitle">${isRenewal ? `Renovar enrollment: ${escapeHtml(workerName)}` : "Agregar worker con HMAC"}</h3><button class="close" id="modalClose" aria-label="Cerrar">&times;</button></div>
             <div class="modal-body">
-              <div class="alert warning" role="alert"><strong>Bootstrap desde cero.</strong> No hay migracion ni registro abierto. Genera un secreto HMAC de un solo uso y provisiona una credencial nueva.</div><div class="helper">El secreto no se muestra: usa el boton de copia, guardalo en un gestor de secretos y entregalo al worker solo durante el primer arranque.</div>
+              ${isRenewal
+                ? `<div class="alert info" role="status"><strong>Renovacion segura.</strong> El token pendiente anterior se invalida. La credencial activa sigue usable hasta que el nuevo token sea consumido. Este enrollment conserva el mismo <code>worker_id</code> y evita crear un worker duplicado.</div>
+                   <div class="field-row enrollment-context" aria-label="Contexto del worker existente">
+                     <div class="field"><label for="awWorkerId">Worker ID (se conserva)</label><input id="awWorkerId" name="worker_id" readonly value="${escapeHtml(worker.id || "")}" /></div>
+                     <div class="field"><label for="awName">Nombre (solo lectura)</label><input id="awName" name="worker_name" readonly value="${escapeHtml(workerName)}" /></div>
+                     <div class="field"><label for="awHost">Host (solo lectura)</label><input id="awHost" name="worker_host" readonly value="${escapeHtml(workerHost)}" /></div>
+                   </div>`
+                : `<div class="alert warning" role="alert"><strong>Bootstrap desde cero.</strong> No hay migracion ni registro abierto. Genera un secreto HMAC de un solo uso y provisiona una credencial nueva.</div>
+                   <div class="alert warning" role="alert"><strong>Si el worker ya existe, no lo agregues otra vez.</strong> Usa <strong>Renovar enrollment</strong> en su fila para conservar el mismo <code>worker_id</code> y evitar duplicados.</div>
+                   <div class="helper">El secreto no se muestra: usa el boton de copia, guardalo en un gestor de secretos y entregalo al worker solo durante el primer arranque.</div>
+                   <div class="field-row">
+                     <div class="field"><label for="awName">Nombre del worker</label><input id="awName" name="worker_name" autocomplete="off" placeholder="worker-prod-01" value="worker" /></div>
+                     <div class="field"><label for="awHost">Host</label><input id="awHost" name="worker_host" autocomplete="off" placeholder="srv-prod-01" value="unknown-host" /></div>
+                   </div>`}
               <div class="field-row">
-                <div class="field"><label for="awName">Nombre del worker</label><input id="awName" name="worker_name" autocomplete="off" placeholder="worker-prod-01" value="worker" /></div>
-                <div class="field"><label for="awHost">Host</label><input id="awHost" name="worker_host" autocomplete="off" placeholder="srv-prod-01" value="unknown-host" /></div>
                 <div class="field"><label for="awTtl">TTL (minutos)</label><input id="awTtl" name="enrollment_ttl" type="number" min="1" value="60" /></div>
               </div>
               <div class="btn-row">
-                <button class="btn primary sm" id="awGenerate">Generar credencial</button>
+                <button class="btn primary sm" id="awGenerate">${isRenewal ? "Generar renovacion" : "Generar credencial"}</button>
                 <button class="btn ghost sm" id="awCancel">Cancelar</button>
               </div>
               <div class="alert" id="awError" role="alert" aria-live="polite"></div>
@@ -1024,14 +1057,20 @@
     async function generateEnrollment() {
       const errorBox = document.getElementById("awError");
       errorBox.textContent = "";
+      const isRenewal = addWorkerState.mode === "renew";
+      const workerId = isRenewal ? addWorkerState.worker?.id : null;
       const name = document.getElementById("awName").value.trim() || "worker";
       const host_name = document.getElementById("awHost").value.trim() || "unknown-host";
       const ttl_minutes = parseInt(document.getElementById("awTtl").value) || 60;
       const genBtn = document.getElementById("awGenerate");
       await withBtnLoading(genBtn, async () => {
         const secret = createEnrollmentSecret();
-        const enrollment = await apiPost("/api/v1/admin/worker-enrollments", { name, host_name, ttl_minutes, secret });
-        addWorkerState.enrollment = { ...enrollment, name, host_name, secret };
+        const endpoint = isRenewal
+          ? `/api/v1/admin/workers/${encodeURIComponent(workerId)}/enrollment`
+          : "/api/v1/admin/worker-enrollments";
+        const payload = isRenewal ? { ttl_minutes, secret } : { name, host_name, ttl_minutes, secret };
+        const enrollment = await apiPost(endpoint, payload);
+        addWorkerState.enrollment = { ...enrollment, worker_id: enrollment.worker_id || workerId, name, host_name, secret };
         addWorkerState.step = "commands";
         renderAddWorkerModal();
       }, "Generando...").catch((error) => {
@@ -1044,6 +1083,7 @@
       if (!overlay) return;
       const e = addWorkerState.enrollment;
       if (!e) return;
+      const isRenewal = addWorkerState.mode === "renew";
       let cpUrl = "";
       try {
         const resp = await fetch("/api/v1/config/public");
@@ -1095,14 +1135,15 @@ docker compose up -d
 # El worker usa HMAC y guarda la credencial en /data.`;
 
       overlay.innerHTML = `
-        <div class="modal">
-          <div class="modal-header">
-            <h3>Comandos para desplegar el worker</h3>
-            <button class="close" id="modalClose" aria-label="Cerrar">&times;</button>
-          </div>
-          <div class="modal-body">
-            <div class="alert warning" role="alert"><strong>HTTP no es confidencial.</strong> En redes privadas locales es el valor por defecto. HMAC autentica las solicitudes del worker, pero no cifra el trafico ni autentica las respuestas del Control Plane; usa HTTPS para redes remotas o confidenciales.</div>
-            <div class="card compact"><div class="eyebrow">Credencial HMAC lista</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">Worker ID: ${escapeHtml(workerId)}</div><div class="meta">Expira: ${escapeHtml(fmtDate(e.expires_at))}. El secreto no se muestra ni se incluye en los comandos.</div><button class="btn ghost sm" id="copyEnrollmentSecret">Copiar secreto de enrolamiento</button><div class="support">Guardalo en un gestor de secretos y elimina WORKER_ENROLLMENT_TOKEN después del primer arranque; conserva el archivo 0600.</div></div>
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="workerEnrollmentCommandsTitle">
+            <div class="modal-header">
+             <h3 id="workerEnrollmentCommandsTitle">${isRenewal ? `Renovacion de enrollment: ${escapeHtml(wName)}` : "Comandos para desplegar el worker"}</h3>
+             <button class="close" id="modalClose" aria-label="Cerrar">&times;</button>
+            </div>
+            <div class="modal-body">
+              <div class="alert warning" role="alert"><strong>HTTP no es confidencial.</strong> En redes privadas locales es el valor por defecto. HMAC autentica las solicitudes del worker, pero no cifra el trafico ni autentica las respuestas del Control Plane; usa HTTPS para redes remotas o confidenciales.</div>
+             ${isRenewal ? `<div class="alert info" role="status">El nuevo Compose conserva el mismo <code>worker_id</code> y no crea un registro duplicado. La credencial anterior se reemplazara cuando este token se consuma correctamente.</div>` : ""}
+             <div class="card compact"><div class="eyebrow">${isRenewal ? "Enrollment renovado" : "Credencial HMAC lista"}</div><div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">Worker ID: ${escapeHtml(workerId)}</div><div class="meta">Nombre: ${escapeHtml(wName)}. Host: ${escapeHtml(wHost)}. Expira: ${escapeHtml(fmtDate(e.expires_at))}. El secreto no se muestra ni se incluye en los comandos.</div><button class="btn ghost sm" id="copyEnrollmentSecret">Copiar secreto de enrolamiento</button><div class="support">Guardalo en un gestor de secretos y elimina WORKER_ENROLLMENT_TOKEN después del primer arranque; conserva el archivo 0600.</div></div>
             <div class="card compact">
               <div class="eyebrow">URL del Control Plane en los comandos</div>
               <div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(cpUrl)}</div>

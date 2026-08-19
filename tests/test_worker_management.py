@@ -112,6 +112,74 @@ class WorkerManagementTests(unittest.TestCase):
         self.assertEqual(service.worker_repository.get("worker-a").status, WorkerStatus.DISABLED)
         self.assertEqual(auth._get("worker-a", "1").status, "revoked")
 
+    def test_worker_enrollment_renewal_preserves_id_replaces_pending_and_defers_revoke(self):
+        service, auth, _, _, _, _ = self.make_service()
+        self.enroll(auth)
+        old_pending = "p" * 32
+        new_secret = "n" * 32
+        auth.create_enrollment("worker-a", "host-a", {"tier": "old"}, old_pending, worker_id="worker-a")
+
+        enrollment = service.create_worker_enrollment("worker-a", new_secret, ttl_minutes=60)
+
+        self.assertEqual(enrollment["worker_id"], "worker-a")
+        self.assertEqual(enrollment["name"], "worker-a")
+        self.assertEqual(enrollment["host_name"], "host-a")
+        self.assertIsNone(auth._enrollment(digest_secret(old_pending)))
+        self.assertEqual(auth._get("worker-a", "1").status, "active")
+
+        renewed = auth.complete(new_secret)
+        service.register_worker(
+            name=renewed["name"],
+            host_name=renewed["host_name"],
+            labels=renewed["labels"],
+            worker_id=renewed["worker_id"],
+        )
+
+        self.assertEqual(len(service.worker_repository.list()), 1)
+        self.assertEqual(service.worker_repository.list()[0].id, "worker-a")
+        self.assertEqual(auth._get("worker-a", "1").status, "revoked")
+        self.assertEqual(auth._get("worker-a", "2").status, "active")
+
+    def test_worker_enrollment_renewal_rejects_unknown_worker(self):
+        service, _, _, _, _, _ = self.make_service()
+
+        with self.assertRaisesRegex(ValueError, "worker not found"):
+            service.create_worker_enrollment("missing-worker", "s" * 32)
+
+    def test_sqlite_worker_enrollment_renewal_replaces_pending_without_revoking_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "control-plane.db")
+            auth = WorkerAuthState(database_path)
+            workers = SQLiteWorkerRepository(database_path)
+            workers.save(WorkerRecord(name="worker-a", host_name="host-a", id="worker-a", last_seen_at=utcnow()))
+            service = ControlPlaneService(
+                worker_repository=workers,
+                inventory_repository=SQLiteInventoryRepository(database_path),
+                target_repository=SQLiteTargetRepository(database_path),
+                job_repository=SQLiteJobRepository(database_path),
+                storage_profile_repository=SQLiteStorageProfileRepository(database_path),
+                secret_repository=SQLiteSecretRepository(database_path),
+                snapshot_repository=SQLiteSnapshotRepository(database_path),
+                retention_policy_repository=SQLiteRetentionPolicyRepository(database_path),
+                target_stats_repository=SQLiteTargetStatsRepository(database_path),
+                secret_codec=object(),
+                settings_repository=SQLiteSettingsRepository(database_path),
+            )
+            service.worker_auth = auth
+            active_secret = "a" * 32
+            old_pending = "o" * 32
+            new_secret = "r" * 32
+            auth.create_enrollment("worker-a", "host-a", {}, active_secret, worker_id="worker-a")
+            auth.complete(active_secret)
+            auth.create_enrollment("worker-a", "host-a", {}, old_pending, worker_id="worker-a")
+
+            enrollment = service.create_worker_enrollment("worker-a", new_secret, ttl_minutes=60)
+
+            self.assertEqual(enrollment["worker_id"], "worker-a")
+            self.assertIsNone(auth._enrollment(digest_secret(old_pending)))
+            self.assertEqual(auth._get("worker-a", "1").status, "active")
+            self.assertEqual(auth.complete(new_secret)["credential_version"], "2")
+
     def test_worker_labels_reject_invalid_keys_and_allow_clear(self):
         service, _, _, _, _, _ = self.make_service()
 

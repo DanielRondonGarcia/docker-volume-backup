@@ -811,6 +811,52 @@ class ControlPlaneRouteTests(unittest.TestCase):
         service.revoke_worker.assert_called_once_with("worker-a", None)
         self.assertEqual(handler._write_json.call_args.args[0], 200)
 
+    def test_admin_enrollment_renewal_route_requires_admin_and_delegates_worker_id(self):
+        handler = self.make_handler(
+            "/api/v1/admin/workers/worker-a/enrollment",
+            '{"secret":"' + ("n" * 32) + '","ttl_minutes":45}',
+        )
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.create_worker_enrollment.return_value = {
+            "enrollment_id": "worker-a",
+            "worker_id": "worker-a",
+            "name": "worker-a",
+            "host_name": "host-a",
+            "expires_at": "2030-01-01T00:00:00",
+        }
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_ADMIN, api_mode=True)
+        service.create_worker_enrollment.assert_called_once_with(
+            worker_id="worker-a",
+            secret="n" * 32,
+            ttl_minutes=45,
+        )
+        self.assertEqual(handler._write_json.call_args.args, (201, service.create_worker_enrollment.return_value))
+
+    def test_admin_enrollment_renewal_route_returns_service_error(self):
+        handler = self.make_handler(
+            "/api/v1/admin/workers/missing-worker/enrollment",
+            '{"secret":"' + ("s" * 32) + '"}',
+        )
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.create_worker_enrollment.side_effect = ValueError("worker not found: missing-worker")
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_ADMIN, api_mode=True)
+        self.assertEqual(
+            handler._write_json.call_args.args,
+            (400, {"error": "worker not found: missing-worker"}),
+        )
+
     def test_target_backup_route_forwards_manual_backup_mode(self):
         handler = self.make_handler("/api/v1/targets/target-a/backup", '{"backup_mode":"cold"}')
         handler._require_auth.reset_mock()

@@ -607,6 +607,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[:4] == ["api", "v1", "admin", "workers"]:
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
                     return
+                if parts[5] == "enrollment":
+                    enrollment = self._control_plane_service().create_worker_enrollment(
+                        worker_id=parts[4],
+                        secret=body.get("secret"),
+                        ttl_minutes=int(body.get("ttl_minutes") or 30),
+                    )
+                    return self._write_json(201, _to_jsonable(enrollment))
                 if parts[5] == "rotate":
                     self._control_plane_service().get_worker(parts[4])
                     return self._write_json(200, self._worker_auth().rotate(parts[4], body.get("secret", "")))

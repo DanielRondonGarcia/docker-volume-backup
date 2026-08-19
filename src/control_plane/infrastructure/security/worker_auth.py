@@ -42,13 +42,21 @@ class WorkerAuthState:
         key = (worker_id, str(version), nonce)
         if key in self._nonces: return False
         self._nonces.add(key); return True
-    def create_enrollment(self, name, host_name, labels, secret, worker_id=None, ttl_minutes=30):
+    def create_enrollment(self, name, host_name, labels, secret, worker_id=None, ttl_minutes=30, replace_pending=False):
         if ttl_minutes <= 0 or len((secret or "").encode()) < 32: raise ValueError("worker secret and positive TTL are required")
-        e = Enrollment(worker_id or str(uuid4()), digest_secret(secret), name, host_name, labels or {}, utcnow() + timedelta(minutes=ttl_minutes))
-        if self.path:
-            with self._db() as db: db.execute("INSERT OR REPLACE INTO auth_enrollments VALUES (?,?,?,?,?,?,0)", (e.secret_digest, e.worker_id, e.name, e.host_name, json.dumps(e.labels), e.expires_at.isoformat()))
-        else: self._enrollments[e.secret_digest] = e
+        with self._lock:
+            e = Enrollment(worker_id or str(uuid4()), digest_secret(secret), name, host_name, labels or {}, utcnow() + timedelta(minutes=ttl_minutes))
+            if replace_pending: self._remove_pending_enrollments(e.worker_id)
+            if self.path:
+                with self._db() as db: db.execute("INSERT OR REPLACE INTO auth_enrollments VALUES (?,?,?,?,?,?,0)", (e.secret_digest, e.worker_id, e.name, e.host_name, json.dumps(e.labels), e.expires_at.isoformat()))
+            else: self._enrollments[e.secret_digest] = e
         return {"enrollment_id": e.worker_id, "worker_id": e.worker_id, "expires_at": e.expires_at}
+    def _remove_pending_enrollments(self, worker_id):
+        if self.path:
+            with self._db() as db: db.execute("DELETE FROM auth_enrollments WHERE worker_id=? AND used=0", (worker_id,))
+        else:
+            for digest, enrollment in list(self._enrollments.items()):
+                if enrollment.worker_id == worker_id and not enrollment.used: self._enrollments.pop(digest, None)
     def complete(self, secret, version="1", labels=None):
         with self._lock:
             e = self._enrollment(digest_secret(secret or ""))
