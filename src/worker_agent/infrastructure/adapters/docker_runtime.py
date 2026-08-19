@@ -813,6 +813,15 @@ class DockerRuntimeAdapter:
         except Exception as exc:
             logger.warning("Failed to pull runtime image %s: %s", image, exc)
 
+    @staticmethod
+    def _is_missing_image_error(error: Exception) -> bool:
+        docker_errors = getattr(docker, "errors", None) if docker is not None else None
+        not_found = getattr(docker_errors, "NotFound", None)
+        if not_found is not None and isinstance(error, not_found):
+            return True
+        detail = str(error).lower()
+        return "no such image" in detail or ("404" in detail and "image" in detail)
+
     def collect_inventory(self) -> Dict[str, Any]:
         if self.client is None:
             return {
@@ -836,10 +845,16 @@ class DockerRuntimeAdapter:
             mounts = container.attrs.get("Mounts", [])
             compose_project = labels.get("com.docker.compose.project")
             compose_service = labels.get("com.docker.compose.service")
+            try:
+                image_tags = container.image.tags
+            except Exception as exc:
+                if not self._is_missing_image_error(exc):
+                    raise
+                image_tags = []
             container_item = {
                 "id": container.id,
                 "name": container.name,
-                "image": container.image.tags,
+                "image": image_tags,
                 "status": container.status,
                 "labels": labels,
                 "mounts": mounts,

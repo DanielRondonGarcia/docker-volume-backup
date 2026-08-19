@@ -106,6 +106,66 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(command, ["rclone", "about", "rem:", "--json"])
         self.assertNotIn("/bin/sh", " ".join(command))
 
+    def test_collect_inventory_keeps_container_when_image_is_missing(self):
+        class MissingImage:
+            @property
+            def tags(self):
+                raise RuntimeError(
+                    '404 Client Error for http+docker://localhost/images/sha256:missing: '
+                    'Not Found ("No such image: sha256:missing")'
+                )
+
+        container = Mock()
+        container.id = "container-1"
+        container.name = "compose-web-1"
+        container.status = "exited"
+        container.labels = {
+            "com.docker.compose.project": "compose-project",
+            "com.docker.compose.service": "web",
+        }
+        container.attrs = {"Mounts": []}
+        container.image = MissingImage()
+
+        runtime = DockerRuntimeAdapter.__new__(DockerRuntimeAdapter)
+        runtime.client = Mock()
+        runtime.client.containers.list.return_value = [container]
+        runtime.client.volumes.list.return_value = []
+        runtime.client.networks.list.return_value = []
+        runtime.client.info.return_value = {}
+
+        inventory = runtime.collect_inventory()
+
+        self.assertEqual(inventory["containers"][0]["image"], [])
+        self.assertEqual(inventory["compose_projects"], ["compose-project"])
+        self.assertEqual(
+            inventory["compose_project_details"][0]["containers"][0]["id"],
+            "container-1",
+        )
+
+    def test_collect_inventory_propagates_unrelated_image_errors(self):
+        class BrokenImage:
+            @property
+            def tags(self):
+                raise RuntimeError("404 Client Error: Not Found")
+
+        container = Mock()
+        container.id = "container-1"
+        container.name = "compose-web-1"
+        container.status = "exited"
+        container.labels = {}
+        container.attrs = {"Mounts": []}
+        container.image = BrokenImage()
+
+        runtime = DockerRuntimeAdapter.__new__(DockerRuntimeAdapter)
+        runtime.client = Mock()
+        runtime.client.containers.list.return_value = [container]
+        runtime.client.volumes.list.return_value = []
+        runtime.client.networks.list.return_value = []
+        runtime.client.info.return_value = {}
+
+        with self.assertRaisesRegex(RuntimeError, "404 Client Error"):
+            runtime.collect_inventory()
+
     def test_snapshot_path_id_and_target_scope_are_validated_before_launch(self):
         cases = (
             {"command": "restic ls --json not-a-restic-id /"},
