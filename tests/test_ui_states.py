@@ -323,6 +323,74 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         for key in ("ArrowUp", "ArrowDown", "Home", "End", "Enter", "Escape"):
             self.assertIn(key, self.source)
 
+    def test_snapshot_directory_pagination_has_accessible_bounded_control(self):
+        for marker in (
+            "const SNAPSHOT_PAGE_SIZE = 200",
+            "const SNAPSHOT_MAX_DIRECTORY_ENTRIES = 10_000",
+            "directoryLoadedLimit: SNAPSHOT_PAGE_SIZE",
+            "directoryHasMore: false",
+            "loadingMore: false",
+            "data-snapshot-load-more",
+            "Cargar más",
+            'aria-busy="${state.loadingMore ? "true" : "false"}"',
+            '${state.loadingMore ? "disabled" : ""}',
+            ".snapshot-pagination-control",
+            "justify-content: center",
+        ):
+            self.assertIn(marker, self.source)
+
+        render = re.search(r"function renderSnapshotBrowser\(.*?\n    \}\n\n    function selectSnapshot", self.source, re.S)
+        self.assertIsNotNone(render)
+        render_source = render.group(0)
+        self.assertIn("!state.searchActive && state.directoryHasMore", render_source)
+        self.assertIn("state.loadingMore", render_source)
+        self.assertIn("${loadMoreMarkup}", render_source)
+
+    def test_snapshot_directory_load_more_increases_limit_replaces_response_and_stops_at_cap(self):
+        browse = re.search(r"async function browseSnapshot\(.*?\n    \}\n\n    async function loadMoreSnapshotDirectory", self.source, re.S)
+        self.assertIsNotNone(browse)
+        browse_source = browse.group(0)
+        for marker in (
+            "const requestedLimit = cachedDirectory ? cachedDirectory.loadedLimit : SNAPSHOT_PAGE_SIZE",
+            "max_entries: requestedLimit",
+            "state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES)",
+            "state.directoryHasMore = resultEntries.length >= requestedLimit && requestedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES",
+            "cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore)",
+        ):
+            self.assertIn(marker, browse_source)
+
+        load_more = re.search(r"async function loadMoreSnapshotDirectory\(.*?\n    \}\n\n    async function searchSnapshot", self.source, re.S)
+        self.assertIsNotNone(load_more)
+        load_more_source = load_more.group(0)
+        for marker in (
+            "const nextLimit = Math.min(currentLimit + SNAPSHOT_PAGE_SIZE, SNAPSHOT_MAX_DIRECTORY_ENTRIES)",
+            "state.currentPath",
+            "state.loadingMore = true",
+            "max_entries: nextLimit",
+            "state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES)",
+            "state.directoryHasMore = resultEntries.length >= nextLimit && nextLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES",
+            "cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore)",
+            "state.loadingMore = false",
+        ):
+            self.assertIn(marker, load_more_source)
+
+    def test_snapshot_directory_pagination_resets_on_navigation_and_search_and_prefetch_stays_small(self):
+        for function_name, end_marker in (
+            ("function selectSnapshot", "function moveSnapshotFocus"),
+            ("async function browseSnapshot", "async function loadMoreSnapshotDirectory"),
+            ("async function searchSnapshot", "function classifySnapshotDownloadFailure"),
+        ):
+            block = re.search(rf"{re.escape(function_name)}\(.*?\n    \}}\n\n    {re.escape(end_marker)}", self.source, re.S)
+            self.assertIsNotNone(block)
+            self.assertIn("resetSnapshotDirectoryState(state)", block.group(0))
+
+        prefetch = re.search(r"function prefetchSnapshotDirectories\(.*?\n    \}\n\n    function openRestoreFromSnapshotModal", self.source, re.S)
+        self.assertIsNotNone(prefetch)
+        prefetch_source = prefetch.group(0)
+        self.assertIn("max_entries: SNAPSHOT_PAGE_SIZE", prefetch_source)
+        self.assertIn("resultEntries.length >= SNAPSHOT_PAGE_SIZE", prefetch_source)
+        self.assertIn("loadedLimit: normalizedLimit", self.source)
+
     def test_cold_browse_results_do_not_start_prefetch_jobs(self):
         browse = re.search(r"async function browseSnapshot\(.*?\n    \}\n\n    async function searchSnapshot", self.source, re.S)
         self.assertIsNotNone(browse)

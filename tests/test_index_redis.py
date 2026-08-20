@@ -148,13 +148,23 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         key = cache.key_for(context)
         repository_fingerprint = hashlib.sha256(self.REPOSITORY.encode()).hexdigest()
 
-        self.assertTrue(key.startswith("sx:v1:target-a:"))
+        self.assertTrue(key.startswith("sx:v2:target-a:"))
         self.assertIn(repository_fingerprint, key)
         self.assertIn(":entry:snapshot.search:", key)
         self.assertNotIn(self.REPOSITORY, key)
         self.assertNotIn("password hunter2", key)
         self.assertIn(repository_fingerprint, cache._index_key(context))
         self.assertIn(repository_fingerprint, cache._lock_key(context))
+
+    def test_old_cache_namespace_values_are_not_reused(self):
+        cache, client, _ = self.make_cache()
+        context = self.make_context()
+        new_key = cache.key_for(context)
+        old_key = new_key.replace("sx:v2:", "sx:v1:", 1)
+        client.values[old_key] = json.dumps(self.successful_value()).encode("utf-8")
+
+        self.assertIsNone(cache.get(context))
+        self.assertIsNotNone(client.get(old_key))
 
     def test_cache_generation_changes_entry_and_index_keys(self):
         cache, _, _ = self.make_cache()
@@ -202,7 +212,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         self.assertEqual(first, (value, False, "restic"))
         self.assertEqual(second, (value, True, "redis"))
         self.assertEqual(calls, ["computed"])
-        self.assertTrue(any(key.startswith("sx:v1:") for key in client.values))
+        self.assertTrue(any(key.startswith("sx:v2:") for key in client.values))
         self.assertTrue(all(self.REPOSITORY not in key for key in client.values))
 
     def test_singleflight_lock_uses_nx_px_and_release_is_token_safe(self):
@@ -331,7 +341,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
                 cacheable=lambda result: result.get("status") == JobStatus.SUCCEEDED,
             )
         self.assertEqual(len(calls), 3)
-        self.assertFalse(any(key.startswith("sx:v1:") for key in client.values))
+        self.assertFalse(any(key.startswith("sx:v2:") for key in client.values))
 
     def test_canceled_result_is_not_cached(self):
         cache, client, _ = self.make_cache()
@@ -344,7 +354,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
             cancel_check=lambda: True,
         )
         self.assertEqual(result[1:], (False, "restic-fallback"))
-        self.assertFalse(any(key.startswith("sx:v1:") for key in client.values))
+        self.assertFalse(any(key.startswith("sx:v2:") for key in client.values))
 
     def test_worker_metadata_reads_use_redis_but_dump_stays_uncached(self):
         clock = FakeClock()

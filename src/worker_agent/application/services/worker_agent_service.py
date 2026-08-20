@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 import os
+import posixpath
 import re
 import threading
 import time
@@ -629,7 +630,11 @@ class WorkerAgentService:
         )
 
     @staticmethod
-    def _parse_snapshot_ls_entries(logs: str, max_entries: Optional[int] = None) -> List[Dict[str, Any]]:
+    def _parse_snapshot_ls_entries(
+        logs: str,
+        max_entries: Optional[int] = None,
+        path: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if not isinstance(logs, str) or not logs:
             return []
 
@@ -638,9 +643,14 @@ class WorkerAgentService:
             raise ValueError("snapshot entry limit must be positive")
         limit = min(limit, WorkerAgentService.MAX_SNAPSHOT_ENTRIES)
         logs = logs[: WorkerAgentService.MAX_LOG_CHARS]
+        requested_path = None
+        if path is not None:
+            requested_path = posixpath.normpath(path or "/")
+            if not requested_path.startswith("/"):
+                requested_path = f"/{requested_path}"
 
         decoder = json.JSONDecoder()
-        parsed_values: List[Any] = []
+        entries: List[Dict[str, Any]] = []
         offset = 0
         while offset < len(logs):
             while offset < len(logs) and logs[offset].isspace():
@@ -655,20 +665,25 @@ class WorkerAgentService:
                     break
                 offset = newline + 1
                 continue
-            parsed_values.append(value)
             offset = end
 
-        candidates: List[Dict[str, Any]] = []
-        for value in parsed_values:
-            if isinstance(value, list):
-                candidates.extend(item for item in value if isinstance(item, dict))
-            elif isinstance(value, dict):
-                candidates.append(value)
-        return [
-            entry
-            for entry in candidates
-            if entry.get("struct_type") == "node" or entry.get("type") in ("file", "dir")
-        ][:limit]
+            values = value if isinstance(value, list) else (value,) if isinstance(value, dict) else ()
+            for entry in values:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("struct_type") != "node" and entry.get("type") not in ("file", "dir"):
+                    continue
+                if requested_path is not None:
+                    entry_path = entry.get("path")
+                    if not isinstance(entry_path, str) or not entry_path.startswith("/"):
+                        continue
+                    normalized_entry_path = posixpath.normpath(entry_path)
+                    if normalized_entry_path == "/" or posixpath.dirname(normalized_entry_path) != requested_path:
+                        continue
+                entries.append(entry)
+                if len(entries) >= limit:
+                    return entries
+        return entries
 
     @staticmethod
     def _filter_snapshot_entries(entries: List[Dict[str, Any]], query: Optional[str], max_entries: Optional[int]) -> List[Dict[str, Any]]:
@@ -810,6 +825,7 @@ class WorkerAgentService:
             entries = self._parse_snapshot_ls_entries(
                 summary.get("logs", ""),
                 None if command in ("snapshot.search", "snapshot.find") else payload.get("max_entries"),
+                path=payload.get("path") if command == "snapshot.ls" else None,
             )
             if command in ("snapshot.search", "snapshot.find"):
                 entries = self._filter_snapshot_entries(entries, payload.get("query"), payload.get("max_entries"))

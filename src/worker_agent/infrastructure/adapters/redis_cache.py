@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class RedisSnapshotCache:
     """A best-effort Redis cache with bounded values, keys, locks, and cardinality."""
 
-    KEY_PREFIX = "sx:v1"
+    KEY_PREFIX = "sx:v2"
     CACHEABLE_OPERATIONS = frozenset(
         {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find"}
     )

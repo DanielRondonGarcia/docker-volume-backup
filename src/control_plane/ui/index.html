@@ -131,6 +131,8 @@
     @keyframes snapshot-skeleton { from { background-position: 200% 0; } to { background-position: -200% 0; } }
     .snapshot-empty { padding: 34px 18px; color: var(--muted-foreground); text-align: center; }
     .snapshot-empty strong { display: block; margin-bottom: 6px; color: var(--foreground); }
+    .snapshot-pagination-control { display: flex; justify-content: center; padding: 12px 0 4px; }
+    .snapshot-pagination-control .btn { min-width: 128px; touch-action: manipulation; }
     .snapshot-safe-note { margin-top: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; }
     @media (max-width: 760px) {
       .modal-snapshots { width: 100%; height: 92vh; }
@@ -2104,7 +2106,9 @@ docker compose up -d
 
     const SNAPSHOT_CACHE_LIMIT = 8;
     const SNAPSHOT_PREFETCH_LIMIT = 2;
-    const SNAPSHOT_MAX_ENTRIES = 200;
+    const SNAPSHOT_MAX_ENTRIES = 200; // catalog and search response cap
+    const SNAPSHOT_PAGE_SIZE = 200;
+    const SNAPSHOT_MAX_DIRECTORY_ENTRIES = 10_000;
     const SNAPSHOT_SEARCH_MIN_LENGTH = 2;
     const SNAPSHOT_POLL_DELAYS = [150, 300, 500, 800, 1200, 1800, 2600, 3500];
     const SNAPSHOT_POLL_ATTEMPTS = SNAPSHOT_POLL_DELAYS.length;
@@ -2140,6 +2144,9 @@ docker compose up -d
         currentSnapshot: null,
         currentPath: "/",
         entries: [],
+        directoryLoadedLimit: SNAPSHOT_PAGE_SIZE,
+        directoryHasMore: false,
+        loadingMore: false,
         loading: false,
         view: "list",
         searchQuery: "",
@@ -2185,12 +2192,25 @@ docker compose up -d
       return JSON.stringify([String(targetId), String(snapshotId), normalizeSnapshotPath(path)]);
     }
 
-    function cacheSnapshotDirectory(snapshotId, path, entries) {
+    function normalizeSnapshotDirectoryLimit(limit) {
+      const numericLimit = Number(limit);
+      if (!Number.isFinite(numericLimit)) return SNAPSHOT_PAGE_SIZE;
+      return Math.min(SNAPSHOT_MAX_DIRECTORY_ENTRIES, Math.max(SNAPSHOT_PAGE_SIZE, Math.floor(numericLimit)));
+    }
+
+    function cacheSnapshotDirectory(snapshotId, path, entries, loadedLimit = SNAPSHOT_PAGE_SIZE, hasMore = false) {
       const state = snapshotBrowserState;
       if (!state) return;
       const key = snapshotCacheKey(state.target.id, snapshotId, path);
+      const normalizedLimit = normalizeSnapshotDirectoryLimit(loadedLimit);
+      const cachedEntries = Array.isArray(entries) ? entries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES) : [];
       state.directoryCache.delete(key);
-      state.directoryCache.set(key, { entries: entries.slice(0, SNAPSHOT_MAX_ENTRIES), cachedAt: Date.now() });
+      state.directoryCache.set(key, {
+        entries: cachedEntries,
+        loadedLimit: normalizedLimit,
+        hasMore: Boolean(hasMore) && cachedEntries.length >= normalizedLimit && normalizedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES,
+        cachedAt: Date.now(),
+      });
       while (state.directoryCache.size > SNAPSHOT_CACHE_LIMIT) {
         state.directoryCache.delete(state.directoryCache.keys().next().value);
       }
@@ -2204,7 +2224,19 @@ docker compose up -d
       if (!value) return null;
       state.directoryCache.delete(key);
       state.directoryCache.set(key, value);
-      return value.entries.slice();
+      const loadedLimit = normalizeSnapshotDirectoryLimit(value.loadedLimit);
+      return {
+        entries: value.entries.slice(),
+        loadedLimit,
+        hasMore: value.hasMore === true && loadedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES,
+      };
+    }
+
+    function resetSnapshotDirectoryState(state) {
+      if (!state) return;
+      state.directoryLoadedLimit = SNAPSHOT_PAGE_SIZE;
+      state.directoryHasMore = false;
+      state.loadingMore = false;
     }
 
     function clearSnapshotSearchTimer() {
@@ -2439,6 +2471,7 @@ docker compose up -d
         abortSnapshotRequest(request);
         if (showCanceled && !state.closed) {
           state.loading = false;
+          state.loadingMore = false;
           state.notice = { kind: "canceled", message: "La operacion fue cancelada.", retry: true };
           renderCurrentSnapshotBrowser(false);
         }
@@ -2626,7 +2659,7 @@ docker compose up -d
 
     function normalizeSnapshotEntries(entries) {
       if (!Array.isArray(entries)) return [];
-      return entries.slice(0, SNAPSHOT_MAX_ENTRIES).map(normalizeSnapshotEntry).filter(Boolean);
+      return entries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES).map(normalizeSnapshotEntry).filter(Boolean);
     }
 
     function isImmediateSnapshotChild(path, parentPath) {
@@ -2762,6 +2795,9 @@ docker compose up -d
       const statusMarkup = notice ? renderSnapshotState(notice.kind, notice.message, { retry: notice.retry, cancel: notice.kind === "loading" }) : "";
       const emptyKind = state.searchActive ? "no-match" : "empty";
       const emptyMarkup = visibleEntries.length ? "" : `<div class="snapshot-empty" data-state="${emptyKind}"><strong>${escapeHtml(SNAPSHOT_STATE_LABELS[emptyKind])}</strong><span>${state.searchActive ? "Prueba con otra busqueda o limpia el filtro." : "Esta carpeta no contiene entradas visibles."}</span></div>`;
+      const loadMoreMarkup = !state.searchActive && state.directoryHasMore
+        ? `<div class="snapshot-pagination-control"><button type="button" class="btn ghost xs" data-snapshot-load-more aria-busy="${state.loadingMore ? "true" : "false"}" aria-label="${state.loadingMore ? "Cargando más entradas" : "Cargar más"}" ${state.loadingMore ? "disabled" : ""}>${state.loadingMore ? "Cargando..." : "Cargar más"}</button></div>`
+        : "";
       const rows = visibleEntries.map(entry => {
         const sizeText = entry.size === null ? "" : formatSnapshotBytes(entry.size);
         const tooLarge = !entry.isDir && entry.size !== null && entry.size > SNAPSHOT_MAX_OUTPUT_BYTES;
@@ -2781,6 +2817,7 @@ docker compose up -d
         ${statusMarkup}
         <div class="snapshot-breadcrumbs" aria-label="Ruta del snapshot">${breadcrumbs.join("")}</div>
         <div class="snapshot-entry-list" id="snapshotEntryList" role="listbox" aria-label="Entradas de ${escapeHtml(normalizedPath)}" tabindex="0" aria-busy="false">${rows || emptyMarkup}</div>
+        ${loadMoreMarkup}
         <div class="snapshot-safe-note">Los contenidos de archivos nunca se renderizan. Descargas limitadas a ${formatSnapshotBytes(SNAPSHOT_MAX_OUTPUT_BYTES)}; los archivos mayores se bloquean.</div>`;
       if (options.focusFirst !== false) {
         const first = workspace.querySelector("[data-entry-option]") || workspace.querySelector("#snapshotSearch");
@@ -2795,6 +2832,7 @@ docker compose up -d
       abortSnapshotPrefetches();
       clearSnapshotSearchTimer();
       invalidateSnapshotRequest(false);
+      resetSnapshotDirectoryState(state);
       state.currentSnapshot = selectedId;
       state.currentPath = "/";
       state.entries = [];
@@ -2847,6 +2885,7 @@ docker compose up -d
       clearSnapshotSearchTimer();
       state.searchQuery = String(value || "").trim();
       state.notice = null;
+      resetSnapshotDirectoryState(state);
       if (!state.searchQuery) {
         state.searchActive = false;
         browseSnapshot(state.currentSnapshot, state.currentPath);
@@ -2914,6 +2953,10 @@ docker compose up -d
           if (state.searchActive) searchSnapshot(state.currentSnapshot, state.currentPath, state.searchQuery);
           else browseSnapshot(state.currentSnapshot, state.currentPath);
         }
+        return;
+      }
+      if (event.target.closest("[data-snapshot-load-more]")) {
+        void loadMoreSnapshotDirectory();
         return;
       }
       const breadcrumb = event.target.closest("[data-breadcrumb-path]");
@@ -3155,6 +3198,7 @@ docker compose up -d
       const state = snapshotBrowserState;
       if (!state || !isCurrentSnapshotRequest(request)) return;
       state.loading = false;
+      state.loadingMore = false;
       let kind = "error";
       let message = String(error && error.message || error || "No se pudo completar la operacion.");
       if (error && error.code === "snapshot-poll-timeout") kind = "indexing";
@@ -3175,6 +3219,7 @@ docker compose up -d
         state.notice = { kind: "error", message: result.error || "El worker no pudo listar el snapshot.", retry: true };
       }
       state.loading = false;
+      state.loadingMore = false;
       renderCurrentSnapshotBrowser(false);
     }
 
@@ -3200,30 +3245,38 @@ docker compose up -d
       state.searchQuery = "";
       state.searchActive = false;
       state.view = "browser";
+      resetSnapshotDirectoryState(state);
       state.loading = true;
       state.notice = null;
       const request = beginSnapshotRequest("browse", state.currentSnapshot, normalizedPath);
       renderSnapshotList();
       renderSnapshotWorkspaceLoading("Listando contenido...");
-      const cachedEntries = getCachedSnapshotDirectory(state.currentSnapshot, normalizedPath);
-      if (cachedEntries && isCurrentSnapshotRequest(request)) {
-        state.entries = cachedEntries;
+      const cachedDirectory = getCachedSnapshotDirectory(state.currentSnapshot, normalizedPath);
+      const requestedLimit = cachedDirectory ? cachedDirectory.loadedLimit : SNAPSHOT_PAGE_SIZE;
+      state.directoryLoadedLimit = requestedLimit;
+      state.directoryHasMore = cachedDirectory ? cachedDirectory.hasMore : false;
+      if (cachedDirectory && isCurrentSnapshotRequest(request)) {
+        state.entries = cachedDirectory.entries;
         state.loading = false;
         state.notice = { kind: "stale", message: "Mostrando datos en cache mientras se actualiza el directorio." };
-        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, cachedEntries, { focusFirst: false });
+        renderSnapshotBrowser(state.currentSnapshot, normalizedPath, cachedDirectory.entries, { focusFirst: false });
       }
       try {
         const result = await requestSnapshotOperation(request, "browse", {
           snapshot_id: state.currentSnapshot,
           path: normalizedPath,
           request_id: `ui-${request.seq}`,
-          max_entries: SNAPSHOT_MAX_ENTRIES,
+          max_entries: requestedLimit,
         }, legacyBrowseSnapshot);
         if (!isCurrentSnapshotRequest(request)) return;
         if (!isSuccessfulSnapshotResult(result)) { showSnapshotResultError(request, result); return; }
-        state.entries = Array.isArray(result.entries) ? result.entries.slice(0, SNAPSHOT_MAX_ENTRIES) : [];
-        cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries);
+        const resultEntries = Array.isArray(result.entries) ? result.entries : [];
+        state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES);
+        state.directoryLoadedLimit = requestedLimit;
+        state.directoryHasMore = resultEntries.length >= requestedLimit && requestedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES;
+        cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore);
         state.loading = false;
+        state.loadingMore = false;
         state.notice = null;
         renderSnapshotBrowser(state.currentSnapshot, normalizedPath, state.entries);
         if (isWarmSnapshotResult(result)) {
@@ -3231,6 +3284,55 @@ docker compose up -d
         }
       } catch (error) {
         if (!isSnapshotAbortError(error)) showSnapshotOperationError(request, error);
+      } finally {
+        finishSnapshotRequest(request);
+      }
+    }
+
+    async function loadMoreSnapshotDirectory() {
+      const state = snapshotBrowserState;
+      if (!state || state.closed || !state.currentSnapshot || state.loading || state.loadingMore || state.searchActive || !state.directoryHasMore) return;
+      const currentLimit = normalizeSnapshotDirectoryLimit(state.directoryLoadedLimit);
+      const nextLimit = Math.min(currentLimit + SNAPSHOT_PAGE_SIZE, SNAPSHOT_MAX_DIRECTORY_ENTRIES);
+      if (nextLimit <= currentLimit) {
+        state.directoryHasMore = false;
+        renderCurrentSnapshotBrowser(false);
+        return;
+      }
+      const snapshotId = String(state.currentSnapshot);
+      const normalizedPath = normalizeSnapshotPath(state.currentPath);
+      state.directoryLoadedLimit = currentLimit;
+      state.loadingMore = true;
+      state.notice = null;
+      const request = beginSnapshotRequest("browse", snapshotId, normalizedPath);
+      if (!request) {
+        state.loadingMore = false;
+        return;
+      }
+      renderCurrentSnapshotBrowser(false);
+      try {
+        const result = await requestSnapshotOperation(request, "browse", {
+          snapshot_id: snapshotId,
+          path: normalizedPath,
+          request_id: `ui-${request.seq}`,
+          max_entries: nextLimit,
+        }, legacyBrowseSnapshot);
+        if (!isCurrentSnapshotRequest(request)) return;
+        if (!isSuccessfulSnapshotResult(result)) { showSnapshotResultError(request, result); return; }
+        const resultEntries = Array.isArray(result.entries) ? result.entries : [];
+        state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES);
+        state.directoryLoadedLimit = nextLimit;
+        state.directoryHasMore = resultEntries.length >= nextLimit && nextLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES;
+        cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore);
+        state.loadingMore = false;
+        state.notice = null;
+        renderSnapshotBrowser(snapshotId, normalizedPath, state.entries, { focusFirst: false });
+        if (isWarmSnapshotResult(result)) prefetchSnapshotDirectories(snapshotId, normalizedPath, state.entries);
+      } catch (error) {
+        if (!isSnapshotAbortError(error)) {
+          state.loadingMore = false;
+          showSnapshotOperationError(request, error);
+        }
       } finally {
         finishSnapshotRequest(request);
       }
@@ -3250,6 +3352,7 @@ docker compose up -d
       const useLocalSearch = matchesCurrentDirectory && state.entries.length < SNAPSHOT_MAX_ENTRIES;
       abortSnapshotPrefetches();
       clearSnapshotSearchTimer();
+      resetSnapshotDirectoryState(state);
       state.currentSnapshot = String(snapshotId);
       state.currentPath = normalizedPath;
       state.searchQuery = normalizedQuery;
@@ -3408,10 +3511,13 @@ docker compose up -d
           snapshot_id: String(snapshotId),
           path: directory.path,
           request_id: `prefetch-${request.seq}`,
-          max_entries: SNAPSHOT_MAX_ENTRIES,
+          max_entries: SNAPSHOT_PAGE_SIZE,
         }, legacyBrowseSnapshot).then(result => {
           if (controller.signal.aborted || !snapshotModalIsOpen() || !snapshotBrowserState || String(snapshotBrowserState.target.id) !== String(request.targetId)) return;
-          if (isSuccessfulSnapshotResult(result)) cacheSnapshotDirectory(snapshotId, directory.path, Array.isArray(result.entries) ? result.entries : []);
+          if (isSuccessfulSnapshotResult(result)) {
+            const resultEntries = Array.isArray(result.entries) ? result.entries : [];
+            cacheSnapshotDirectory(snapshotId, directory.path, resultEntries, SNAPSHOT_PAGE_SIZE, resultEntries.length >= SNAPSHOT_PAGE_SIZE && SNAPSHOT_PAGE_SIZE < SNAPSHOT_MAX_DIRECTORY_ENTRIES);
+          }
         }).catch(() => {}).finally(() => {
           if (snapshotBrowserState) snapshotBrowserState.prefetchControllers.delete(key);
         });

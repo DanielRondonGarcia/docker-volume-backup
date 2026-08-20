@@ -20,9 +20,9 @@ class SnapshotBrowserTests(unittest.TestCase):
         )
         return service
 
-    def execute_snapshot_ls(self, logs):
+    def execute_snapshot_ls(self, logs, payload=None):
         service = self.build_worker_service(logs)
-        result = service.execute_job({"command": "snapshot.ls", "payload": {}})
+        result = service.execute_job({"command": "snapshot.ls", "payload": payload or {}})
         return result
 
     def test_large_ndjson_listing_keeps_root_entries_before_log_limit(self):
@@ -40,6 +40,37 @@ class SnapshotBrowserTests(unittest.TestCase):
         self.assertEqual(result.result_summary["entries"][:2], [root, top_level])
         self.assertEqual(len(result.result_summary["entries"]), 1003)
         self.assertEqual(len(result.log_lines), 1000)
+
+    def test_browse_filters_requested_path_before_visible_limit(self):
+        requested_path = "/backup/baget/packages/packages"
+        unrelated = [
+            {
+                "struct_type": "node",
+                "type": "file",
+                "path": f"{requested_path}/Old.Package.{index}/1.0.0/Old.Package.{index}.nupkg",
+            }
+            for index in range(200)
+        ]
+        nested_package_file = {
+            "struct_type": "node",
+            "type": "file",
+            "path": f"{requested_path}/Nested.Package/1.0.0/Nested.Package.1.0.0.nupkg",
+        }
+        package = {
+            "struct_type": "node",
+            "type": "file",
+            "path": f"{requested_path}/Acme.Library.1.0.0.nupkg",
+        }
+        logs = "\n".join(json.dumps(entry) for entry in [*unrelated, nested_package_file, package])
+
+        result = self.execute_snapshot_ls(
+            logs,
+            {"path": requested_path, "max_entries": 200},
+        )
+
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertNotIn("error", result.result_summary)
+        self.assertEqual(result.result_summary["entries"], [package])
 
     def test_json_array_listing_is_parsed(self):
         root = {"struct_type": "node", "type": "dir", "path": "/"}
