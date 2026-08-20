@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class RedisSnapshotCache:
     """A best-effort Redis cache with bounded values, keys, locks, and cardinality."""
 
-    KEY_PREFIX = "sx:v2"
+    KEY_PREFIX = "sx:v3"
     CACHEABLE_OPERATIONS = frozenset(
         {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find"}
     )
@@ -268,7 +268,10 @@ return 0
         generation_hash = self._material_hash(context.get("cache_generation", 0))
         snapshot_hash = self._material_hash(context.get("snapshot_id"))
         path_hash = self._material_hash(
-            context.get("path", "/"), context.get("query"), context.get("max_entries")
+            context.get("path", "/"),
+            context.get("query"),
+            context.get("max_entries"),
+            context.get("max_log_bytes", 4 * 1024 * 1024),
         )
         return f"{self.KEY_PREFIX}:{target}:{repository}:g{generation_hash}:entry:{operation}:{snapshot_hash}:{path_hash}"
 
@@ -325,7 +328,19 @@ return 0
     def _encoded_value(self, context: Mapping[str, Any], value: Any) -> Optional[bytes]:
         if not isinstance(value, dict):
             return None
-        allowed = {"schema_version", "status", "status_code", "target_id", "entries", "snapshots"}
+        allowed = {
+            "schema_version",
+            "status",
+            "status_code",
+            "target_id",
+            "entries",
+            "snapshots",
+            "listing_mode",
+            "listing_complete",
+            "listing_entry_count",
+            "listing_output_limit_bytes",
+            "listing_error_code",
+        }
         if not set(value).issubset(allowed):
             return None
         if "entries" not in value and "snapshots" not in value:

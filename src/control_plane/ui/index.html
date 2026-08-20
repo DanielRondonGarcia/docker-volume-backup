@@ -2132,6 +2132,8 @@ docker compose up -d
       oversized: "Excede el limite",
       offline: "Worker no disponible",
       timeout: "Tiempo agotado",
+      "output-limit": "Límite de salida",
+      incomplete: "Listado incompleto",
       unsupported: "No disponible",
       ready: "Listo",
     };
@@ -2165,6 +2167,10 @@ docker compose up -d
         catalogStatus: "loading",
         catalogError: null,
         notice: null,
+        listingComplete: false,
+        listingMode: null,
+        listingEntryCount: 0,
+        listingOutputLimitBytes: null,
         closed: false,
         returnFocus: document.activeElement,
       };
@@ -2198,7 +2204,7 @@ docker compose up -d
       return Math.min(SNAPSHOT_MAX_DIRECTORY_ENTRIES, Math.max(SNAPSHOT_PAGE_SIZE, Math.floor(numericLimit)));
     }
 
-    function cacheSnapshotDirectory(snapshotId, path, entries, loadedLimit = SNAPSHOT_PAGE_SIZE, hasMore = false) {
+    function cacheSnapshotDirectory(snapshotId, path, entries, loadedLimit = SNAPSHOT_PAGE_SIZE, hasMore = false, listingComplete = true) {
       const state = snapshotBrowserState;
       if (!state) return;
       const key = snapshotCacheKey(state.target.id, snapshotId, path);
@@ -2209,6 +2215,7 @@ docker compose up -d
         entries: cachedEntries,
         loadedLimit: normalizedLimit,
         hasMore: Boolean(hasMore) && cachedEntries.length >= normalizedLimit && normalizedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES,
+        listingComplete: listingComplete === true,
         cachedAt: Date.now(),
       });
       while (state.directoryCache.size > SNAPSHOT_CACHE_LIMIT) {
@@ -2229,6 +2236,7 @@ docker compose up -d
         entries: value.entries.slice(),
         loadedLimit,
         hasMore: value.hasMore === true && loadedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES,
+        listingComplete: value.listingComplete === true,
       };
     }
 
@@ -2509,6 +2517,9 @@ docker compose up -d
       if (!Array.isArray(normalized.entries) && Array.isArray(summary.entries)) normalized.entries = summary.entries;
       if (typeof normalized.b64_content !== "string" && typeof summary.b64_content === "string") normalized.b64_content = summary.b64_content;
       if (!normalized.error && typeof summary.error === "string") normalized.error = summary.error;
+      for (const key of ["status_code", "listing_mode", "listing_complete", "listing_entry_count", "listing_output_limit_bytes", "listing_error_code"]) {
+        if (normalized[key] === undefined && summary[key] !== undefined) normalized[key] = summary[key];
+      }
       return normalized;
     }
 
@@ -2681,7 +2692,7 @@ docker compose up -d
 
     function renderSnapshotState(kind, message, options = {}) {
       const label = SNAPSHOT_STATE_LABELS[kind] || kind;
-      const role = ["error", "deleted", "blocked", "oversized"].includes(kind) ? "alert" : "status";
+       const role = ["error", "deleted", "blocked", "oversized", "output-limit", "timeout", "incomplete"].includes(kind) ? "alert" : "status";
       const retry = options.retry ? `<button type="button" class="btn ghost xs" data-snapshot-retry>Reintentar</button>` : "";
       const cancel = options.cancel ? `<button type="button" class="btn ghost xs" data-snapshot-cancel>Cancelar</button>` : "";
       return `<div class="snapshot-status" data-state="${escapeHtml(kind)}" role="${role}" aria-live="polite"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(message)}</span>${retry}${cancel}</div>`;
@@ -2794,7 +2805,16 @@ docker compose up -d
       const notice = state.notice || null;
       const statusMarkup = notice ? renderSnapshotState(notice.kind, notice.message, { retry: notice.retry, cancel: notice.kind === "loading" }) : "";
       const emptyKind = state.searchActive ? "no-match" : "empty";
-      const emptyMarkup = visibleEntries.length ? "" : `<div class="snapshot-empty" data-state="${emptyKind}"><strong>${escapeHtml(SNAPSHOT_STATE_LABELS[emptyKind])}</strong><span>${state.searchActive ? "Prueba con otra busqueda o limpia el filtro." : "Esta carpeta no contiene entradas visibles."}</span></div>`;
+      let emptyMarkup = "";
+      if (!visibleEntries.length && !notice) {
+        if (state.searchActive) {
+          emptyMarkup = `<div class="snapshot-empty" data-state="no-match"><strong>${escapeHtml(SNAPSHOT_STATE_LABELS["no-match"])}</strong><span>Prueba con otra busqueda o limpia el filtro.</span></div>`;
+        } else if (state.listingComplete === true) {
+          emptyMarkup = '<div class="snapshot-empty" data-state="empty"><strong>Listado confirmado</strong><span>Esta carpeta no contiene entradas.</span></div>';
+        } else {
+          emptyMarkup = '<div class="snapshot-empty" data-state="incomplete"><strong>Listado incompleto</strong><span>El listado quedó incompleto y no se puede confirmar que la carpeta esté vacía.</span></div>';
+        }
+      }
       const loadMoreMarkup = !state.searchActive && state.directoryHasMore
         ? `<div class="snapshot-pagination-control"><button type="button" class="btn ghost xs" data-snapshot-load-more aria-busy="${state.loadingMore ? "true" : "false"}" aria-label="${state.loadingMore ? "Cargando más entradas" : "Cargar más"}" ${state.loadingMore ? "disabled" : ""}>${state.loadingMore ? "Cargando..." : "Cargar más"}</button></div>`
         : "";
@@ -2840,6 +2860,10 @@ docker compose up -d
       state.searchActive = false;
       state.view = "browser";
       state.notice = null;
+      state.listingComplete = false;
+      state.listingMode = null;
+      state.listingEntryCount = 0;
+      state.listingOutputLimitBytes = null;
       renderSnapshotList();
       browseSnapshot(selectedId, "/");
     }
@@ -3201,10 +3225,59 @@ docker compose up -d
       state.loadingMore = false;
       let kind = "error";
       let message = String(error && error.message || error || "No se pudo completar la operacion.");
-      if (error && error.code === "snapshot-poll-timeout") kind = "indexing";
+      if (error && error.code === "snapshot-poll-timeout") {
+        kind = "timeout";
+        message = "El listado tardó demasiado porque contiene muchos elementos. Reduce el alcance o aumenta el tiempo/límite configurado.";
+      }
+      else if (error && [502, 504].includes(error.status)) {
+        kind = "timeout";
+        message = "El listado tardó demasiado porque contiene muchos elementos. Reduce el alcance o aumenta el tiempo/límite configurado.";
+      }
       else if (error && error.status === 404) { kind = "deleted"; message = "El target o snapshot ya no existe."; }
       state.notice = { kind, message, retry: true };
+      state.listingComplete = false;
       renderCurrentSnapshotBrowser(false);
+    }
+
+    function classifySnapshotListingFailure(result) {
+      const normalized = normalizeSnapshotContract(result) || {};
+      const code = String(normalized.listing_error_code || "").toLowerCase();
+      const statusCode = Number(normalized.status_code);
+      const text = String(normalized.error || "").toLowerCase();
+      if (code === "output_limit" || statusCode === 413 || /output|log|limit|exceed|too large|truncat/.test(text)) {
+        return {
+          kind: "output-limit",
+          message: "El listado supera el límite configurado. Aumenta el límite de salida del Snapshot Explorer en Settings.",
+        };
+      }
+      if (code === "timeout" || statusCode === 124 || /timed out|timeout|tiempo agotado/.test(text)) {
+        return {
+          kind: "timeout",
+          message: "El listado tardó demasiado porque contiene muchos elementos. Reduce el alcance o aumenta el tiempo/límite configurado.",
+        };
+      }
+      if (code === "malformed_tree" || code === "entry_limit" || normalized.listing_complete === false || /malformed|incomplete|incompleto|tree json/.test(text)) {
+        return {
+          kind: "incomplete",
+          message: "El listado quedó incompleto y no se puede confirmar que la carpeta esté vacía.",
+        };
+      }
+      if (code === "path_failure") {
+        return {
+          kind: "error",
+          message: "No se pudo abrir la carpeta solicitada en el snapshot.",
+        };
+      }
+      if (code === "repository") {
+        return {
+          kind: "error",
+          message: "El repositorio Restic no está configurado o no está disponible para este target.",
+        };
+      }
+      return {
+        kind: "error",
+        message: "No se pudo completar el listado del snapshot. Verifica el snapshot y la ruta solicitada.",
+      };
     }
 
     function showSnapshotResultError(request, result) {
@@ -3216,16 +3289,21 @@ docker compose up -d
       } else if (status === "deleted" || status === "missing") {
         state.notice = { kind: "deleted", message: result.error || "El target o snapshot ya no existe.", retry: true };
       } else {
-        state.notice = { kind: "error", message: result.error || "El worker no pudo listar el snapshot.", retry: true };
+        const failure = classifySnapshotListingFailure(result);
+        state.notice = { ...failure, retry: true };
       }
       state.loading = false;
       state.loadingMore = false;
+      state.listingComplete = false;
       renderCurrentSnapshotBrowser(false);
     }
 
     function isSuccessfulSnapshotResult(result) {
-      const status = snapshotStatus(result);
-      return status === "succeeded" || status === "success" || (!status && !result.error);
+      const normalized = normalizeSnapshotContract(result);
+      if (!normalized || normalized.error) return false;
+      if (normalized.listing_mode === "tree" && normalized.listing_complete !== true) return false;
+      const status = snapshotStatus(normalized);
+      return status === "succeeded" || status === "success" || (!status && !normalized.error);
     }
 
     function isWarmSnapshotResult(result) {
@@ -3248,6 +3326,10 @@ docker compose up -d
       resetSnapshotDirectoryState(state);
       state.loading = true;
       state.notice = null;
+      state.listingComplete = false;
+      state.listingMode = null;
+      state.listingEntryCount = 0;
+      state.listingOutputLimitBytes = null;
       const request = beginSnapshotRequest("browse", state.currentSnapshot, normalizedPath);
       renderSnapshotList();
       renderSnapshotWorkspaceLoading("Listando contenido...");
@@ -3258,6 +3340,9 @@ docker compose up -d
       if (cachedDirectory && isCurrentSnapshotRequest(request)) {
         state.entries = cachedDirectory.entries;
         state.loading = false;
+        state.listingComplete = cachedDirectory.listingComplete === true;
+        state.listingMode = "tree";
+        state.listingEntryCount = cachedDirectory.entries.length;
         state.notice = { kind: "stale", message: "Mostrando datos en cache mientras se actualiza el directorio." };
         renderSnapshotBrowser(state.currentSnapshot, normalizedPath, cachedDirectory.entries, { focusFirst: false });
       }
@@ -3274,7 +3359,11 @@ docker compose up -d
         state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES);
         state.directoryLoadedLimit = requestedLimit;
         state.directoryHasMore = resultEntries.length >= requestedLimit && requestedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES;
-        cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore);
+        state.listingComplete = result.listing_complete === true;
+        state.listingMode = result.listing_mode || null;
+        state.listingEntryCount = Number.isFinite(Number(result.listing_entry_count)) ? Number(result.listing_entry_count) : state.entries.length;
+        state.listingOutputLimitBytes = Number.isFinite(Number(result.listing_output_limit_bytes)) ? Number(result.listing_output_limit_bytes) : null;
+        cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore, state.listingComplete);
         state.loading = false;
         state.loadingMore = false;
         state.notice = null;
@@ -3323,7 +3412,11 @@ docker compose up -d
         state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES);
         state.directoryLoadedLimit = nextLimit;
         state.directoryHasMore = resultEntries.length >= nextLimit && nextLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES;
-        cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore);
+        state.listingComplete = result.listing_complete === true;
+        state.listingMode = result.listing_mode || null;
+        state.listingEntryCount = Number.isFinite(Number(result.listing_entry_count)) ? Number(result.listing_entry_count) : state.entries.length;
+        state.listingOutputLimitBytes = Number.isFinite(Number(result.listing_output_limit_bytes)) ? Number(result.listing_output_limit_bytes) : null;
+        cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore, state.listingComplete);
         state.loadingMore = false;
         state.notice = null;
         renderSnapshotBrowser(snapshotId, normalizedPath, state.entries, { focusFirst: false });
@@ -5427,6 +5520,7 @@ docker compose up -d
       const settings = state.settings || {};
       const hasDefaultPassword = !!(settings.restic_password_secret_id);
       const hasRcloneConf = !!(settings.rclone_conf_secret_id);
+      const snapshotListingMaxMiB = Math.round(Number(settings.snapshot_explorer_listing_max_output_bytes ?? (4 * 1024 * 1024)) / (1024 * 1024));
       const passwordSecretOptions = state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === settings.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       const rcloneSecretOptions = state.secrets.filter(s => s.secret_type === "file").map(s => `<option value="${escapeHtml(s.id)}" ${s.id === settings.rclone_conf_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       content.innerHTML = `
@@ -5515,6 +5609,23 @@ docker compose up -d
             </div>
           </div>
 
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <span class="settings-icon">≡</span>
+              <div>
+                <h3>Límite de salida del listado de Snapshot Explorer</h3>
+                <div class="settings-card-sub">Salida de metadatos del listado</div>
+              </div>
+            </div>
+            <div class="helper">Controla la salida máxima capturada por <code>restic cat tree</code> y las búsquedas <code>restic ls --json</code> del Snapshot Explorer. No cambia el límite de 8 MiB para descargar archivos.</div>
+            <div class="field full" style="margin-top:12px;">
+              <label for="settingsSnapshotListingMaxOutput">Límite de salida del listado (MiB)</label>
+              <input id="settingsSnapshotListingMaxOutput" type="number" min="1" max="16" step="1" required value="${snapshotListingMaxMiB}" aria-describedby="settingsSnapshotListingMaxOutputHelp settingsSnapshotListingMaxOutputError" />
+              <div id="settingsSnapshotListingMaxOutputHelp" class="helper">Acepta un valor entero entre 1 y 16 MiB. Este ajuste es para el listado directo <code>restic cat tree</code> y las búsquedas <code>restic ls --json</code>, no para el tamaño de descarga de archivos.</div>
+              <div id="settingsSnapshotListingMaxOutputError" role="alert" aria-live="polite" style="margin-top:6px; color:var(--destructive); font-size:12px;"></div>
+            </div>
+          </div>
+
           <div class="settings-actions">
             <button type="submit" class="btn primary">Guardar configuracion</button>
             <div id="settingsFeedback"></div>
@@ -5568,6 +5679,9 @@ docker compose up -d
         const rcloneSecret = emptyToNull(document.getElementById("settingsRcloneSecret").value);
         const globalCron = emptyToNull(document.getElementById("settingsGlobalCron").value);
         const publicUrl = document.getElementById("settingsPublicUrl").value.trim();
+        const listingLimitInput = document.getElementById("settingsSnapshotListingMaxOutput");
+        const listingLimitError = document.getElementById("settingsSnapshotListingMaxOutputError");
+        const listingLimitMiB = Number(listingLimitInput.value);
         if (!repoBase) {
           showFeedback("La ruta base del repositorio es obligatoria.", "error");
           document.getElementById("settingsRepoBase").focus();
@@ -5578,6 +5692,16 @@ docker compose up -d
           document.getElementById("settingsRepoBase").focus();
           return;
         }
+        if (!Number.isInteger(listingLimitMiB) || listingLimitMiB < 1 || listingLimitMiB > 16) {
+          const message = "El límite del listado debe ser un número entero entre 1 y 16 MiB.";
+          listingLimitInput.setAttribute("aria-invalid", "true");
+          listingLimitError.textContent = message;
+          showFeedback(message, "error");
+          listingLimitInput.focus();
+          return;
+        }
+        listingLimitInput.setAttribute("aria-invalid", "false");
+        listingLimitError.textContent = "";
         await withBtnLoading(e.submitter, async () => {
           await apiPatch("/api/v1/settings", {
             restic_repository_base: repoBase,
@@ -5585,6 +5709,7 @@ docker compose up -d
             rclone_conf_secret_id: rcloneSecret,
             global_cron_expression: globalCron,
             control_plane_public_url: publicUrl,
+            snapshot_explorer_listing_max_output_bytes: listingLimitMiB * 1024 * 1024,
           });
           await refreshAll();
           showFeedback("Guardado exitosamente.", "success");

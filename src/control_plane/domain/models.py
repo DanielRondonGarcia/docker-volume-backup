@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -179,11 +179,15 @@ class JobRecord:
 
 @dataclass
 class SettingsRecord:
+    DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES: ClassVar[int] = 4 * 1024 * 1024
+    MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES: ClassVar[int] = 1 * 1024 * 1024
+    MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES: ClassVar[int] = 16 * 1024 * 1024
     restic_repository_base: str = ""
     restic_password_secret_id: Optional[str] = None
     rclone_conf_secret_id: Optional[str] = None
     global_cron_expression: Optional[str] = None
     control_plane_public_url: str = ""
+    snapshot_explorer_listing_max_output_bytes: int = DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
     id: str = "default"
     updated_at: datetime = field(default_factory=utcnow)
 

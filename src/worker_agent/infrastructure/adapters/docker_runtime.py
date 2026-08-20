@@ -30,6 +30,7 @@ class DockerRuntimeAdapter:
     CLEANUP_REMOVE_ATTEMPTS = 2
     MAX_CLEANUP_REPORT_IDS = 20
     MAX_LOG_BYTES = 4 * 1024 * 1024
+    MAX_SNAPSHOT_METADATA_LOG_BYTES = 16 * 1024 * 1024
     MAX_DUMP_BYTES = 16 * 1024 * 1024
     MAX_ZIP_BYTES = 64 * 1024 * 1024
     MAX_SNAPSHOT_ENTRIES = 10_000
@@ -37,7 +38,7 @@ class DockerRuntimeAdapter:
     MAX_SNAPSHOT_PATH_LENGTH = 4096
     _SHELL_METACHARACTERS = frozenset(";|&`$><\\\"'\n\r\x00(){}[]*?!")
     _SECRET_ENV_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL")
-    _READ_ONLY_OPERATIONS = frozenset({"snapshots", "ls", "dump", "find", "stats"})
+    _READ_ONLY_OPERATIONS = frozenset({"snapshots", "ls", "cat", "dump", "find", "stats"})
     _WRITE_OPERATIONS = frozenset({"backup", "restore", "forget", "prune"})
     _SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     _SAFE_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -121,6 +122,10 @@ class DockerRuntimeAdapter:
             return argv
         if operation == "stats" and argv == ["restic", "stats", "--mode", "raw-data", "--json"]:
             return argv
+        if operation == "cat" and len(argv) == 4 and argv[2] == "tree":
+            snapshot_id, path = cls._snapshot_tree_arguments(argv[3])
+            argv[3] = snapshot_id if path == "/" else f"{snapshot_id}:{path}"
+            return argv
         if operation == "ls" and len(argv) in (4, 5) and argv[2] == "--json":
             cls.validate_snapshot_id(argv[3])
             if len(argv) == 5:
@@ -195,6 +200,19 @@ class DockerRuntimeAdapter:
             return "/"
         return normalized
 
+    @classmethod
+    def _snapshot_tree_arguments(cls, value: Any) -> tuple[str, str]:
+        if not isinstance(value, str) or not value:
+            raise ValueError("invalid snapshot tree target")
+        snapshot_id, separator, raw_path = value.partition(":")
+        cls.validate_snapshot_id(snapshot_id)
+        if not separator:
+            return snapshot_id, "/"
+        path = cls.normalize_snapshot_path(raw_path)
+        if path == "/":
+            raise ValueError("snapshot tree target must use the snapshot ID for the root")
+        return snapshot_id, path
+
     @staticmethod
     def _safe_runtime_token(value: Any, path: Any = False) -> bool:
         if not isinstance(value, str) or not value or ".." in value.split("/"):
@@ -231,15 +249,24 @@ class DockerRuntimeAdapter:
 
     @classmethod
     def _snapshot_arguments(cls, argv: List[str]) -> tuple[str | None, str | None]:
+        argv = [item for item in argv if item != "--no-lock"]
         if len(argv) < 2 or argv[0] != "restic":
             return None, None
-        operation = argv[1]
+        operation_index = 3 if len(argv) >= 4 and argv[1] == "--cache-dir" else 1
+        if len(argv) <= operation_index:
+            return None, None
+        operation = argv[operation_index]
         if operation in {"ls", "find"}:
-            return argv[3], argv[4] if len(argv) == 5 else "/"
+            if len(argv) not in {operation_index + 3, operation_index + 4}:
+                return None, None
+            return argv[operation_index + 2], argv[operation_index + 3] if len(argv) == operation_index + 4 else "/"
+        if operation == "cat" and len(argv) == operation_index + 3 and argv[operation_index + 1] == "tree":
+            return cls._snapshot_tree_arguments(argv[operation_index + 2])
         if operation == "dump":
-            if len(argv) == 4:
-                return argv[2], argv[3]
-            return argv[4], argv[5]
+            if len(argv) == operation_index + 3:
+                return argv[operation_index + 1], argv[operation_index + 2]
+            if len(argv) == operation_index + 5:
+                return argv[operation_index + 3], argv[operation_index + 4]
         return None, None
 
     @classmethod
@@ -664,6 +691,8 @@ class DockerRuntimeAdapter:
     def _bounded_limit(cls, value: Any, default: int, maximum: int) -> int:
         if value is None:
             return default
+        if isinstance(value, bool):
+            raise ValueError("runtime output limit must be a positive integer")
         try:
             limit = int(value)
         except (TypeError, ValueError):
@@ -671,6 +700,40 @@ class DockerRuntimeAdapter:
         if limit <= 0 or limit > maximum:
             raise ValueError("runtime output limit is outside the permitted bounds")
         return limit
+
+    @classmethod
+    def _is_snapshot_metadata_command(cls, command: List[str]) -> bool:
+        argv = [item for item in command if item != "--no-lock"]
+        if len(argv) < 3 or argv[0] != "restic":
+            return False
+        operation_index = 3 if len(argv) >= 4 and argv[1] == "--cache-dir" else 1
+        if len(argv) <= operation_index:
+            return False
+        operation = argv[operation_index]
+        if operation == "snapshots":
+            return (
+                argv[operation_index : operation_index + 2] == ["snapshots", "--json"]
+                and len(argv) == operation_index + 2
+            )
+        if operation == "cat":
+            return (
+                argv[operation_index : operation_index + 2] == ["cat", "tree"]
+                and len(argv) == operation_index + 3
+            )
+        return (
+            operation in {"ls", "find"}
+            and len(argv) in {operation_index + 3, operation_index + 4}
+            and argv[operation_index + 1] == "--json"
+        )
+
+    @classmethod
+    def _runtime_output_limit(cls, payload: Dict[str, Any], command: List[str]) -> int:
+        maximum = (
+            cls.MAX_SNAPSHOT_METADATA_LOG_BYTES
+            if cls._is_snapshot_metadata_command(command)
+            else cls.MAX_LOG_BYTES
+        )
+        return cls._bounded_limit(payload.get("max_log_bytes"), cls.MAX_LOG_BYTES, maximum)
 
     @staticmethod
     def _bounded_bytes(value: Any, limit: int) -> tuple[bytes, bool]:
@@ -1223,6 +1286,7 @@ class DockerRuntimeAdapter:
         stream_thread = None
         try:
             environment, volumes, command, network_mode, timeout, temp_dirs = self._prepare_runtime(payload, binary=False)
+            output_limit = self._runtime_output_limit(payload, command)
             if self._callback_is_true(cancel_check):
                 return self._failure_result("runtime canceled before launch", False, secrets, 130)
             self._pull_image(image)
@@ -1235,9 +1299,6 @@ class DockerRuntimeAdapter:
                 detach=True,
                 remove=False,
                 labels=self._runtime_container_labels(payload),
-            )
-            output_limit = self._bounded_limit(
-                payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES
             )
             stream_state, stream_thread = self._start_log_stream(
                 container,

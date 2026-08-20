@@ -17,6 +17,7 @@ from src.control_plane.domain.models import (
     IndexStatusRecord,
     JobStatus,
     SecretRecord,
+    SettingsRecord,
     SnapshotRecord,
     StorageProfileRecord,
     WorkerRecord,
@@ -105,8 +106,26 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(job.payload["request_id"], "request-1")
         self.assertEqual(job.payload["path"], "/folder with spaces/file.txt")
         self.assertEqual(job.payload["operation"], "browse")
-        self.assertEqual(job.payload["command"][-1], "/folder with spaces/file.txt")
+        self.assertEqual(job.payload["command"][:3], ["restic", "cat", "tree"])
+        self.assertEqual(job.payload["command"][-1], "abcdef12:/folder with spaces/file.txt")
         self.assertEqual(job.payload["cache_generation"], 0)
+
+    def test_browse_uses_direct_tree_target_but_search_and_find_keep_restic_ls(self):
+        service = self.make_service()
+
+        root = service.dispatch_snapshot_read("target-a", "browse", "abcdef12", path="/")
+        root_job = service.get_job(root["job_id"])
+        nested = service.dispatch_snapshot_read("target-a", "browse", "abcdef12", path="/packages")
+        nested_job = service.get_job(nested["job_id"])
+        search = service.dispatch_snapshot_read("target-a", "search", "abcdef12", path="/packages", query="needle")
+        search_job = service.get_job(search["job_id"])
+        find = service.dispatch_snapshot_read("target-a", "find", "abcdef12", path="/packages", query="needle")
+        find_job = service.get_job(find["job_id"])
+
+        self.assertEqual(root_job.payload["command"], ["restic", "cat", "tree", "abcdef12"])
+        self.assertEqual(nested_job.payload["command"], ["restic", "cat", "tree", "abcdef12:/packages"])
+        self.assertEqual(search_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/packages"])
+        self.assertEqual(find_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/packages"])
 
     def test_job_trigger_is_preserved_in_api_payload(self):
         service = self.make_service()
@@ -128,6 +147,61 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(job.payload["cache_generation"], 1)
         self.assertNotIn("cache_generation", response)
 
+    def test_snapshot_listing_setting_validates_bounds_and_preserves_partial_updates(self):
+        service = self.make_service()
+
+        default = service.update_settings()
+        self.assertEqual(
+            default.snapshot_explorer_listing_max_output_bytes,
+            SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES,
+        )
+        updated = service.update_settings(
+            restic_repository_base="backup",
+            snapshot_explorer_listing_max_output_bytes=8 * 1024 * 1024,
+        )
+        self.assertEqual(updated.snapshot_explorer_listing_max_output_bytes, 8 * 1024 * 1024)
+
+        for invalid in (
+            SettingsRecord.MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES - 1,
+            SettingsRecord.MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES + 1,
+            True,
+            8.0,
+            "8388608",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                service.update_settings(snapshot_explorer_listing_max_output_bytes=invalid)
+
+        preserved = service.update_settings(global_cron_expression="0 3 * * *")
+        self.assertEqual(preserved.restic_repository_base, "backup")
+        self.assertEqual(preserved.snapshot_explorer_listing_max_output_bytes, 8 * 1024 * 1024)
+
+    def test_snapshot_metadata_payloads_use_listing_limit_but_dump_keeps_download_limit(self):
+        service = self.make_service()
+        service.update_settings(snapshot_explorer_listing_max_output_bytes=8 * 1024 * 1024)
+
+        catalog_job = service.dispatch_snapshot_sync_for_target("target-a")
+        metadata_jobs = [catalog_job]
+        for operation in ("browse", "search", "find"):
+            response = service.dispatch_snapshot_read(
+                "target-a",
+                operation,
+                "abcdef12",
+                query="needle" if operation in {"search", "find"} else None,
+            )
+            metadata_jobs.append(service.get_job(response["job_id"]))
+
+        dump_response = service.dispatch_snapshot_read(
+            "target-a",
+            "dump",
+            "abcdef12",
+            max_output_bytes=1234,
+        )
+        dump_job = service.get_job(dump_response["job_id"])
+
+        self.assertTrue(all(job.payload["max_log_bytes"] == 8 * 1024 * 1024 for job in metadata_jobs))
+        self.assertNotIn("max_log_bytes", dump_job.payload)
+        self.assertEqual(dump_job.payload["max_output_bytes"], 1234)
+
     def test_snapshot_job_contract_preserves_worker_cache_source(self):
         service = self.make_service()
         response = service.dispatch_snapshot_read("target-a", "browse", "abcdef12")
@@ -144,6 +218,36 @@ class ControlPlaneDispatchTests(unittest.TestCase):
 
         self.assertEqual(contract["source"], "redis")
         self.assertTrue(contract["cache_hit"])
+
+    def test_snapshot_contract_forwards_listing_diagnostics_and_rejects_success_with_error(self):
+        service = self.make_service()
+        response = service.dispatch_snapshot_read("target-a", "browse", "abcdef12")
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        service.update_job_status(
+            "worker-a",
+            claimed.id,
+            JobStatus.SUCCEEDED,
+            result_summary={
+                "entries": [],
+                "status_code": 413,
+                "listing_mode": "tree",
+                "listing_complete": False,
+                "listing_entry_count": 0,
+                "listing_output_limit_bytes": 8 * 1024 * 1024,
+                "listing_error_code": "output_limit",
+                "error": "runtime logs exceeded the permitted limit",
+            },
+            lease_token=claimed.lease_token,
+        )
+
+        contract = service.snapshot_job_contract(response["job_id"])
+
+        self.assertEqual(contract["status"], JobStatus.FAILED)
+        self.assertEqual(contract["status_code"], 413)
+        self.assertEqual(contract["listing_mode"], "tree")
+        self.assertFalse(contract["listing_complete"])
+        self.assertEqual(contract["listing_error_code"], "output_limit")
+        self.assertTrue(contract["error"])
 
     def test_interactive_fetch_prioritizes_explorer_jobs_and_search_is_bounded(self):
         service = self.make_service()
@@ -319,7 +423,7 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual({job.target_id for job in jobs}, {"target-a"})
         self.assertEqual({job.command for job in jobs}, {"snapshot.ls", "backup.run"})
         read_job = next(job for job in jobs if job.command == "snapshot.ls")
-        self.assertEqual(read_job.payload["command"][1], "ls")
+        self.assertEqual(read_job.payload["command"][1:3], ["cat", "tree"])
         self.assertNotIn("--no-lock", read_job.payload["command"])
 
     def test_explicit_worker_id_does_not_merge_same_name(self):

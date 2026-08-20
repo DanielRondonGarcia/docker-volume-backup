@@ -66,9 +66,15 @@ class ControlPlaneService:
     MAX_PUBLIC_SUMMARY_ITEMS = 200
     MAX_REQUEST_ID_LENGTH = 128
     MAX_SEARCH_QUERY_LENGTH = 256
+    MAX_SNAPSHOT_LISTING_DIAGNOSTIC_COUNT = MAX_SNAPSHOT_ENTRIES + 1
+    MAX_SNAPSHOT_LISTING_OUTPUT_BYTES = 16 * 1024 * 1024
     LIVE_REVISION_SCHEMA_VERSION = 1
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    SNAPSHOT_LISTING_MODES = frozenset({"tree", "ls"})
+    SNAPSHOT_LISTING_ERROR_CODES = frozenset(
+        {"output_limit", "entry_limit", "timeout", "malformed_tree", "path_failure", "runtime_failure", "repository"}
+    )
     SNAPSHOT_READ_COMMANDS = {
         "browse": "snapshot.ls",
         "search": "snapshot.search",
@@ -671,15 +677,33 @@ class ControlPlaneService:
         job_status = result.get("status")
         logs = result.get("logs", "") or ""
         result_summary = result.get("result_summary") or {}
-        if job_status == "failed" or job_status == JobStatus.CANCELED:
-            structured_error = result_summary.get("error")
+        response = {
+            "entries": [],
+            "job_id": job.id,
+            "status": JobStatus.normalize(job_status),
+        }
+        response.update(self._safe_snapshot_listing_diagnostics(result_summary))
+        structured_error = result_summary.get("error")
+        if job_status == "failed" or job_status == JobStatus.CANCELED or isinstance(structured_error, str) and structured_error.strip():
             if isinstance(structured_error, str) and structured_error.strip():
                 error_msg = structured_error.strip()
             else:
                 error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
-            return {"entries": [], "job_id": job.id, "error": f"restic ls failed: {error_msg}"}
+            response["status"] = JobStatus.CANCELED if job_status == JobStatus.CANCELED else JobStatus.FAILED
+            response["error"] = f"restic cat tree failed: {error_msg}"
+            response["listing_complete"] = False
+            return response
         if job_status == "timeout":
-            return {"entries": [], "job_id": job.id, "error": "restic ls timed out (60s)"}
+            response.update(
+                {
+                    "error": "restic cat tree timed out (60s)",
+                    "listing_mode": "tree",
+                    "listing_complete": False,
+                    "listing_entry_count": 0,
+                    "listing_error_code": "timeout",
+                }
+            )
+            return response
         if "entries" in result_summary:
             entries = result_summary.get("entries") or []
         else:
@@ -696,7 +720,21 @@ class ControlPlaneService:
                         entries.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-        return {"entries": entries, "job_id": job.id}
+        response["entries"] = entries
+        if (
+            result_summary.get("listing_mode") == "tree" and result_summary.get("listing_complete") is not True
+        ) or (not entries and result_summary.get("listing_complete") is not True):
+            response.update(
+                {
+                    "status": JobStatus.FAILED,
+                    "error": "snapshot tree listing was incomplete",
+                    "listing_mode": "tree",
+                    "listing_complete": False,
+                    "listing_entry_count": 0,
+                    "listing_error_code": "malformed_tree",
+                }
+            )
+        return response
 
     def dispatch_snapshot_dump(self, target_id: str, snapshot_id: str, path: str) -> Dict[str, Any]:
         target = self._require_target(target_id)
@@ -1167,6 +1205,7 @@ class ControlPlaneService:
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": "restic snapshots --json",
+            "max_log_bytes": self._effective_snapshot_explorer_listing_max_output_bytes(self.get_settings()),
             "cache_generation": self._snapshot_cache_generation(target),
             "environment": environment,
             "volumes": volumes,
@@ -1241,7 +1280,10 @@ class ControlPlaneService:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
         storage_context = self._storage_context(target, environment, resolved_files)
-        if operation in {"browse", "search", "find"}:
+        if operation == "browse":
+            tree_target = snapshot_id if path == "/" else f"{snapshot_id}:{path}"
+            command = ["restic", "cat", "tree", tree_target]
+        elif operation in {"search", "find"}:
             command = ["restic", "ls", "--json", snapshot_id, path]
         elif operation == "dump" and archive:
             command = ["restic", "dump", "-a", "zip", snapshot_id, path]
@@ -1262,6 +1304,10 @@ class ControlPlaneService:
             "cache_generation": self._snapshot_cache_generation(target),
             "storage_context": storage_context,
         }
+        if operation in {"browse", "search", "find"}:
+            payload["max_log_bytes"] = self._effective_snapshot_explorer_listing_max_output_bytes(
+                self.get_settings()
+            )
         if request_id is not None:
             payload.update(
                 {
@@ -1463,9 +1509,13 @@ class ControlPlaneService:
         rclone_conf_secret_id: Optional[str] = None,
         global_cron_expression: Optional[str] = None,
         control_plane_public_url: Optional[str] = None,
+        snapshot_explorer_listing_max_output_bytes: Optional[int] = None,
     ) -> SettingsRecord:
         if not self.settings_repository:
             raise ValueError("settings repository not configured")
+        normalized_listing_limit = self._validate_snapshot_explorer_listing_max_output_bytes(
+            snapshot_explorer_listing_max_output_bytes
+        )
         existing = self.settings_repository.get() or SettingsRecord()
         if restic_repository_base is not None:
             existing.restic_repository_base = restic_repository_base
@@ -1483,6 +1533,8 @@ class ControlPlaneService:
             existing.global_cron_expression = global_cron_expression.strip() or None
         if control_plane_public_url is not None:
             existing.control_plane_public_url = control_plane_public_url.strip()
+        if normalized_listing_limit is not None:
+            existing.snapshot_explorer_listing_max_output_bytes = normalized_listing_limit
         existing.updated_at = utcnow()
         return self.settings_repository.save(existing)
 
@@ -1816,10 +1868,14 @@ class ControlPlaneService:
             if key not in raw:
                 continue
             value = raw[key]
+            if key == "status_code":
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 999:
+                    continue
             if key == "error":
                 safe[key] = self._redact_job_text(value, self._job_sensitive_values(job))[:2048]
             else:
                 safe[key] = self._safe_public_value(value, job)
+        safe.update(self._safe_snapshot_listing_diagnostics(raw))
         context = self._safe_storage_context(raw.get("storage_context"))
         if context:
             safe["storage_context"] = context
@@ -1841,6 +1897,39 @@ class ControlPlaneService:
             value = raw.get(key)
             if isinstance(value, dict):
                 safe[key] = self._safe_public_value(value, job)
+        return safe
+
+    @classmethod
+    def _safe_snapshot_listing_diagnostics(cls, summary: Any) -> Dict[str, Any]:
+        if not isinstance(summary, dict):
+            return {}
+        safe: Dict[str, Any] = {}
+        status_code = summary.get("status_code")
+        if isinstance(status_code, int) and not isinstance(status_code, bool) and 0 <= status_code <= 999:
+            safe["status_code"] = status_code
+        mode = summary.get("listing_mode")
+        if mode in cls.SNAPSHOT_LISTING_MODES:
+            safe["listing_mode"] = mode
+        complete = summary.get("listing_complete")
+        if isinstance(complete, bool):
+            safe["listing_complete"] = complete
+        entry_count = summary.get("listing_entry_count")
+        if (
+            isinstance(entry_count, int)
+            and not isinstance(entry_count, bool)
+            and 0 <= entry_count <= cls.MAX_SNAPSHOT_LISTING_DIAGNOSTIC_COUNT
+        ):
+            safe["listing_entry_count"] = entry_count
+        output_limit = summary.get("listing_output_limit_bytes")
+        if (
+            isinstance(output_limit, int)
+            and not isinstance(output_limit, bool)
+            and 0 < output_limit <= cls.MAX_SNAPSHOT_LISTING_OUTPUT_BYTES
+        ):
+            safe["listing_output_limit_bytes"] = output_limit
+        error_code = summary.get("listing_error_code")
+        if error_code in cls.SNAPSHOT_LISTING_ERROR_CODES:
+            safe["listing_error_code"] = error_code
         return safe
 
     def _job_public_view(self, job: JobRecord) -> Dict[str, Any]:
@@ -2182,6 +2271,43 @@ class ControlPlaneService:
             raise ValueError(f"max_output_bytes must be between 1 and {maximum}")
         return value
 
+    @staticmethod
+    def _validate_snapshot_explorer_listing_max_output_bytes(value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < SettingsRecord.MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+            or value > SettingsRecord.MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+        ):
+            raise ValueError(
+                "snapshot_explorer_listing_max_output_bytes must be an integer between "
+                f"{SettingsRecord.MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES} and "
+                f"{SettingsRecord.MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES}"
+            )
+        return value
+
+    @staticmethod
+    def _effective_snapshot_explorer_listing_max_output_bytes(settings: Optional[SettingsRecord]) -> int:
+        value = (
+            getattr(
+                settings,
+                "snapshot_explorer_listing_max_output_bytes",
+                SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES,
+            )
+            if settings is not None
+            else SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+        )
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < SettingsRecord.MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+            or value > SettingsRecord.MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+        ):
+            return SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+        return value
+
     def _validate_snapshot_metadata_target(self, target_id: str, snapshot_id: str) -> None:
         for candidate_target in self.target_repository.list():
             for snapshot in self.snapshot_repository.list_by_target(candidate_target.id):
@@ -2203,10 +2329,21 @@ class ControlPlaneService:
             error = "job canceled"
         if not error and status == JobStatus.FAILED:
             error = "snapshot read failed"
+        if status == JobStatus.SUCCEEDED and error:
+            status = JobStatus.FAILED
+        if (
+            job.command == "snapshot.ls"
+            and status == JobStatus.SUCCEEDED
+            and summary.get("listing_complete") is not True
+        ):
+            status = JobStatus.FAILED
+            error = error or "snapshot tree listing was incomplete"
+        if error:
+            error = self._redact_job_text(error, self._job_sensitive_values(job))[:2048]
         source = summary.get("source")
         if not isinstance(source, str) or not source:
             source = "durable" if status != JobStatus.SUCCEEDED else "restic"
-        return {
+        contract = {
             "schema_version": 1,
             "request_id": payload.get("request_id"),
             "job_id": job.id,
@@ -2217,6 +2354,8 @@ class ControlPlaneService:
             "b64_content": b64_content,
             "error": error,
         }
+        contract.update(self._safe_snapshot_listing_diagnostics(summary))
+        return contract
 
     def _repository_fingerprint(self, target: BackupTargetRecord) -> str:
         repository = (target.runtime_environment or {}).get("RESTIC_REPOSITORY")

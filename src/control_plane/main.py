@@ -1139,6 +1139,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     rclone_conf_secret_id=body.get("rclone_conf_secret_id"),
                     global_cron_expression=body.get("global_cron_expression"),
                     control_plane_public_url=body.get("control_plane_public_url"),
+                    snapshot_explorer_listing_max_output_bytes=body.get(
+                        "snapshot_explorer_listing_max_output_bytes"
+                    ),
                 )
                 return self._write_json(200, _to_jsonable(settings))
             if len(parts) == 4 and parts[:3] == ["api", "v1", "secrets"]:

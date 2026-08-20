@@ -58,6 +58,17 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         read_command = read_runtime.client.containers.run.call_args.kwargs["command"]
         self.assertEqual(read_command, ["restic", "snapshots", "--json", "--no-lock"])
 
+        tree_runtime = self.runtime(self.container(logs=b'{"nodes":[]}'), no_lock=True)
+        tree_result = tree_runtime.run_runtime_job(
+            "runtime",
+            {"command": ["restic", "cat", "tree", "abcdef12:/packages"]},
+        )
+        self.assertTrue(tree_result["success"])
+        self.assertEqual(
+            tree_runtime.client.containers.run.call_args.kwargs["command"],
+            ["restic", "cat", "tree", "abcdef12:/packages", "--no-lock"],
+        )
+
         for command in ("/root/backup.sh", "restic forget --keep-last 1", "restic prune"):
             write_runtime = self.runtime(self.container(), no_lock=True)
             write_result = write_runtime.run_runtime_job("runtime", {"command": command})
@@ -170,6 +181,10 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         cases = (
             {"command": "restic ls --json not-a-restic-id /"},
             {"command": "restic ls --json abcdef12 /../secret"},
+            {"command": "restic cat tree not-a-restic-id"},
+            {"command": "restic cat tree abcdef12:relative"},
+            {"command": "restic cat tree abcdef12:/"},
+            {"command": ["restic", "cat", "tree", "abcdef12:/safe", "extra"]},
             {
                 "command": "restic ls --json abcdef12 /",
                 "target_id": "target-a",
@@ -186,6 +201,30 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "traversal"):
             DockerRuntimeAdapter.normalize_snapshot_path("/safe/../secret")
+
+    def test_cat_tree_allowlist_normalizes_safe_targets_and_rejects_variants(self):
+        self.assertEqual(
+            DockerRuntimeAdapter._runtime_command_argv(["restic", "cat", "tree", "abcdef12"]),
+            ["restic", "cat", "tree", "abcdef12"],
+        )
+        self.assertEqual(
+            DockerRuntimeAdapter._runtime_command_argv(["restic", "cat", "tree", "abcdef12:/packages/"]),
+            ["restic", "cat", "tree", "abcdef12:/packages"],
+        )
+        self.assertTrue(
+            DockerRuntimeAdapter._is_snapshot_metadata_command(
+                ["restic", "--cache-dir", DockerRuntimeAdapter.CACHE_MOUNT_PATH, "cat", "tree", "abcdef12:/packages", "--no-lock"]
+            )
+        )
+        for command in (
+            ["restic", "cat", "tree", "abcdef12:/"],
+            ["restic", "cat", "tree", "abcdef12:relative"],
+            ["restic", "cat", "tree", "abcdef12:/safe", "--json"],
+            ["restic", "cat", "blob", "abcdef12"],
+            ["restic", "cat", "tree", "abcdef12:/safe/../secret"],
+        ):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                DockerRuntimeAdapter._runtime_command_argv(command)
 
     def test_timeout_stops_then_removes_only_the_request_container(self):
         container = self.container()
@@ -341,6 +380,60 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(result["status_code"], 413)
         self.assertEqual(result["stdout_bytes"], b"")
 
+    def test_snapshot_metadata_log_limit_can_exceed_generic_default_but_stays_bounded(self):
+        over_default = b"x" * (DockerRuntimeAdapter.MAX_LOG_BYTES + 1)
+        metadata = self.runtime(self.container(logs=over_default))
+        result = metadata.run_runtime_job(
+            "runtime",
+            {
+                "command": "restic snapshots --json",
+                "max_log_bytes": 8 * 1024 * 1024,
+            },
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(len(result["logs"]), len(over_default))
+
+        generic = self.runtime(self.container(logs=over_default))
+        result = generic.run_runtime_job("runtime", {"command": "/root/backup.sh"})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status_code"], 413)
+
+        over_configured = self.runtime(
+            self.container(logs=b"x" * (8 * 1024 * 1024 + 1))
+        )
+        result = over_configured.run_runtime_job(
+            "runtime",
+            {
+                "command": "restic snapshots --json",
+                "max_log_bytes": 8 * 1024 * 1024,
+            },
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status_code"], 413)
+
+        rejected = self.runtime(self.container())
+        result = rejected.run_runtime_job(
+            "runtime",
+            {
+                "command": "restic snapshots --json",
+                "max_log_bytes": DockerRuntimeAdapter.MAX_SNAPSHOT_METADATA_LOG_BYTES + 1,
+            },
+        )
+        self.assertFalse(result["success"])
+        self.assertIn("outside the permitted bounds", result["error"])
+        rejected.client.containers.run.assert_not_called()
+
+        tree = self.runtime(self.container(logs=b"x" * (DockerRuntimeAdapter.MAX_LOG_BYTES + 1)))
+        tree_result = tree.run_runtime_job(
+            "runtime",
+            {
+                "command": ["restic", "cat", "tree", "abcdef12"],
+                "max_log_bytes": 8 * 1024 * 1024,
+            },
+        )
+        self.assertTrue(tree_result["success"])
+        self.assertEqual(len(tree_result["logs"]), DockerRuntimeAdapter.MAX_LOG_BYTES + 1)
+
 
 class WorkerReadPathTests(unittest.TestCase):
     def test_snapshot_parser_is_bounded(self):
@@ -351,6 +444,22 @@ class WorkerReadPathTests(unittest.TestCase):
         parsed = WorkerAgentService._parse_snapshot_ls_entries(entries, max_entries=7)
         self.assertEqual(len(parsed), 7)
         self.assertEqual(parsed[0]["path"], "/file-0")
+
+    def test_snapshot_parser_uses_configured_metadata_log_limit(self):
+        entry = '{"struct_type":"node","type":"file","path":"/after-limit"}'
+        logs = "x" * (WorkerAgentService.MAX_LOG_CHARS + 16) + "\n" + entry
+
+        parsed = WorkerAgentService._parse_snapshot_ls_entries(
+            logs,
+            max_log_bytes=8 * 1024 * 1024,
+        )
+
+        self.assertEqual(parsed, [{"struct_type": "node", "type": "file", "path": "/after-limit"}])
+        with self.assertRaises(ValueError):
+            WorkerAgentService._parse_snapshot_ls_entries(
+                entry,
+                max_log_bytes=WorkerAgentService.MAX_SNAPSHOT_METADATA_LOG_CHARS + 1,
+            )
 
     def test_storage_about_is_an_interactive_command(self):
         self.assertIn("storage.about", WorkerAgentService.INTERACTIVE_COMMANDS)
@@ -519,7 +628,7 @@ class WorkerReadPathTests(unittest.TestCase):
 
         client = Client()
         runtime = Mock()
-        runtime.run_runtime_job.return_value = {"success": True, "logs": "[]", "stderr": ""}
+        runtime.run_runtime_job.return_value = {"success": True, "logs": '{"nodes":[]}', "stderr": ""}
         service = WorkerAgentService(
             WorkerAgentConfig("http://control-plane", "worker", "host", worker_id="worker"),
             client,

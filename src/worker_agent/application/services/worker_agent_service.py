@@ -197,6 +197,7 @@ class _JobProgressReporter:
 class WorkerAgentService:
     MAX_LOG_LINES = 1000
     MAX_LOG_CHARS = 4 * 1024 * 1024
+    MAX_SNAPSHOT_METADATA_LOG_CHARS = DockerRuntimeAdapter.MAX_SNAPSHOT_METADATA_LOG_BYTES
     MAX_SNAPSHOT_ENTRIES = 10_000
     MAX_LIVE_POLL_REQUESTS = 16
     MAX_LIVE_FILE_BYTES = 64 * 1024 * 1024
@@ -530,7 +531,24 @@ class WorkerAgentService:
                 log_lines=self._recovery_log_lines(command, inspection, status, error),
             )
 
-        if command in ("snapshot.ls", "snapshot.search", "snapshot.find"):
+        if command == "snapshot.ls":
+            error = "Snapshot tree listing was unavailable after worker restart."
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={
+                    "status_code": status_code,
+                    "recovery": recovery,
+                    "entries": [],
+                    "listing_mode": "tree",
+                    "listing_complete": False,
+                    "listing_entry_count": 0,
+                    "listing_error_code": "runtime_failure",
+                    "error": error,
+                },
+                log_lines=self._recovery_log_lines(command, inspection, JobStatus.FAILED, error),
+            )
+
+        if command in ("snapshot.search", "snapshot.find"):
             entries = self._parse_snapshot_ls_entries(inspection.get("logs", ""))
             error = None if runtime_ok else f"{command} runtime exited with status code {status_code}."
             status = JobStatus.SUCCEEDED if runtime_ok else JobStatus.FAILED
@@ -634,6 +652,7 @@ class WorkerAgentService:
         logs: str,
         max_entries: Optional[int] = None,
         path: Optional[str] = None,
+        max_log_bytes: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         if not isinstance(logs, str) or not logs:
             return []
@@ -642,7 +661,15 @@ class WorkerAgentService:
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("snapshot entry limit must be positive")
         limit = min(limit, WorkerAgentService.MAX_SNAPSHOT_ENTRIES)
-        logs = logs[: WorkerAgentService.MAX_LOG_CHARS]
+        log_limit = max_log_bytes if max_log_bytes is not None else WorkerAgentService.MAX_LOG_CHARS
+        if (
+            isinstance(log_limit, bool)
+            or not isinstance(log_limit, int)
+            or log_limit <= 0
+            or log_limit > WorkerAgentService.MAX_SNAPSHOT_METADATA_LOG_CHARS
+        ):
+            raise ValueError("snapshot metadata log limit is outside the permitted bounds")
+        logs = logs[:log_limit]
         requested_path = None
         if path is not None:
             requested_path = posixpath.normpath(path or "/")
@@ -684,6 +711,88 @@ class WorkerAgentService:
                 if len(entries) >= limit:
                     return entries
         return entries
+
+    @staticmethod
+    def _parse_snapshot_tree_entries(
+        logs: str,
+        path: Optional[str] = None,
+        max_entries: Optional[int] = None,
+        max_log_bytes: Optional[int] = None,
+    ) -> tuple[List[Dict[str, Any]], bool, Optional[str], int]:
+        limit = max_entries if max_entries is not None else WorkerAgentService.MAX_SNAPSHOT_ENTRIES
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("snapshot entry limit must be positive")
+        limit = min(limit, WorkerAgentService.MAX_SNAPSHOT_ENTRIES)
+        log_limit = max_log_bytes if max_log_bytes is not None else DockerRuntimeAdapter.MAX_LOG_BYTES
+        if (
+            isinstance(log_limit, bool)
+            or not isinstance(log_limit, int)
+            or log_limit <= 0
+            or log_limit > WorkerAgentService.MAX_SNAPSHOT_METADATA_LOG_CHARS
+        ):
+            raise ValueError("snapshot metadata log limit is outside the permitted bounds")
+
+        try:
+            requested_path = DockerRuntimeAdapter.normalize_snapshot_path(path or "/")
+        except (TypeError, ValueError):
+            return [], False, "snapshot tree path is invalid", 0
+        if not isinstance(logs, str) or not logs.strip():
+            return [], False, "snapshot tree JSON is empty or incomplete", 0
+        try:
+            tree = json.loads(logs[:log_limit])
+        except json.JSONDecodeError:
+            return [], False, "snapshot tree JSON is malformed or incomplete", 0
+        if not isinstance(tree, dict) or not isinstance(tree.get("nodes"), list):
+            return [], False, "snapshot tree JSON is malformed or incomplete", 0
+
+        nodes = tree["nodes"]
+        if len(nodes) > WorkerAgentService.MAX_SNAPSHOT_ENTRIES:
+            return [], False, "snapshot tree listing exceeded the permitted entry limit", WorkerAgentService.MAX_SNAPSHOT_ENTRIES + 1
+
+        entries: List[Dict[str, Any]] = []
+        base_path = requested_path.rstrip("/") or "/"
+        for node in nodes:
+            if not isinstance(node, dict):
+                return [], False, "snapshot tree JSON is malformed or incomplete", 0
+            name = node.get("name")
+            node_type = node.get("type")
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in {".", ".."}
+                or "/" in name
+                or "\\" in name
+                or "\x00" in name
+                or any(ord(character) < 32 for character in name)
+                or len(name) > DockerRuntimeAdapter.MAX_SNAPSHOT_PATH_LENGTH
+                or node_type not in {"file", "dir", "symlink"}
+            ):
+                return [], False, "snapshot tree JSON is malformed or incomplete", 0
+
+            child_path = posixpath.normpath(posixpath.join(base_path, name))
+            prefix = "/" if base_path == "/" else f"{base_path}/"
+            if not child_path.startswith(prefix) or child_path == requested_path:
+                return [], False, "snapshot tree JSON is malformed or incomplete", 0
+
+            entry: Dict[str, Any] = {
+                "struct_type": "node",
+                "type": node_type,
+                "path": child_path,
+            }
+            size = node.get("size")
+            if isinstance(size, int) and not isinstance(size, bool) and 0 <= size <= (1 << 63) - 1:
+                entry["size"] = size
+            subtree = node.get("subtree")
+            if isinstance(subtree, str) and re.fullmatch(r"[0-9a-f]{64}", subtree, re.IGNORECASE):
+                entry["subtree"] = subtree
+            for metadata_name in ("mtime", "atime", "ctime"):
+                metadata_value = node.get(metadata_name)
+                if isinstance(metadata_value, str) and len(metadata_value) <= 128:
+                    entry[metadata_name] = metadata_value
+            if len(entries) < limit:
+                entries.append(entry)
+
+        return entries, True, None, len(nodes)
 
     @staticmethod
     def _filter_snapshot_entries(entries: List[Dict[str, Any]], query: Optional[str], max_entries: Optional[int]) -> List[Dict[str, Any]]:
@@ -728,6 +837,34 @@ class WorkerAgentService:
         return f"{command} runtime exited with status code {code_text}."
 
     @staticmethod
+    def _snapshot_listing_output_limit(payload: Dict[str, Any]) -> int:
+        value = payload.get("max_log_bytes")
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 < value <= DockerRuntimeAdapter.MAX_SNAPSHOT_METADATA_LOG_BYTES
+        ):
+            return value
+        return DockerRuntimeAdapter.MAX_LOG_BYTES
+
+    @staticmethod
+    def _snapshot_listing_error_code(status_code: Any, error: Any) -> str:
+        text = str(error or "").casefold()
+        if "malformed" in text or "incomplete" in text or "tree json" in text:
+            return "malformed_tree"
+        if "entry limit" in text:
+            return "entry_limit"
+        if status_code == 413 or any(marker in text for marker in ("exceed", "limit", "too large", "truncat")):
+            return "output_limit"
+        if status_code == 124 or "timed out" in text or "timeout" in text:
+            return "timeout"
+        if "repository" in text and ("not initialized" in text or "not configured" in text):
+            return "repository"
+        if any(marker in text for marker in ("path", "snapshot", "tree target")) and status_code not in (None, 0):
+            return "path_failure"
+        return "runtime_failure"
+
+    @staticmethod
     def _snapshot_cache_context(command: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         environment = payload.get("environment") or {}
         if not isinstance(environment, dict):
@@ -740,6 +877,9 @@ class WorkerAgentService:
             repository_fingerprint = DockerRuntimeAdapter.repository_fingerprint(repository)
         except (TypeError, ValueError):
             return None
+        max_log_bytes = payload.get("max_log_bytes")
+        if max_log_bytes is None:
+            max_log_bytes = DockerRuntimeAdapter.MAX_LOG_BYTES
         return {
             "target_id": target_id,
             "repository": repository,
@@ -750,6 +890,7 @@ class WorkerAgentService:
             "path": payload.get("path") or "/",
             "query": payload.get("query"),
             "max_entries": payload.get("max_entries"),
+            "max_log_bytes": max_log_bytes,
         }
 
     def _execute_snapshot_metadata(
@@ -765,9 +906,24 @@ class WorkerAgentService:
 
         if self._storage_repository_unconfigured(payload):
             error = self.UNCONFIGURED_RESTIC_REPOSITORY_ERROR
+            result_summary = {
+                "target_id": payload.get("target_id"),
+                "storage_context": self._storage_context(payload),
+                "error": error,
+            }
+            if command == "snapshot.ls":
+                result_summary.update(
+                    {
+                        "listing_mode": "tree",
+                        "listing_complete": False,
+                        "listing_entry_count": 0,
+                        "listing_output_limit_bytes": self._snapshot_listing_output_limit(payload),
+                        "listing_error_code": "repository",
+                    }
+                )
             return WorkerJobExecutionResult(
                 status=JobStatus.FAILED,
-                result_summary={"target_id": payload.get("target_id"), "storage_context": self._storage_context(payload), "error": error},
+                result_summary=result_summary,
                 log_lines=direct_log_lines + [error],
             )
 
@@ -822,11 +978,46 @@ class WorkerAgentService:
                 if status != JobStatus.SUCCEEDED
                 else None
             )
-            entries = self._parse_snapshot_ls_entries(
-                summary.get("logs", ""),
-                None if command in ("snapshot.search", "snapshot.find") else payload.get("max_entries"),
-                path=payload.get("path") if command == "snapshot.ls" else None,
-            )
+            listing_fields: Dict[str, Any] = {}
+            if command == "snapshot.ls":
+                listing_limit = self._snapshot_listing_output_limit(payload)
+                listing_fields = {
+                    "listing_mode": "tree",
+                    "listing_complete": False,
+                    "listing_entry_count": 0,
+                    "listing_output_limit_bytes": listing_limit,
+                }
+                entries: List[Dict[str, Any]] = []
+                if status == JobStatus.SUCCEEDED:
+                    entries, complete, parse_error, total_count = self._parse_snapshot_tree_entries(
+                        summary.get("logs", ""),
+                        path=payload.get("path"),
+                        max_entries=payload.get("max_entries"),
+                        max_log_bytes=listing_limit,
+                    )
+                    listing_fields["listing_entry_count"] = min(
+                        total_count,
+                        self.MAX_SNAPSHOT_ENTRIES + 1,
+                    )
+                    if complete:
+                        listing_fields["listing_complete"] = True
+                    else:
+                        status = JobStatus.FAILED
+                        error = parse_error or "snapshot tree JSON is malformed or incomplete"
+                        listing_fields["listing_error_code"] = self._snapshot_listing_error_code(
+                            summary.get("status_code"), error
+                        )
+                else:
+                    listing_fields["listing_error_code"] = self._snapshot_listing_error_code(
+                        summary.get("status_code"), error
+                    )
+            else:
+                entries = self._parse_snapshot_ls_entries(
+                    summary.get("logs", ""),
+                    None if command in ("snapshot.search", "snapshot.find") else payload.get("max_entries"),
+                    path=None,
+                    max_log_bytes=payload.get("max_log_bytes"),
+                )
             if command in ("snapshot.search", "snapshot.find"):
                 entries = self._filter_snapshot_entries(entries, payload.get("query"), payload.get("max_entries"))
             value = {
@@ -835,7 +1026,13 @@ class WorkerAgentService:
                 "status_code": summary.get("status_code"),
                 "target_id": payload.get("target_id"),
                 "entries": entries,
+                **listing_fields,
             }
+            if command == "snapshot.ls" and error and "listing_error_code" not in listing_fields:
+                listing_fields["listing_error_code"] = self._snapshot_listing_error_code(
+                    summary.get("status_code"), error
+                )
+                value["listing_error_code"] = listing_fields["listing_error_code"]
             if error:
                 value["error"] = error
             if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
@@ -880,6 +1077,16 @@ class WorkerAgentService:
             result_summary["snapshots"] = value.get("snapshots", [])
         else:
             result_summary["entries"] = value.get("entries", [])
+            if command == "snapshot.ls":
+                for key in (
+                    "listing_mode",
+                    "listing_complete",
+                    "listing_entry_count",
+                    "listing_output_limit_bytes",
+                    "listing_error_code",
+                ):
+                    if key in value:
+                        result_summary[key] = value[key]
         if value.get("error"):
             result_summary["error"] = value["error"]
         log_lines = direct_log_lines if not cache_hit else direct_log_lines + ["Snapshot metadata served from Redis"]

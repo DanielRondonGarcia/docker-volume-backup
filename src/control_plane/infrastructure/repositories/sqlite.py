@@ -232,6 +232,8 @@ class SQLiteRepositoryBase:
                     restic_password_secret_id TEXT,
                     rclone_conf_secret_id TEXT,
                     global_cron_expression TEXT,
+                    control_plane_public_url TEXT NOT NULL DEFAULT '',
+                    snapshot_explorer_listing_max_output_bytes INTEGER NOT NULL DEFAULT 4194304,
                     updated_at TEXT NOT NULL
                 );
 
@@ -261,6 +263,12 @@ class SQLiteRepositoryBase:
             self._ensure_column(connection, "settings", "rclone_conf_secret_id", "TEXT")
             self._ensure_column(connection, "settings", "global_cron_expression", "TEXT")
             self._ensure_column(connection, "settings", "control_plane_public_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(
+                connection,
+                "settings",
+                "snapshot_explorer_listing_max_output_bytes",
+                "INTEGER NOT NULL DEFAULT 4194304",
+            )
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
             self._ensure_column(connection, "targets", "live_access_enabled", "INTEGER NOT NULL DEFAULT 0")
             connection.execute(
@@ -1106,6 +1114,18 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
             row = connection.execute("SELECT * FROM settings WHERE id = 'default'").fetchone()
         if not row:
             return None
+        stored_listing_limit = (
+            row["snapshot_explorer_listing_max_output_bytes"]
+            if "snapshot_explorer_listing_max_output_bytes" in row.keys()
+            else None
+        )
+        if (
+            isinstance(stored_listing_limit, bool)
+            or not isinstance(stored_listing_limit, int)
+            or stored_listing_limit < SettingsRecord.MIN_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+            or stored_listing_limit > SettingsRecord.MAX_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
+        ):
+            stored_listing_limit = SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES
         return SettingsRecord(
             id=row["id"],
             restic_repository_base=row["restic_repository_base"] or "",
@@ -1113,6 +1133,7 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
             rclone_conf_secret_id=row["rclone_conf_secret_id"],
             global_cron_expression=row["global_cron_expression"] if "global_cron_expression" in row.keys() else None,
             control_plane_public_url=row["control_plane_public_url"] if "control_plane_public_url" in row.keys() else "",
+            snapshot_explorer_listing_max_output_bytes=stored_listing_limit,
             updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
         )
 
@@ -1121,8 +1142,8 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO settings (
-                    id, restic_repository_base, restic_password_secret_id, rclone_conf_secret_id, global_cron_expression, control_plane_public_url, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, restic_repository_base, restic_password_secret_id, rclone_conf_secret_id, global_cron_expression, control_plane_public_url, snapshot_explorer_listing_max_output_bytes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.id,
@@ -1131,6 +1152,7 @@ class SQLiteSettingsRepository(SQLiteRepositoryBase, SettingsRepository):
                     settings.rclone_conf_secret_id,
                     settings.global_cron_expression,
                     settings.control_plane_public_url,
+                    settings.snapshot_explorer_listing_max_output_bytes,
                     settings.updated_at.isoformat(),
                 ),
             )

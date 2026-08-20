@@ -20,81 +20,137 @@ class SnapshotBrowserTests(unittest.TestCase):
         )
         return service
 
-    def execute_snapshot_ls(self, logs, payload=None):
+    def execute_snapshot(self, command, logs, payload=None, runtime_result=None):
         service = self.build_worker_service(logs)
-        result = service.execute_job({"command": "snapshot.ls", "payload": payload or {}})
+        if runtime_result is not None:
+            service.docker_runtime.run_runtime_job.return_value = runtime_result
+        result = service.execute_job({"command": command, "payload": payload or {}})
         return result
 
-    def test_large_ndjson_listing_keeps_root_entries_before_log_limit(self):
-        root = {"struct_type": "node", "type": "dir", "path": "/"}
-        top_level = {"struct_type": "node", "type": "dir", "path": "/top-level"}
-        files = [
-            {"struct_type": "node", "type": "file", "path": f"/file-{index}"}
-            for index in range(1001)
+    def test_tree_listing_returns_direct_children_without_scanning_descendant_like_data(self):
+        nodes = [
+            {"name": f"folder-{index}", "type": "dir", "subtree": "a" * 64}
+            for index in range(50)
         ]
-        logs = "\n".join(json.dumps(entry) for entry in [root, top_level, *files])
+        tree = {
+            "nodes": nodes,
+            "descendant_files": [{"path": f"/folder-0/file-{index}"} for index in range(10_001)],
+        }
 
-        result = self.execute_snapshot_ls(logs)
+        result = self.execute_snapshot(
+            "snapshot.ls",
+            json.dumps(tree),
+            {"path": "/", "max_entries": 200},
+        )
 
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
-        self.assertEqual(result.result_summary["entries"][:2], [root, top_level])
-        self.assertEqual(len(result.result_summary["entries"]), 1003)
-        self.assertEqual(len(result.log_lines), 1000)
+        self.assertTrue(result.result_summary["listing_complete"])
+        self.assertEqual(result.result_summary["listing_mode"], "tree")
+        self.assertEqual(result.result_summary["listing_entry_count"], 50)
+        self.assertEqual(len(result.result_summary["entries"]), 50)
+        self.assertEqual(result.result_summary["entries"][0]["path"], "/folder-0")
+        self.assertEqual(result.result_summary["entries"][0]["type"], "dir")
 
-    def test_browse_filters_requested_path_before_visible_limit(self):
+    def test_tree_listing_joins_requested_path_and_preserves_safe_metadata(self):
         requested_path = "/backup/baget/packages/packages"
-        unrelated = [
-            {
-                "struct_type": "node",
-                "type": "file",
-                "path": f"{requested_path}/Old.Package.{index}/1.0.0/Old.Package.{index}.nupkg",
-            }
-            for index in range(200)
-        ]
-        nested_package_file = {
-            "struct_type": "node",
-            "type": "file",
-            "path": f"{requested_path}/Nested.Package/1.0.0/Nested.Package.1.0.0.nupkg",
-        }
-        package = {
-            "struct_type": "node",
-            "type": "file",
-            "path": f"{requested_path}/Acme.Library.1.0.0.nupkg",
-        }
-        logs = "\n".join(json.dumps(entry) for entry in [*unrelated, nested_package_file, package])
-
-        result = self.execute_snapshot_ls(
-            logs,
+        result = self.execute_snapshot(
+            "snapshot.ls",
+            json.dumps(
+                {
+                    "nodes": [
+                        {"name": "Acme.Library.1.0.0.nupkg", "type": "file", "size": 1234},
+                        {"name": "Nested.Package", "type": "dir"},
+                    ]
+                }
+            ),
             {"path": requested_path, "max_entries": 200},
         )
 
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
-        self.assertNotIn("error", result.result_summary)
-        self.assertEqual(result.result_summary["entries"], [package])
+        self.assertEqual(
+            result.result_summary["entries"],
+            [
+                {
+                    "struct_type": "node",
+                    "type": "file",
+                    "path": f"{requested_path}/Acme.Library.1.0.0.nupkg",
+                    "size": 1234,
+                },
+                {
+                    "struct_type": "node",
+                    "type": "dir",
+                    "path": f"{requested_path}/Nested.Package",
+                },
+            ],
+        )
 
     def test_json_array_listing_is_parsed(self):
         root = {"struct_type": "node", "type": "dir", "path": "/"}
         file_entry = {"type": "file", "path": "/document.txt"}
         informational = {"message": "listing completed"}
 
-        result = self.execute_snapshot_ls(json.dumps([root, file_entry, informational]))
+        result = self.execute_snapshot("snapshot.search", json.dumps([root, file_entry, informational]))
 
         self.assertEqual(result.result_summary["entries"], [root, file_entry])
 
-    def test_malformed_and_informational_lines_do_not_create_entries(self):
-        logs = "\n".join(
-            [
-                "INFO listing started",
-                '{"message":"listing completed"}',
-                '{"type":"file"',
-                "INFO listing ended",
-            ]
+    def test_configured_metadata_log_limit_preserves_entries_after_former_boundary(self):
+        entry = {"struct_type": "node", "type": "file", "path": "/after-limit"}
+        logs = "x" * (WorkerAgentService.MAX_LOG_CHARS + 16) + "\n" + json.dumps(entry)
+
+        result = self.execute_snapshot(
+            "snapshot.search",
+            logs,
+            {"max_log_bytes": 8 * 1024 * 1024},
         )
 
-        result = self.execute_snapshot_ls(logs)
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertEqual(result.result_summary["entries"], [entry])
+
+    def test_empty_tree_is_a_confirmed_success(self):
+        result = self.execute_snapshot("snapshot.ls", '{"nodes":[]}', {"path": "/"})
 
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
         self.assertEqual(result.result_summary["entries"], [])
+        self.assertTrue(result.result_summary["listing_complete"])
+        self.assertEqual(result.result_summary["listing_entry_count"], 0)
+
+    def test_malformed_tree_is_failed_and_not_an_empty_success(self):
+        logs = "\n".join(
+            [
+                '{"nodes":[{"name":"folder","type":"dir"}',
+            ]
+        )
+
+        result = self.execute_snapshot("snapshot.ls", logs, {"path": "/"})
+
+        self.assertEqual(result.status, JobStatus.FAILED)
+        self.assertEqual(result.result_summary["entries"], [])
+        self.assertFalse(result.result_summary["listing_complete"])
+        self.assertIn("malformed", result.result_summary["error"])
+
+    def test_timeout_and_output_limit_are_failed_with_bounded_diagnostics(self):
+        for status_code, error_code, message in (
+            (124, "timeout", "runtime timed out after 30 seconds"),
+            (413, "output_limit", "runtime logs exceeded the permitted limit"),
+        ):
+            with self.subTest(status_code=status_code):
+                result = self.execute_snapshot(
+                    "snapshot.ls",
+                    "",
+                    {"path": "/", "max_log_bytes": 8 * 1024 * 1024},
+                    runtime_result={
+                        "success": False,
+                        "status_code": status_code,
+                        "error": message,
+                        "logs": message,
+                        "stderr": "",
+                    },
+                )
+
+                self.assertEqual(result.status, JobStatus.FAILED)
+                self.assertEqual(result.result_summary["status_code"], status_code)
+                self.assertEqual(result.result_summary["listing_error_code"], error_code)
+                self.assertFalse(result.result_summary["listing_complete"])
 
     def test_missing_repository_config_is_actionable_and_secret_safe_for_metadata(self):
         repository = "local:/sensitive/repository"
@@ -209,8 +265,31 @@ class SnapshotBrowserTests(unittest.TestCase):
 
         result = service.dispatch_snapshot_ls("target", "snapshot")
 
-        self.assertEqual(result["error"], "restic ls failed: Restic repository is not initialized.")
+        self.assertEqual(result["error"], "restic cat tree failed: Restic repository is not initialized.")
         self.assertNotIn("raw terminal detail", result["error"])
+
+    def test_legacy_snapshot_listing_marks_incomplete_result_as_failed(self):
+        service = object.__new__(ControlPlaneService)
+        service._require_target = Mock(return_value=BackupTargetRecord(name="target", worker_id="worker"))
+        service._build_snapshot_ls_payload = Mock(return_value={})
+        service.dispatch_job = Mock(return_value=SimpleNamespace(id="job-1"))
+        service._wait_for_job_completion = Mock(
+            return_value={
+                "status": JobStatus.SUCCEEDED,
+                "result_summary": {
+                    "entries": [],
+                    "listing_mode": "tree",
+                    "listing_complete": False,
+                },
+                "logs": "",
+            }
+        )
+
+        result = service.dispatch_snapshot_ls("target", "snapshot")
+
+        self.assertEqual(result["status"], JobStatus.FAILED)
+        self.assertEqual(result["error"], "snapshot tree listing was incomplete")
+        self.assertFalse(result["listing_complete"])
 
 
 if __name__ == "__main__":

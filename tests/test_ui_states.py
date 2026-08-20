@@ -355,7 +355,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             "max_entries: requestedLimit",
             "state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES)",
             "state.directoryHasMore = resultEntries.length >= requestedLimit && requestedLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES",
-            "cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore)",
+            "cacheSnapshotDirectory(state.currentSnapshot, normalizedPath, state.entries, requestedLimit, state.directoryHasMore, state.listingComplete)",
         ):
             self.assertIn(marker, browse_source)
 
@@ -369,7 +369,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             "max_entries: nextLimit",
             "state.entries = resultEntries.slice(0, SNAPSHOT_MAX_DIRECTORY_ENTRIES)",
             "state.directoryHasMore = resultEntries.length >= nextLimit && nextLimit < SNAPSHOT_MAX_DIRECTORY_ENTRIES",
-            "cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore)",
+            "cacheSnapshotDirectory(snapshotId, normalizedPath, state.entries, nextLimit, state.directoryHasMore, state.listingComplete)",
             "state.loadingMore = false",
         ):
             self.assertIn(marker, load_more_source)
@@ -390,6 +390,28 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn("max_entries: SNAPSHOT_PAGE_SIZE", prefetch_source)
         self.assertIn("resultEntries.length >= SNAPSHOT_PAGE_SIZE", prefetch_source)
         self.assertIn("loadedLimit: normalizedLimit", self.source)
+
+    def test_snapshot_browser_distinguishes_confirmed_empty_from_failed_listing(self):
+        success = re.search(r"function isSuccessfulSnapshotResult\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(success)
+        self.assertIn("if (!normalized || normalized.error) return false", success.group(0))
+        self.assertIn("listing_complete", success.group(0))
+
+        render = re.search(r"function renderSnapshotBrowser\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(render)
+        render_source = render.group(0)
+        self.assertIn("!visibleEntries.length && !notice", render_source)
+        self.assertIn("Listado confirmado", render_source)
+        self.assertIn("El listado quedó incompleto y no se puede confirmar que la carpeta esté vacía.", render_source)
+
+        for marker in (
+            "classifySnapshotListingFailure",
+            "El listado supera el límite configurado.",
+            "El listado tardó demasiado porque contiene muchos elementos.",
+            'kind: "incomplete"',
+            "state.listingComplete = false",
+        ):
+            self.assertIn(marker, self.source)
 
     def test_cold_browse_results_do_not_start_prefetch_jobs(self):
         browse = re.search(r"async function browseSnapshot\(.*?\n    \}\n\n    async function searchSnapshot", self.source, re.S)
@@ -823,6 +845,29 @@ class WorkerUiStateTests(unittest.TestCase):
         workers = re.search(r"function renderWorkers\(content\) \{.*?\n    let _editLabelsWorkerId", self.source, re.S)
         self.assertIsNotNone(workers)
         self.assertIn("openRenewWorkerModal(btn.dataset.renewEnrollment)", workers.group(0))
+
+    def test_settings_exposes_snapshot_listing_limit_in_mib_and_wires_bytes_patch(self):
+        settings = re.search(
+            r"function renderSettings\(content\) \{.*?\n    \}\n\n    async function refreshAll",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(settings)
+        settings_source = settings.group(0)
+        for marker in (
+            "snapshot_explorer_listing_max_output_bytes",
+            "snapshotListingMaxMiB",
+            "Number(settings.snapshot_explorer_listing_max_output_bytes",
+            'id="settingsSnapshotListingMaxOutput"',
+            'type="number" min="1" max="16" step="1"',
+            "restic ls --json",
+            "No cambia el límite de 8 MiB para descargar archivos",
+            'role="alert"',
+            "listingLimitMiB * 1024 * 1024",
+            'apiPatch("/api/v1/settings"',
+            "El límite del listado debe ser un número entero entre 1 y 16 MiB.",
+        ):
+            self.assertIn(marker, settings_source)
 
 
 if __name__ == "__main__":

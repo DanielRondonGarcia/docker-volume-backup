@@ -114,8 +114,9 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         query=None,
         snapshot_id="snap-1",
         cache_generation=0,
+        max_log_bytes=None,
     ):
-        return {
+        context = {
             "target_id": "target-a",
             "repository": self.REPOSITORY,
             "operation": operation,
@@ -124,6 +125,9 @@ class RedisSnapshotCacheTests(unittest.TestCase):
             "query": query,
             "cache_generation": cache_generation,
         }
+        if max_log_bytes is not None:
+            context["max_log_bytes"] = max_log_bytes
+        return context
 
     def make_cache(self, **kwargs):
         clock = kwargs.pop("clock", FakeClock())
@@ -148,7 +152,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         key = cache.key_for(context)
         repository_fingerprint = hashlib.sha256(self.REPOSITORY.encode()).hexdigest()
 
-        self.assertTrue(key.startswith("sx:v2:target-a:"))
+        self.assertTrue(key.startswith("sx:v3:target-a:"))
         self.assertIn(repository_fingerprint, key)
         self.assertIn(":entry:snapshot.search:", key)
         self.assertNotIn(self.REPOSITORY, key)
@@ -160,7 +164,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         cache, client, _ = self.make_cache()
         context = self.make_context()
         new_key = cache.key_for(context)
-        old_key = new_key.replace("sx:v2:", "sx:v1:", 1)
+        old_key = new_key.replace("sx:v3:", "sx:v2:", 1)
         client.values[old_key] = json.dumps(self.successful_value()).encode("utf-8")
 
         self.assertIsNone(cache.get(context))
@@ -173,6 +177,13 @@ class RedisSnapshotCacheTests(unittest.TestCase):
 
         self.assertNotEqual(cache.key_for(first), cache.key_for(second))
         self.assertNotEqual(cache._index_key(first), cache._index_key(second))
+
+    def test_listing_output_limit_changes_snapshot_entry_key(self):
+        cache, _, _ = self.make_cache()
+        default = self.make_context(max_log_bytes=4 * 1024 * 1024)
+        expanded = self.make_context(max_log_bytes=8 * 1024 * 1024)
+
+        self.assertNotEqual(cache.key_for(default), cache.key_for(expanded))
 
     def test_empty_environment_url_disables_cache(self):
         self.assertIsNone(RedisSnapshotCache.from_env({"SNAPSHOT_EXPLORER_REDIS_URL": ""}))
@@ -212,7 +223,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         self.assertEqual(first, (value, False, "restic"))
         self.assertEqual(second, (value, True, "redis"))
         self.assertEqual(calls, ["computed"])
-        self.assertTrue(any(key.startswith("sx:v2:") for key in client.values))
+        self.assertTrue(any(key.startswith("sx:v3:") for key in client.values))
         self.assertTrue(all(self.REPOSITORY not in key for key in client.values))
 
     def test_singleflight_lock_uses_nx_px_and_release_is_token_safe(self):
@@ -341,7 +352,7 @@ class RedisSnapshotCacheTests(unittest.TestCase):
                 cacheable=lambda result: result.get("status") == JobStatus.SUCCEEDED,
             )
         self.assertEqual(len(calls), 3)
-        self.assertFalse(any(key.startswith("sx:v2:") for key in client.values))
+        self.assertFalse(any(key.startswith("sx:v3:") for key in client.values))
 
     def test_canceled_result_is_not_cached(self):
         cache, client, _ = self.make_cache()
@@ -354,18 +365,18 @@ class RedisSnapshotCacheTests(unittest.TestCase):
             cancel_check=lambda: True,
         )
         self.assertEqual(result[1:], (False, "restic-fallback"))
-        self.assertFalse(any(key.startswith("sx:v2:") for key in client.values))
+        self.assertFalse(any(key.startswith("sx:v3:") for key in client.values))
 
     def test_worker_metadata_reads_use_redis_but_dump_stays_uncached(self):
         clock = FakeClock()
         client = FakeRedis(clock)
         cache = RedisSnapshotCache(client=client, clock=clock, sleep_fn=clock.sleep)
         runtime = Mock()
-        entry = {"struct_type": "node", "type": "file", "path": "/README.md"}
+        entry = {"name": "README.md", "type": "file", "size": 13}
         runtime.run_runtime_job.return_value = {
             "success": True,
             "status_code": 0,
-            "logs": json.dumps(entry),
+            "logs": json.dumps({"nodes": [entry]}),
             "stderr": "",
         }
         runtime.run_runtime_job_binary.return_value = {

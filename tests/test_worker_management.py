@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -12,6 +13,7 @@ from src.control_plane.domain.models import (
     JobRecord,
     JobStatus,
     SnapshotRecord,
+    SettingsRecord,
     TargetStatsRecord,
     WorkerRecord,
     WorkerStatus,
@@ -179,6 +181,43 @@ class WorkerManagementTests(unittest.TestCase):
             self.assertIsNone(auth._enrollment(digest_secret(old_pending)))
             self.assertEqual(auth._get("worker-a", "1").status, "active")
             self.assertEqual(auth.complete(new_secret)["credential_version"], "2")
+
+    def test_sqlite_settings_listing_limit_migrates_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "control-plane.db")
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE settings (
+                        id TEXT PRIMARY KEY,
+                        restic_repository_base TEXT NOT NULL DEFAULT '',
+                        restic_password_secret_id TEXT,
+                        rclone_conf_secret_id TEXT,
+                        global_cron_expression TEXT,
+                        control_plane_public_url TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO settings (id, restic_repository_base, control_plane_public_url, updated_at) VALUES (?, ?, ?, ?)",
+                    ("default", "", "", utcnow().isoformat()),
+                )
+            connection.close()
+
+            repository = SQLiteSettingsRepository(database_path)
+            self.assertEqual(
+                repository.get().snapshot_explorer_listing_max_output_bytes,
+                SettingsRecord.DEFAULT_SNAPSHOT_EXPLORER_LISTING_MAX_OUTPUT_BYTES,
+            )
+            repository.save(SettingsRecord(snapshot_explorer_listing_max_output_bytes=8 * 1024 * 1024))
+
+            loaded = repository.get()
+            self.assertEqual(loaded.snapshot_explorer_listing_max_output_bytes, 8 * 1024 * 1024)
+            with sqlite3.connect(database_path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
+            connection.close()
+            self.assertIn("snapshot_explorer_listing_max_output_bytes", columns)
 
     def test_worker_labels_reject_invalid_keys_and_allow_clear(self):
         service, _, _, _, _, _ = self.make_service()
