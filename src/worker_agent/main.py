@@ -135,6 +135,20 @@ def _labels_from_env() -> dict:
         return {}
 
 
+def _resolve_live_helper_image() -> str:
+    for variable in ("LIVE_FILE_HELPER_IMAGE", "WORKER_IMAGE"):
+        image = (os.environ.get(variable) or "").strip()
+        if image:
+            return image
+
+    for variable in ("WORKER_VERSION", "APP_VERSION"):
+        version = (os.environ.get(variable) or "").strip()
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            return f"ghcr.io/danielrondongarcia/docker-volume-backup-worker:{version}"
+
+    return "docker-volume-backup-worker-local:dev"
+
+
 def _bounded_interval(name: str, default: float, minimum: float, maximum: float) -> float:
     raw = os.environ.get(name, str(default))
     try:
@@ -289,11 +303,7 @@ def build_service() -> WorkerAgentService:
             "ghcr.io/danielrondongarcia/docker-volume-backup",
         ),
         enrollment_token=os.environ.get("WORKER_ENROLLMENT_TOKEN") or os.environ.get("WORKER_SECRET") or None,
-        live_helper_image=(
-            os.environ.get("LIVE_FILE_HELPER_IMAGE")
-            or os.environ.get("WORKER_IMAGE")
-            or "docker-volume-backup-worker-local:dev"
-        ),
+        live_helper_image=_resolve_live_helper_image(),
     )
     client = ControlPlaneClient(
         config.control_plane_url,

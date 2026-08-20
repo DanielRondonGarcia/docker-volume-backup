@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from src.control_plane.domain.models import JobStatus
 from src.worker_agent.domain.models import WorkerAgentConfig, WorkerJobExecutionResult
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
-from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource
+from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource, LiveRuntimeError
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
 from src.worker_agent.application.services.live_target_session_manager import LiveTargetSessionKey, LiveTargetSessionManager
@@ -21,6 +21,27 @@ from src.worker_agent.infrastructure.security.job_recovery_journal import Worker
 logger = logging.getLogger(__name__)
 LIVE_MOUNT_SOURCES_LIMIT = 64
 LIVE_MOUNT_FOLDER_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+LIVE_FAILURE_REASONS = {
+    "protected_volume",
+    "source_unavailable",
+    "helper_start_failed",
+    "helper_request_failed",
+    "live_session_unavailable",
+    "invalid_source",
+    "invalid_request",
+}
+
+
+class _LiveRequestFailure(RuntimeError):
+    def __init__(self, reason: str):
+        self.reason = reason if reason in LIVE_FAILURE_REASONS else "live_session_unavailable"
+        super().__init__(self.reason)
+
+
+def _safe_live_log_value(value: Any, fallback: str = "unknown") -> str:
+    if not isinstance(value, str) or not value:
+        return fallback
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:128] or fallback
 
 
 def _phase_from_line(line: str) -> Optional[str]:
@@ -289,17 +310,33 @@ class WorkerAgentService:
             return False
 
     def _process_live_request(self, worker_id: str, command: Dict[str, Any]) -> None:
-        operation_id = command.get("operation_id")
+        operation_id = command.get("operation_id") if isinstance(command, dict) else None
+        operation = command.get("operation") if isinstance(command, dict) else None
+        target_id = command.get("target_id") if isinstance(command, dict) else None
         try:
-            if not isinstance(operation_id, str) or not operation_id or command.get("worker_id") != worker_id: raise ValueError("live request is invalid")
-            key = LiveTargetSessionKey(command["target_id"], command["config_revision"], worker_id)
-            operation = command.get("operation")
+            if (
+                not isinstance(command, dict)
+                or not isinstance(operation_id, str)
+                or not operation_id
+                or command.get("worker_id") != worker_id
+                or not isinstance(target_id, str)
+                or not target_id
+                or not isinstance(command.get("config_revision"), str)
+                or not command.get("config_revision")
+                or operation not in {"watch", "unwatch", "entries", "file"}
+            ):
+                raise _LiveRequestFailure("invalid_request")
+            key = LiveTargetSessionKey(target_id, command["config_revision"], worker_id)
             descriptors = command.get("mount_sources")
-            if descriptors is None:
-                legacy_source = command.get("mount_source")
-                root = self._resolve_live_source(legacy_source)
-            else:
-                root = self._resolve_live_sources(descriptors)
+            try:
+                if descriptors is None:
+                    legacy_source = command.get("mount_source")
+                    root = self._resolve_live_source(legacy_source)
+                else:
+                    root = self._resolve_live_sources(descriptors)
+            except ValueError as exc:
+                reason = "source_unavailable" if "unavailable" in str(exc).casefold() else "invalid_source"
+                raise _LiveRequestFailure(reason) from None
             if operation == "watch":
                 self.live_sessions.begin_watch(key, target_root=root)
                 self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 200})
@@ -335,19 +372,40 @@ class WorkerAgentService:
             finally:
                 handle.release()
         except LiveAccessDeniedError:
-            try:
-                self.control_plane_client.send_live_response(
-                    worker_id,
-                    operation_id,
-                    {"status": 403, "code": "live_access_denied", "reason": "protected_volume"},
-                )
-            except Exception:
-                logger.warning("Live access-denied response failed")
-        except Exception as exc:
-            try:
-                self.control_plane_client.send_live_response(worker_id, operation_id, {"status": 400, "code": "live_request_rejected"})
-            except Exception:
-                logger.warning("Live request response failed (error_type=%s)", exc.__class__.__name__)
+            self._reject_live_request(worker_id, operation_id, operation, target_id, "protected_volume")
+        except _LiveRequestFailure as exc:
+            self._reject_live_request(worker_id, operation_id, operation, target_id, exc.reason)
+        except LiveRuntimeError as exc:
+            self._reject_live_request(worker_id, operation_id, operation, target_id, getattr(exc, "reason", "live_session_unavailable"))
+        except (KeyError, TypeError, ValueError):
+            self._reject_live_request(worker_id, operation_id, operation, target_id, "invalid_request")
+        except PermissionError:
+            self._reject_live_request(worker_id, operation_id, operation, target_id, "protected_volume")
+        except Exception:
+            self._reject_live_request(worker_id, operation_id, operation, target_id, "live_session_unavailable")
+
+    def _reject_live_request(self, worker_id, operation_id, operation, target_id, reason):
+        reason = reason if reason in LIVE_FAILURE_REASONS else "live_session_unavailable"
+        if reason == "protected_volume":
+            result = {"status": 403, "code": "live_access_denied", "reason": reason}
+        elif reason in {"invalid_source", "invalid_request"}:
+            result = {"status": 400, "code": "live_request_rejected", "reason": reason}
+        else:
+            result = {"status": 503, "code": "live_worker_unavailable", "reason": reason}
+        response_sent = True
+        try:
+            self.control_plane_client.send_live_response(worker_id, operation_id, result)
+        except Exception:
+            response_sent = False
+        safe_operation = operation if operation in {"watch", "unwatch", "entries", "file"} else "unknown"
+        logger.warning(
+            "Live operation rejected (operation=%s target_id=%s code=%s reason=%s response_sent=%s)",
+            safe_operation,
+            _safe_live_log_value(target_id),
+            result["code"],
+            result["reason"],
+            response_sent,
+        )
 
     def poll_live_once(self, limit: int = 4):
         worker_id = self.ensure_registered()

@@ -21,12 +21,27 @@ from src.worker_agent.live_file_helper import (
 
 
 class LiveRuntimeError(RuntimeError):
-    pass
+    code = "live_worker_unavailable"
+    reason = "live_session_unavailable"
+    status = 503
+
+    def __init__(self, message="live operation failed", *, code=None, reason=None, status=None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+        if reason is not None:
+            self.reason = reason
+        if status is not None:
+            self.status = status
 
 
 class LiveAccessDeniedError(LiveRuntimeError):
     code = "live_access_denied"
     reason = "protected_volume"
+    status = 403
+
+    def __init__(self, message="live access denied"):
+        super().__init__(message, code=self.code, reason=self.reason, status=self.status)
 
 
 def _is_permission_error(exc):
@@ -85,13 +100,15 @@ class _LiveHelperContainer:
         containers = getattr(first_source.client, "containers", None)
         run = getattr(containers, "run", None)
         if not callable(run):
-            raise LiveRuntimeError("live helper runtime is unavailable")
+            raise LiveRuntimeError("live helper runtime is unavailable", reason="helper_start_failed")
         try:
             self.container = run(image=first_source.image, **kwargs)
         except Exception as exc:
-            raise LiveRuntimeError("live helper container could not be started") from exc
+            if _is_permission_error(exc):
+                raise LiveAccessDeniedError() from exc
+            raise LiveRuntimeError("live helper container could not be started", reason="helper_start_failed") from exc
         if self.container is None:
-            raise LiveRuntimeError("live helper container could not be started")
+            raise LiveRuntimeError("live helper container could not be started", reason="helper_start_failed")
         self.closed = False
 
     @property
@@ -248,7 +265,7 @@ class LiveFileRuntime:
 
     def _helper_exec(self, operation, *arguments, output_limit):
         if self._helper_container is None or self._helper_container.closed:
-            raise LiveRuntimeError("live helper runtime is unavailable")
+            raise LiveRuntimeError("live helper runtime is unavailable", reason="helper_request_failed")
         try:
             result = self._helper_container.container.exec_run(
                 cmd=self._helper_command(operation, *arguments),
@@ -258,7 +275,9 @@ class LiveFileRuntime:
                 demux=True,
             )
         except Exception as exc:
-            raise LiveRuntimeError("live helper request failed") from exc
+            if _is_permission_error(exc):
+                raise LiveAccessDeniedError() from exc
+            raise LiveRuntimeError("live helper request failed", reason="helper_request_failed") from exc
 
         if isinstance(result, tuple) and len(result) == 2:
             exit_code, output = result
@@ -266,9 +285,9 @@ class LiveFileRuntime:
             exit_code = getattr(result, "exit_code", None)
             output = getattr(result, "output", None)
         if exit_code == PROTECTED_VOLUME_EXIT_CODE:
-            raise LiveAccessDeniedError("live access denied")
+            raise LiveAccessDeniedError()
         if exit_code != 0:
-            raise LiveRuntimeError("live helper request failed")
+            raise LiveRuntimeError("live helper request failed", reason="helper_request_failed")
         if isinstance(output, tuple):
             stdout = output[0] or b""
         else:
@@ -276,7 +295,7 @@ class LiveFileRuntime:
         if isinstance(stdout, str):
             stdout = stdout.encode("utf-8")
         if not isinstance(stdout, bytes) or len(stdout) > output_limit:
-            raise LiveRuntimeError("live helper response exceeded the permitted bound")
+            raise LiveRuntimeError("live helper response exceeded the permitted bound", reason="helper_request_failed")
         return stdout
 
     def _helper_json(self, operation, *arguments):
@@ -289,9 +308,9 @@ class LiveFileRuntime:
                 ).decode("utf-8")
             )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LiveRuntimeError("live helper response is invalid") from exc
+            raise LiveRuntimeError("live helper response is invalid", reason="helper_request_failed") from exc
         if not isinstance(result, dict):
-            raise LiveRuntimeError("live helper response is invalid")
+            raise LiveRuntimeError("live helper response is invalid", reason="helper_request_failed")
         return result
 
     def sign(self, operation, path, nonce, timestamp):
@@ -324,7 +343,7 @@ class LiveFileRuntime:
             entries = result.get("entries")
             next_cursor = result.get("next_cursor")
             if not isinstance(entries, list) or (next_cursor is not None and not isinstance(next_cursor, str)):
-                raise LiveRuntimeError("live helper response is invalid")
+                raise LiveRuntimeError("live helper response is invalid", reason="helper_request_failed")
             self.last_activity = self.clock()
             return {"entries": entries, "next_cursor": next_cursor}
 
@@ -332,7 +351,7 @@ class LiveFileRuntime:
             directory = confined_path(self.root, path)
             metadata = os.stat(directory, follow_symlinks=False)
             if not stat_module.S_ISDIR(metadata.st_mode):
-                raise LiveRuntimeError("live path is not a directory")
+                raise LiveRuntimeError("live path is not a directory", reason="invalid_request", status=400)
             entries, after = [], cursor or ""
             with os.scandir(directory) as scan:
                 for scanned, entry in enumerate(scan):
@@ -366,7 +385,7 @@ class LiveFileRuntime:
             raise ValueError("live file offset must be non-negative")
         limit = min(self.max_file_bytes, max_bytes if max_bytes is not None else self.max_file_bytes)
         if limit < 0:
-            raise LiveRuntimeError("live file size bound is invalid")
+            raise LiveRuntimeError("live file size bound is invalid", reason="invalid_request", status=400)
         if self.sources is not None:
             raw = self._helper_exec(
                 "read",
@@ -380,7 +399,7 @@ class LiveFileRuntime:
             )
             for start in range(0, len(raw), self.max_chunk_bytes):
                 if self._cancel.is_set() or (callable(cancel_check) and cancel_check()):
-                    raise LiveRuntimeError("live file read canceled")
+                    raise LiveRuntimeError("live file read canceled", reason="live_session_unavailable")
                 chunk = raw[start : start + self.max_chunk_bytes]
                 self.last_activity = self.clock()
                 yield chunk
@@ -414,20 +433,20 @@ class LiveFileRuntime:
 
     def _assert_watch_root(self):
         if self._cancel.is_set():
-            raise LiveRuntimeError("live watcher root is unavailable")
+            raise LiveRuntimeError("live watcher root is unavailable", reason="source_unavailable")
         if self.sources is not None:
             if self._helper_container is None or self._helper_container.closed:
-                raise LiveRuntimeError("live watcher root is unavailable")
+                raise LiveRuntimeError("live watcher root is unavailable", reason="source_unavailable")
             return
         if os.path.realpath(self.root) != self.root:
-            raise LiveRuntimeError("live watcher root is unavailable")
+            raise LiveRuntimeError("live watcher root is unavailable", reason="source_unavailable")
         try:
             metadata = os.stat(self.root, follow_symlinks=False)
         except OSError as exc:
             _raise_live_access_denied(exc)
             raise
         if not stat_module.S_ISDIR(metadata.st_mode):
-            raise LiveRuntimeError("live watcher root is unavailable")
+            raise LiveRuntimeError("live watcher root is unavailable", reason="source_unavailable")
 
     def _watch_snapshot(self):
         self._assert_watch_root()
@@ -435,7 +454,7 @@ class LiveFileRuntime:
             payload = self._helper_json("snapshot", "--max-entries", self.max_watch_entries)
             raw_entries, complete = payload.get("entries"), payload.get("complete")
             if not isinstance(raw_entries, dict) or not isinstance(complete, bool):
-                raise LiveRuntimeError("live helper response is invalid")
+                raise LiveRuntimeError("live helper response is invalid", reason="helper_request_failed")
             entries = {}
             for path, value in raw_entries.items():
                 if (
@@ -445,7 +464,7 @@ class LiveFileRuntime:
                     or len(value) != 3
                     or value[0] not in {"dir", "file"}
                 ):
-                    raise LiveRuntimeError("live helper response is invalid")
+                    raise LiveRuntimeError("live helper response is invalid", reason="helper_request_failed")
                 entries[path] = (value[0], value[1], value[2])
             return entries, complete
 
@@ -456,7 +475,7 @@ class LiveFileRuntime:
                 with os.scandir(directory) as scan:
                     for entry in scan:
                         if self._cancel.is_set():
-                            raise LiveRuntimeError("live watcher canceled")
+                            raise LiveRuntimeError("live watcher canceled", reason="live_session_unavailable")
                         if scanned >= self.max_watch_entries:
                             return entries, False
                         scanned += 1
@@ -481,15 +500,13 @@ class LiveFileRuntime:
             except OSError as exc:
                 if not relative:
                     _raise_live_access_denied(exc)
-                    raise LiveRuntimeError("live watcher root is unavailable") from exc
+                    raise LiveRuntimeError("live watcher root is unavailable", reason="source_unavailable") from exc
         return entries, True
 
     def watch_changes(self, stop_event, on_change, ready_event=None):
-        try:
-            previous, complete = self._watch_snapshot()
-        finally:
-            if ready_event is not None:
-                ready_event.set()
+        previous, complete = self._watch_snapshot()
+        if ready_event is not None:
+            ready_event.set()
         if not complete:
             on_change("resync_required", "/", "dir", None, None)
             return

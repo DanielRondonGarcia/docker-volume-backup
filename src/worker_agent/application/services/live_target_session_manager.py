@@ -14,6 +14,7 @@ class _Session:
     watch_stop: object = None
     watch_ready: object = None
     watch_thread: object = None
+    watch_error: Exception = None
 class LiveTargetSessionHandle:
     def __init__(self, manager, key, session): self.manager, self.key, self.runtime, self._session, self._released = manager, key, session.runtime, session, False
     def list_entries(self, *args, **kwargs): return self.runtime.list_entries(*args, **kwargs)
@@ -48,7 +49,10 @@ class LiveTargetSessionManager:
                 failed.set(); return False
         def run():
             try: session.runtime.watch_changes(stop, publish, ready)
-            except Exception: failed.set()
+            except Exception as exc:
+                session.watch_error = exc
+                failed.set()
+                if session.watch_ready is not None: session.watch_ready.set()
             finally:
                 if failed.is_set(): self.invalidate(key)
                 with self._lock:
@@ -71,6 +75,10 @@ class LiveTargetSessionManager:
         with self._lock:
             session = self._get_or_create(key, expected); session.watchers += 1
         if session.watch_ready is not None: session.watch_ready.wait(timeout=.5)
+        if session.watch_error is not None:
+            error = session.watch_error
+            self.invalidate(key)
+            raise error
         return True
     def end_watch(self, key):
         key = self._key(key)

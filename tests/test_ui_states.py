@@ -104,9 +104,79 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn(".targets-table .action-cell > .dropdown { display: flex;", self.css)
         self.assertIn(".table:not(.targets-table) .action-cell { display: flex;", self.css)
 
+    def test_target_polling_keeps_worker_display_state_without_heartbeat_rerenders(self):
+        fingerprint = re.search(
+            r"function workerFingerprint\(worker\) \{.*?\n    \}\n\n    async function revokeWorker",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(fingerprint)
+        fingerprint_source = fingerprint.group(0)
+        self.assertNotIn("last_seen_at", fingerprint_source)
+        self.assertIn("worker.status", fingerprint_source)
+        self.assertIn("worker.version", fingerprint_source)
+        self.assertIn("worker.labels[key]", fingerprint_source)
+
+        polling = re.search(r"function startTargetsPolling\(\) \{.*?\n    \}\n\n    function stopTargetsPolling", self.source, re.S)
+        self.assertIsNotNone(polling)
+        polling_source = polling.group(0)
+        self.assertIn("state.workers = newWorkers;", polling_source)
+        self.assertIn("newWorkers.map(workerFingerprint)", polling_source)
+        self.assertIn("if ((targetsChanged || workersChanged) && state.currentView === \"targets\") renderTargetsTable();", polling_source)
+
+    def test_target_action_dropdown_flips_clamps_and_scrolls_without_losing_button_semantics(self):
+        position = re.search(r"function positionTargetDropdown\(trigger, menu\) \{.*?\n    \}\n\n    function bindTargetActions", self.source, re.S)
+        self.assertIsNotNone(position)
+        position_source = position.group(0)
+        for marker in (
+            "trigger.getBoundingClientRect()",
+            "menu.getBoundingClientRect()",
+            "window.innerHeight",
+            "window.innerWidth",
+            "aboveTop",
+            "Math.max",
+            "Math.min",
+            "menu.style.top",
+            "menu.style.left",
+        ):
+            self.assertIn(marker, position_source)
+        for marker in (
+            'aria-haspopup="menu"',
+            'aria-expanded="false"',
+            'role="menu"',
+            "setTargetDropdownOpen(menu, false)",
+            'target.closest(".dropdown")',
+        ):
+            self.assertIn(marker, self.source)
+        for marker in ("max-height: calc(100vh - 16px)", "max-width: calc(100vw - 16px)", "overflow-y: auto"):
+            self.assertIn(marker, self.css)
+
+    def test_target_action_dropdown_survives_rerenders_and_keeps_keyboard_focus(self):
+        body = re.search(
+            r"function renderTargetsTableBody\(preservedDropdown = captureTargetDropdownState\(\)\) \{.*?\n    function renderVolumeTargetsCell",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(body)
+        body_source = body.group(0)
+        self.assertIn("restoreTargetDropdownState(preservedDropdown);", body_source)
+        self.assertNotIn("closeTargetDropdowns()", body_source)
+
+        view = re.search(r"function setView\(view\) \{.*?\n    function route", self.source, re.S)
+        self.assertIsNotNone(view)
+        view_source = view.group(0)
+        for marker in ("preservedTargetDropdown", "captureTargetDropdownState()", "restoreTargetDropdownState(preservedTargetDropdown)"):
+            self.assertIn(marker, view_source)
+
+        polling = re.search(r"function startTargetsPolling\(\) \{.*?\n    \}\n\n    function stopTargetsPolling", self.source, re.S)
+        self.assertIsNotNone(polling)
+        self.assertNotIn("closeTargetDropdowns", polling.group(0))
+        for marker in ("ArrowDown", "ArrowUp", "Home", "End", "Escape", "focusTargetDropdownItem", 'role="menuitem"'):
+            self.assertIn(marker, self.source)
+
     def test_target_logs_use_exact_label_and_inline_detail_rows(self):
         target_body = re.search(
-            r"function renderTargetsTableBody\(\) \{.*?\n    function renderVolumeTargetsCell",
+            r"function renderTargetsTableBody\(.*?\) \{.*?\n    function renderVolumeTargetsCell",
             self.source,
             re.S,
         )
@@ -521,7 +591,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
 
 
     def test_live_file_browser_is_opt_in_read_only_safe_and_bounded(self):
-        for marker in ("live_access_enabled", "Habilitar acceso live", "Ver archivos en vivo", "function openLiveBrowser(target)", "/live/entries", "/live/file", "URL.createObjectURL", "Solo lectura", 'role="tree"', 'role="treeitem"', 'source.addEventListener("resync_required"', "browser.reconnects > 4", "escapeHtml(entry.name)", "status.textContent = text", "await resp.json()", "error.code", "error.reason", "function liveBrowserErrorMessage", "Acceso restringido: este volumen está protegido por permisos del sistema y no se puede leer en modo seguro."):
+        for marker in ("live_access_enabled", "Habilitar acceso live", "Ver archivos en vivo", "function openLiveBrowser(target)", "/live/entries", "/live/file", "URL.createObjectURL", "Solo lectura", 'role="tree"', 'role="treeitem"', 'source.addEventListener("resync_required"', "browser.reconnects > 4", "escapeHtml(entry.name)", "status.textContent = text", "await resp.json()", "error.code", "error.reason", "function liveBrowserErrorMessage", "function preflightLiveBrowserEvents", "Accept: \"text/event-stream\"", "source_unavailable", "helper_start_failed", "Acceso restringido: este volumen está protegido por permisos del sistema y no se puede leer en modo seguro."):
             self.assertIn(marker, self.source)
         self.assertNotIn("innerHTML = result.b64_content", self.source)
         self.assertNotIn("contenteditable", self.source.lower())

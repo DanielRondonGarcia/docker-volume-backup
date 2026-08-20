@@ -72,12 +72,52 @@ UI_ROOT = Path(__file__).resolve().parent / "ui"
 JOB_EVENT_HEARTBEAT_SECONDS = 15
 LIVE_MOUNT_SOURCES_LIMIT = 64
 LIVE_MOUNT_FOLDER_LENGTH = 64
+LIVE_WORKER_FAILURE_REASONS = {
+    "protected_volume",
+    "source_unavailable",
+    "helper_start_failed",
+    "helper_request_failed",
+    "live_session_unavailable",
+    "invalid_source",
+    "invalid_request",
+}
+LIVE_WORKER_FAILURE_MESSAGES = {
+    "protected_volume": "live access denied",
+    "source_unavailable": "live source unavailable",
+    "helper_start_failed": "live helper unavailable",
+    "helper_request_failed": "live helper request unavailable",
+    "live_session_unavailable": "live session unavailable",
+    "invalid_source": "live source is invalid",
+    "invalid_request": "live request is invalid",
+}
 
 
-class LiveAccessDeniedError(LiveSessionError):
-    def __init__(self, path: str):
-        super().__init__("live access denied")
+def _safe_live_log_value(value, fallback="unknown"):
+    if not isinstance(value, str) or not value:
+        return fallback
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:128] or fallback
+
+
+class LiveWorkerError(LiveSessionError):
+    def __init__(self, status: int, code: str, reason: str, path: str = ""):
+        self.status = status
+        self.code = code
+        self.reason = reason
         self.path = path
+        super().__init__(LIVE_WORKER_FAILURE_MESSAGES.get(reason, "live worker operation unavailable"))
+
+
+class LiveOperationalError(LiveWorkerError):
+    def __init__(self, reason="live_session_unavailable", message=None):
+        reason = reason if reason in LIVE_WORKER_FAILURE_REASONS else "live_session_unavailable"
+        super().__init__(503, "live_worker_unavailable", reason, "")
+        if message:
+            self.args = (message,)
+
+
+class LiveAccessDeniedError(LiveWorkerError):
+    def __init__(self, path: str):
+        super().__init__(403, "live_access_denied", "protected_volume", path)
 
 
 def _to_jsonable(value):
@@ -1186,10 +1226,20 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         return "/" + "/".join(parts)
 
     @staticmethod
-    def _raise_live_worker_error(path: str, result: dict):
-        if result.get("code") == "live_access_denied" and result.get("reason") == "protected_volume":
+    def _raise_live_worker_error(path: str, result: dict, operation="unknown", target_id="unknown"):
+        reason = result.get("reason") if isinstance(result, dict) else None
+        code = result.get("code") if isinstance(result, dict) else None
+        if reason not in LIVE_WORKER_FAILURE_REASONS:
+            raise LiveSessionError("live worker request failed")
+        expected_code = "live_access_denied" if reason == "protected_volume" else (
+            "live_request_rejected" if reason in {"invalid_source", "invalid_request"} else "live_worker_unavailable"
+        )
+        if code != expected_code:
+            raise LiveSessionError("live worker request failed")
+        if reason == "protected_volume":
             raise LiveAccessDeniedError(path)
-        raise LiveSessionError("live worker request failed")
+        status = 400 if reason in {"invalid_source", "invalid_request"} else 503
+        raise LiveWorkerError(status, code, reason, path)
 
     @staticmethod
     def _live_access_denied_payload(path: str):
@@ -1200,13 +1250,35 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             "path": path,
         }
 
+    @staticmethod
+    def _live_worker_error_payload(error: LiveWorkerError):
+        if isinstance(error, LiveAccessDeniedError):
+            return ControlPlaneRequestHandler._live_access_denied_payload(error.path)
+        return {
+            "error": LIVE_WORKER_FAILURE_MESSAGES.get(error.reason, "live worker operation unavailable"),
+            "code": error.code,
+            "reason": error.reason,
+        }
+
+    @staticmethod
+    def _log_live_worker_error(target_id: str, operation: str, error: LiveWorkerError):
+        logger.warning(
+            "Live operation failed (operation=%s target_id=%s status=%s code=%s reason=%s)",
+            operation if operation in {"watch", "unwatch", "entries", "file"} else "unknown",
+            _safe_live_log_value(target_id),
+            error.status,
+            error.code,
+            error.reason,
+        )
+
     def _live_context(self, target_id: str):
         try:
             context = self._control_plane_service().get_live_target_context(target_id)
         except ValueError:
             raise LiveSessionError("live access unavailable") from None
-        if not context.get("eligible") or self._live_service() is None: raise LiveSessionError("live access unavailable")
         live_service = self._live_service()
+        if not context.get("eligible"): raise LiveSessionError("live access unavailable")
+        if live_service is None: raise LiveOperationalError(message="live service unavailable")
         return live_service, LiveSessionKey(context["target_id"], context["config_revision"], context["worker_id"]), context
 
     @staticmethod
@@ -1220,7 +1292,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             or any(ord(character) < 32 for character in destination)
             or not destination.startswith("/")
         ):
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         trimmed = destination.strip("/")
         parts = trimmed.split("/") if trimmed else []
         normalized_destination = "/" + trimmed
@@ -1231,10 +1303,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             or normalized_destination.startswith(("/proc/", "/sys/", "/dev/", "/var/lib/docker/"))
             or trimmed.endswith((".sock", ".socket"))
         ):
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         folder = re.sub(r"[^A-Za-z0-9_-]+", "-", trimmed).strip("-")
         if not folder:
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         return folder[:LIVE_MOUNT_FOLDER_LENGTH].rstrip("-") or folder[:LIVE_MOUNT_FOLDER_LENGTH]
 
     def _live_mount_source(self, target_id: str) -> list[dict[str, str]]:
@@ -1242,16 +1314,16 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         if target is None: raise LiveSessionError("live access unavailable")
         runtime_volumes = target.runtime_volumes or {}
         if not isinstance(runtime_volumes, dict) or not runtime_volumes:
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         selected = target.volume_targets or []
         if not isinstance(selected, list):
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         if (
             len(selected) > LIVE_MOUNT_SOURCES_LIMIT
             or any(not isinstance(destination, str) for destination in selected)
             or len(set(selected)) != len(selected)
         ):
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
 
         by_destination = {}
         for source, spec in runtime_volumes.items():
@@ -1270,22 +1342,22 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             for destination in selected:
                 candidate = by_destination.get(destination)
                 if candidate is None:
-                    raise LiveSessionError("live worker is unavailable")
+                    raise LiveOperationalError(reason="source_unavailable")
                 ordered.append(candidate)
         else:
             ordered = list(runtime_volumes.items())
 
         if not ordered or len(ordered) > LIVE_MOUNT_SOURCES_LIMIT:
-            raise LiveSessionError("live worker is unavailable")
+            raise LiveOperationalError(reason="source_unavailable")
         descriptors, used_sources, used_destinations, used_folders = [], set(), set(), set()
         for source, spec in ordered:
             if not isinstance(source, str) or not source or len(source) > 4096 or "\x00" in source:
-                raise LiveSessionError("live worker is unavailable")
+                raise LiveOperationalError(reason="source_unavailable")
             if not isinstance(spec, dict):
-                raise LiveSessionError("live worker is unavailable")
+                raise LiveOperationalError(reason="source_unavailable")
             destination = spec.get("bind")
             if not isinstance(destination, str) or source in used_sources or destination in used_destinations:
-                raise LiveSessionError("live worker is unavailable")
+                raise LiveOperationalError(reason="source_unavailable")
             folder = self._live_mount_folder(destination)
             base_folder, suffix = folder, 2
             while folder in used_folders:
@@ -1301,7 +1373,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _live_request(self, target_id: str, operation: str):
         live_service, key, context = self._live_context(target_id)
         lane = self._live_lane()
-        if lane is None: raise LiveSessionError("live worker lane unavailable")
+        if lane is None: raise LiveOperationalError(message="live worker lane unavailable")
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
         path = self._normalize_live_path(query.get("path", ["/"])[0])
         payload = {"target_id": target_id, "config_revision": context["config_revision"], "worker_id": context["worker_id"], "operation": operation, "path": path, "mount_sources": self._live_mount_source(target_id)}; stream = None
@@ -1310,9 +1382,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             result = lane.wait(operation_id)
             lane.finish(operation_id)
             if not result:
-                raise LiveSessionError("live watcher request failed")
+                raise LiveOperationalError(message="live watcher request unavailable")
             if int(result.get("status", 500)) != 200:
-                self._raise_live_worker_error(path, result)
+                self._raise_live_worker_error(path, result, operation=operation, target_id=target_id)
             return None
         if operation == "entries":
             try:
@@ -1326,16 +1398,16 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         operation_id = lane.submit(context["worker_id"], payload, stream=stream)
         result = lane.wait(operation_id)
         if not result:
-            lane.finish(operation_id); raise LiveSessionError("live worker did not respond")
+            lane.finish(operation_id); raise LiveOperationalError(message="live worker did not respond")
         if operation == "entries":
             lane.finish(operation_id)
             if int(result.get("status", 500)) != 200:
-                self._raise_live_worker_error(path, result)
+                self._raise_live_worker_error(path, result, operation=operation, target_id=target_id)
             next_cursor = result.get("next_cursor")
             return {"entries": result.get("entries") if isinstance(result.get("entries"), list) else [], "next_cursor": live_service.issue_entry_cursor(key, path, next_cursor) if next_cursor else None}
         if int(result.get("status", 500)) != 200:
             lane.finish(operation_id)
-            self._raise_live_worker_error(path, result)
+            self._raise_live_worker_error(path, result, operation=operation, target_id=target_id)
         try:
             if not self._control_plane_service().is_live_target_eligible(target_id):
                 stream.cancel()
@@ -1361,8 +1433,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             return self._write_json(200, self._live_request(target_id, "entries"), head_only=head_only)
         except LiveLimitError:
             return self._write_json(429, {"error": "live resource limit reached"}, head_only=head_only)
-        except LiveAccessDeniedError as exc:
-            return self._write_json(403, self._live_access_denied_payload(exc.path), head_only=head_only)
+        except LiveWorkerError as exc:
+            self._log_live_worker_error(target_id, "entries", exc)
+            return self._write_json(exc.status, self._live_worker_error_payload(exc), head_only=head_only)
         except (LiveCursorError, LiveSessionError, ValueError):
             return self._write_json(404, {"error": "live access unavailable"}, head_only=head_only)
 
@@ -1371,8 +1444,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             return self._live_request(target_id, "file")
         except LiveLimitError:
             return self._write_json(429, {"error": "live resource limit reached"})
-        except LiveAccessDeniedError as exc:
-            return self._write_json(403, self._live_access_denied_payload(exc.path))
+        except LiveWorkerError as exc:
+            self._log_live_worker_error(target_id, "file", exc)
+            return self._write_json(exc.status, self._live_worker_error_payload(exc))
         except (LiveSessionError, ValueError):
             return self._write_json(404, {"error": "live access unavailable"})
 
@@ -1421,9 +1495,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 self._write_live_change_event(event)
         except (BrokenPipeError, ConnectionResetError, OSError):
             logger.debug("SSE client disconnected for live target %s", target_id)
-        except LiveAccessDeniedError as exc:
+        except LiveWorkerError as exc:
+            self._log_live_worker_error(target_id, "watch", exc)
             try:
-                self._write_json(403, self._live_access_denied_payload(exc.path))
+                self._write_json(exc.status, self._live_worker_error_payload(exc))
             except OSError:
                 pass
         except (LiveCursorError, LiveSessionError, ValueError):

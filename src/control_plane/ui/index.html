@@ -553,6 +553,9 @@
     }
 
     function setView(view) {
+      const preservedTargetDropdown = view === "targets" && state.currentView === "targets"
+        ? captureTargetDropdownState()
+        : null;
       state.currentView = view;
       if (view !== "jobs") {
         stopJobsPolling();
@@ -570,6 +573,7 @@
       };
       const renderer = viewRenderers[view];
       if (renderer) renderer(content);
+      if (preservedTargetDropdown) restoreTargetDropdownState(preservedTargetDropdown);
       if (view !== "targets" && currentLogJobId) {
         const existingJob = (state.jobs || []).find(j => j.id === currentLogJobId);
         reopenLogPanel(currentLogJobId, currentLogTargetId || (existingJob ? existingJob.target_id : null));
@@ -958,7 +962,7 @@
       const labels = Object.keys(worker.labels || {})
         .sort((a, b) => a.localeCompare(b, "es"))
         .map(key => [key, String(worker.labels[key])]);
-      return JSON.stringify([worker.id, worker.status, worker.last_seen_at || "", worker.version || "", labels]);
+      return JSON.stringify([worker.id, worker.status, worker.version || "", labels]);
     }
 
     async function revokeWorker(workerId, workerName, button) {
@@ -1419,7 +1423,7 @@ docker compose up -d
       });
     }
 
-    function renderTargetsTable() {
+    function renderTargetsTable(preservedDropdown = captureTargetDropdownState()) {
       const container = document.getElementById("targetsTableContainer");
       if (!container) return;
       const sortIcon = (key) => {
@@ -1513,10 +1517,10 @@ docker compose up -d
           renderTargetsTableBody();
         });
       }
-      renderTargetsTableBody();
+      renderTargetsTableBody(preservedDropdown);
     }
 
-    function renderTargetsTableBody() {
+    function renderTargetsTableBody(preservedDropdown = captureTargetDropdownState()) {
       const tbody = document.getElementById("targetsTbody");
       if (!tbody) return;
       const filtered = sortTargets(getFilteredTargets());
@@ -1566,21 +1570,21 @@ docker compose up -d
                <span class="slider"></span>
              </label>` : ""}
              <span class="toggle-label ${t.enabled && !executionBlocked ? "on" : ""}">${targetStatusLabel}</span>
-           </td>
-           <td class="action-cell">
-             <div class="dropdown">
-               <button class="btn ghost xs dropdown-trigger" data-dropdown="${escapeHtml(t.id)}">Acciones ▾</button>
-               <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}">
-                 ${canRunTargets ? `<button class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
-                 ${t.backup_strategy === "restic" ? `<button class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
-                  ${lastJob ? `<button class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
-                 ${t.live_access_enabled ? `<button class="dropdown-item" data-action="live-browser" data-id="${escapeHtml(t.id)}">Ver archivos en vivo</button>` : `<span class="dropdown-item live-access-state" role="status">Live: deshabilitado</span>`}
-                 ${canManageTargets ? `<button class="dropdown-item" data-action="live-toggle" data-id="${escapeHtml(t.id)}" data-enabled="${t.live_access_enabled ? "false" : "true"}">${t.live_access_enabled ? "Deshabilitar acceso live" : "Habilitar acceso live"}</button>` : ""}
-                 ${canManageTargets ? `<button class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
-                 <div class="dropdown-divider"></div>
-                 <button class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>` : ""}
-               </div>
-             </div>
+            </td>
+            <td class="action-cell">
+              <div class="dropdown">
+               <button type="button" class="btn ghost xs dropdown-trigger" id="target-dropdown-trigger-${escapeHtml(t.id)}" data-dropdown="${escapeHtml(t.id)}" aria-haspopup="menu" aria-expanded="false" aria-controls="dd-${escapeHtml(t.id)}">Acciones ▾</button>
+               <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}" role="menu" aria-labelledby="target-dropdown-trigger-${escapeHtml(t.id)}">
+                  ${canRunTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
+                  ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                   ${lastJob ? `<button type="button" role="menuitem" class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
+                  ${t.live_access_enabled ? `<button type="button" role="menuitem" class="dropdown-item" data-action="live-browser" data-id="${escapeHtml(t.id)}">Ver archivos en vivo</button>` : `<span class="dropdown-item live-access-state" role="status">Live: deshabilitado</span>`}
+                  ${canManageTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="live-toggle" data-id="${escapeHtml(t.id)}" data-enabled="${t.live_access_enabled ? "false" : "true"}">${t.live_access_enabled ? "Deshabilitar acceso live" : "Habilitar acceso live"}</button>` : ""}
+                  ${canManageTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
+                  <div class="dropdown-divider"></div>
+                  <button type="button" role="menuitem" class="dropdown-item danger" data-action="delete" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">Eliminar</button>` : ""}
+                </div>
+              </div>
            </td>
          </tr>`;
         return targetRow + (currentLogJobId && String(activeLogTargetId) === String(t.id) ? renderTargetLogDetailRow(t) : "");
@@ -1609,6 +1613,7 @@ docker compose up -d
           : (state.jobs || []).find(j => j.id === currentLogJobId);
         if (currentJob) renderTargetJobLogsInto(currentJob, activeLogContent);
       }
+      restoreTargetDropdownState(preservedDropdown);
     }
 
     function renderVolumeTargetsCell(target) {
@@ -1636,6 +1641,93 @@ docker compose up -d
       return targetJobs.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))[0];
     }
 
+    function setTargetDropdownOpen(menu, open) {
+      if (!menu) return;
+      const trigger = menu.parentElement?.querySelector(".dropdown-trigger");
+      menu.classList.toggle("open", open);
+      if (trigger) trigger.setAttribute("aria-expanded", String(open));
+      if (!open && trigger && menu.contains(document.activeElement)) trigger.focus();
+    }
+
+    function closeTargetDropdowns(except = null) {
+      document.querySelectorAll(".dropdown-menu.open").forEach(menu => {
+        if (menu !== except) setTargetDropdownOpen(menu, false);
+      });
+    }
+
+    function targetDropdownItems(menu) {
+      return Array.from(menu?.querySelectorAll('[role="menuitem"]:not(:disabled)') || []);
+    }
+
+    function focusTargetDropdownItem(menu, index) {
+      const items = targetDropdownItems(menu);
+      if (!items.length) return;
+      items[(index + items.length) % items.length].focus();
+    }
+
+    function captureTargetDropdownState() {
+      const menu = document.querySelector(".targets-table .dropdown-menu.open");
+      if (!menu) return null;
+      const trigger = menu.parentElement?.querySelector(".dropdown-trigger");
+      if (!trigger) return null;
+      const items = targetDropdownItems(menu);
+      const active = document.activeElement;
+      return {
+        targetId: trigger.dataset.dropdown,
+        focus: active === trigger ? "trigger" : menu.contains(active) ? "item" : "none",
+        itemIndex: items.indexOf(active),
+        itemAction: active?.dataset?.action || "",
+      };
+    }
+
+    function restoreTargetDropdownState(snapshot) {
+      if (!snapshot || state.currentView !== "targets") return;
+      const trigger = Array.from(document.querySelectorAll(".targets-table .dropdown-trigger"))
+        .find(button => button.dataset.dropdown === snapshot.targetId);
+      if (!trigger) return;
+      const menu = document.getElementById("dd-" + trigger.dataset.dropdown);
+      if (!menu) return;
+      positionTargetDropdown(trigger, menu);
+      if (snapshot.focus === "trigger") trigger.focus();
+      else if (snapshot.focus === "item") {
+        const items = targetDropdownItems(menu);
+        const actionIndex = items.findIndex(item => item.dataset.action === snapshot.itemAction);
+        focusTargetDropdownItem(menu, actionIndex >= 0 ? actionIndex : snapshot.itemIndex < 0 ? 0 : snapshot.itemIndex);
+      }
+      else focusTargetDropdownItem(menu, 0);
+    }
+
+    function moveTargetDropdownFocus(menu, direction) {
+      const items = targetDropdownItems(menu);
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement);
+      focusTargetDropdownItem(menu, current < 0 ? (direction > 0 ? 0 : items.length - 1) : current + direction);
+    }
+
+    function positionTargetDropdown(trigger, menu) {
+      const viewportPadding = 8;
+      const gap = 4;
+      const triggerRect = trigger.getBoundingClientRect();
+      menu.style.top = `${viewportPadding}px`;
+      menu.style.left = `${viewportPadding}px`;
+      menu.style.right = "auto";
+      menu.style.bottom = "auto";
+      setTargetDropdownOpen(menu, true);
+      const menuRect = menu.getBoundingClientRect();
+      const menuWidth = Math.min(menuRect.width, Math.max(0, window.innerWidth - viewportPadding * 2));
+      const menuHeight = Math.min(menuRect.height, Math.max(0, window.innerHeight - viewportPadding * 2));
+      const belowTop = triggerRect.bottom + gap;
+      const aboveTop = triggerRect.top - gap - menuHeight;
+      const bottomLimit = window.innerHeight - viewportPadding;
+      let top = belowTop;
+      if (top + menuHeight > bottomLimit && aboveTop >= viewportPadding) top = aboveTop;
+      top = Math.min(Math.max(top, viewportPadding), Math.max(viewportPadding, bottomLimit - menuHeight));
+      let left = triggerRect.right - menuWidth;
+      left = Math.min(Math.max(left, viewportPadding), Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding));
+      menu.style.top = `${top}px`;
+      menu.style.left = `${left}px`;
+    }
+
     function bindTargetActions() {
       const container = document.querySelector("#targetsTableContainer .table-wrap") || document.querySelector(".table-wrap");
       if (!container) return;
@@ -1645,24 +1737,53 @@ docker compose up -d
           const menu = document.getElementById("dd-" + btn.dataset.dropdown);
           if (!menu) return;
           const isOpen = menu.classList.contains("open");
-          document.querySelectorAll(".dropdown-menu.open").forEach(m => { if (m !== menu) m.classList.remove("open"); });
+          closeTargetDropdowns(menu);
           if (isOpen) {
-            menu.classList.remove("open");
+            setTargetDropdownOpen(menu, false);
             return;
           }
-          const rect = btn.getBoundingClientRect();
-          menu.style.top = (rect.bottom + 4) + "px";
-          menu.style.right = (window.innerWidth - rect.right) + "px";
-          menu.classList.add("open");
-        });
-      });
+           positionTargetDropdown(btn, menu);
+           focusTargetDropdownItem(menu, 0);
+         });
+         btn.addEventListener("keydown", (e) => {
+           if (!["ArrowDown", "ArrowUp", "Escape"].includes(e.key)) return;
+           e.preventDefault();
+           const menu = document.getElementById("dd-" + btn.dataset.dropdown);
+           if (!menu) return;
+           if (e.key === "Escape") {
+             setTargetDropdownOpen(menu, false);
+             return;
+           }
+           closeTargetDropdowns(menu);
+           if (!menu.classList.contains("open")) positionTargetDropdown(btn, menu);
+           focusTargetDropdownItem(menu, e.key === "ArrowUp" ? -1 : 0);
+         });
+       });
+       container.querySelectorAll('.dropdown-menu[role="menu"]').forEach(menu => {
+         menu.addEventListener("keydown", (e) => {
+           const trigger = menu.parentElement?.querySelector(".dropdown-trigger");
+           if (e.key === "Escape") {
+             e.preventDefault();
+             setTargetDropdownOpen(menu, false);
+             trigger?.focus();
+           } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+             e.preventDefault();
+             moveTargetDropdownFocus(menu, e.key === "ArrowDown" ? 1 : -1);
+           } else if (e.key === "Home" || e.key === "End") {
+             e.preventDefault();
+             focusTargetDropdownItem(menu, e.key === "Home" ? 0 : -1);
+           } else if (e.key === "Tab") {
+             setTargetDropdownOpen(menu, false);
+           }
+         });
+       });
       container.querySelectorAll("[data-action]").forEach(btn => {
         if (btn.dataset.action === "toggle") return;
         if (btn.classList.contains("dropdown-trigger")) return;
         btn.addEventListener("click", async (e) => {
           e.stopPropagation();
           const menu = btn.closest(".dropdown-menu");
-          if (menu) menu.classList.remove("open");
+          if (menu) setTargetDropdownOpen(menu, false);
           const action = btn.dataset.action;
           const id = btn.dataset.id;
           const jobId = btn.dataset.job;
@@ -1716,6 +1837,15 @@ docker compose up -d
         const context = path && path !== "/" ? ` Carpeta solicitada: ${path}.` : "";
         return `Acceso restringido: este volumen está protegido por permisos del sistema y no se puede leer en modo seguro.${context}`;
       }
+      const reasonMessages = {
+        source_unavailable: "La fuente configurada del target no está disponible en el worker.",
+        helper_start_failed: "El worker no pudo iniciar el helper de archivos live.",
+        helper_request_failed: "El helper de archivos live rechazó la solicitud del worker.",
+        live_session_unavailable: "El worker no pudo abrir la sesión de archivos live.",
+        invalid_source: "La fuente configurada del target no es válida para acceso live.",
+        invalid_request: "La solicitud de archivos live no es válida.",
+      };
+      if (error?.reason && reasonMessages[error.reason]) return reasonMessages[error.reason];
       return fallback;
     }
 
@@ -1786,10 +1916,42 @@ docker compose up -d
       }
     }
 
-    function connectLiveBrowserEvents() {
+    async function preflightLiveBrowserEvents(browser) {
+      const controller = new AbortController();
+      try {
+        const response = await fetch(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/events`, {
+          credentials: "same-origin",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+        });
+        if (response.ok) return;
+        const body = await response.json().catch(() => ({}));
+        const error = new Error(typeof body.error === "string" ? body.error : `${response.status} ${response.statusText}`);
+        error.status = response.status;
+        error.code = typeof body.code === "string" ? body.code : "";
+        error.reason = typeof body.reason === "string" ? body.reason : "";
+        error.path = typeof body.path === "string" ? body.path : "";
+        throw error;
+      } finally {
+        controller.abort();
+      }
+    }
+
+    async function connectLiveBrowserEvents() {
       const browser = liveBrowserState;
       if (!browser || browser.closed) return;
       setLiveBrowserStatus(browser.reconnects ? "reconnecting" : "connecting", browser.reconnects ? "Reconectando eventos..." : "Conectando eventos...");
+      try {
+        await preflightLiveBrowserEvents(browser);
+      } catch (error) {
+        if (browser !== liveBrowserState || browser.closed || error?.name === "AbortError") return;
+        browser.eventSource = null;
+        browser.reconnects = 5;
+        const message = liveBrowserErrorMessage(error, browser.path, "Eventos live no disponibles; reintenta mas tarde");
+        setLiveBrowserStatus(error?.code === "live_access_denied" ? "restricted" : "error", message);
+        return;
+      }
+      if (browser !== liveBrowserState || browser.closed) return;
       const source = new EventSource(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/events`, { withCredentials: true });
       browser.eventSource = source;
       source.onopen = () => { browser.reconnects = 0; setLiveBrowserStatus("connected", "Conectado · cambios en vivo activos"); };
@@ -5374,8 +5536,22 @@ docker compose up -d
       }
     }
 
-    document.addEventListener("click", () => {
-      document.querySelectorAll(".dropdown-menu.open").forEach(m => m.classList.remove("open"));
+    window.addEventListener("resize", () => {
+      document.querySelectorAll(".dropdown-menu.open").forEach(menu => {
+        const trigger = menu.parentElement?.querySelector(".dropdown-trigger");
+        if (trigger) positionTargetDropdown(trigger, menu);
+      });
+    });
+    window.addEventListener("scroll", () => {
+      document.querySelectorAll(".dropdown-menu.open").forEach(menu => {
+        const trigger = menu.parentElement?.querySelector(".dropdown-trigger");
+        if (trigger) positionTargetDropdown(trigger, menu);
+      });
+    }, true);
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target && target.closest(".dropdown")) return;
+      closeTargetDropdowns();
     });
 
     (async function init() {

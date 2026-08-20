@@ -1,4 +1,4 @@
-import json, os, tempfile, time, unittest
+import json, os, tempfile, threading, time, unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -199,6 +199,11 @@ class _DeniedLiveRuntime:
         return None
 
 
+class _DeniedLiveWatcherRuntime(_DeniedLiveRuntime):
+    def watch_changes(self, _stop_event, _on_change, _ready_event=None):
+        raise LiveAccessDeniedError("live access denied")
+
+
 class LiveFileRuntimeSafetyTests(unittest.TestCase):
     def test_hmac_fixed_argv_read_only_and_network_disabled(self):
         with tempfile.TemporaryDirectory() as root:
@@ -265,6 +270,133 @@ class LiveFileRuntimeSafetyTests(unittest.TestCase):
                 result,
                 {"status": 403, "code": "live_access_denied", "reason": "protected_volume"},
             )
+
+    def test_worker_propagates_watcher_start_failure_before_live_events_begin(self):
+        with tempfile.TemporaryDirectory() as root:
+            docker_client = _FakeLiveDockerClient(root)
+            control_plane_client = SimpleNamespace(
+                credential_store=SimpleNamespace(load=lambda: SimpleNamespace(secret="s" * 32)),
+                send_live_response=Mock(),
+            )
+            service = WorkerAgentService(
+                WorkerAgentConfig(
+                    "http://control-plane",
+                    "worker",
+                    "host",
+                    worker_id="worker",
+                    live_helper_image="worker-image",
+                ),
+                control_plane_client,
+                SimpleNamespace(client=docker_client),
+            )
+            service.live_sessions.runtime_factory = lambda _value: _DeniedLiveWatcherRuntime()
+            service._process_live_request(
+                "worker",
+                {
+                    "operation_id": "protected-watch",
+                    "worker_id": "worker",
+                    "target_id": "target",
+                    "config_revision": "revision",
+                    "operation": "watch",
+                    "mount_source": "volume-a",
+                },
+            )
+            self.assertEqual(
+                control_plane_client.send_live_response.call_args.args[2],
+                {"status": 403, "code": "live_access_denied", "reason": "protected_volume"},
+            )
+
+    def test_worker_classifies_operational_failures_and_logs_only_safe_fields(self):
+        def make_service(docker_client):
+            control_plane_client = SimpleNamespace(
+                credential_store=SimpleNamespace(load=lambda: SimpleNamespace(secret="s" * 32)),
+                send_live_response=Mock(),
+            )
+            return (
+                WorkerAgentService(
+                    WorkerAgentConfig(
+                        "http://control-plane",
+                        "worker",
+                        "host",
+                        worker_id="worker",
+                        live_helper_image="worker-image",
+                    ),
+                    control_plane_client,
+                    SimpleNamespace(client=docker_client),
+                ),
+                control_plane_client,
+            )
+
+        def command(operation_id, **overrides):
+            return {
+                "operation_id": operation_id,
+                "worker_id": "worker",
+                "target_id": "target",
+                "config_revision": "revision",
+                "operation": "entries",
+                "mount_source": "volume-a",
+                "path": "/",
+                "limit": 10,
+                **overrides,
+            }
+
+        with tempfile.TemporaryDirectory() as root, self.assertLogs(
+            "src.worker_agent.application.services.worker_agent_service", level="WARNING"
+        ) as captured:
+            service, client = make_service(_FakeLiveDockerClient(root))
+            service._process_live_request("worker", command("missing-source", mount_source="missing-volume"))
+            self.assertEqual(
+                client.send_live_response.call_args.args[2],
+                {"status": 503, "code": "live_worker_unavailable", "reason": "source_unavailable"},
+            )
+
+            service, client = make_service(_FakeLiveDockerClient(root))
+            service._process_live_request("worker", command("invalid-source", mount_source="/var/lib/docker/volumes"))
+            self.assertEqual(
+                client.send_live_response.call_args.args[2],
+                {"status": 400, "code": "live_request_rejected", "reason": "invalid_source"},
+            )
+
+            docker_client = _FakeLiveDockerClient(root)
+            docker_client.containers.run.side_effect = RuntimeError("permission denied: /host/secret")
+            service, client = make_service(docker_client)
+            service._process_live_request("worker", command("helper-start"))
+            self.assertEqual(
+                client.send_live_response.call_args.args[2],
+                {"status": 503, "code": "live_worker_unavailable", "reason": "helper_start_failed"},
+            )
+
+            docker_client = _FakeLiveDockerClient(root)
+            helper = _FakeLiveHelperContainer(root)
+            helper.exec_run = Mock(return_value=(1, (b"", b"helper failure: /host/secret")))
+            docker_client.containers.run.side_effect = None
+            docker_client.containers.run.return_value = helper
+            service, client = make_service(docker_client)
+            service._process_live_request("worker", command("helper-request"))
+            self.assertEqual(
+                client.send_live_response.call_args.args[2],
+                {"status": 503, "code": "live_worker_unavailable", "reason": "helper_request_failed"},
+            )
+
+            service, client = make_service(_FakeLiveDockerClient(root))
+
+            def fail_runtime(_value):
+                raise RuntimeError("credential contains /host/secret")
+
+            service.live_sessions.runtime_factory = fail_runtime
+            service._process_live_request("worker", command("session"))
+            self.assertEqual(
+                client.send_live_response.call_args.args[2],
+                {"status": 503, "code": "live_worker_unavailable", "reason": "live_session_unavailable"},
+            )
+
+        self.assertEqual(len(captured.records), 5)
+        for record in captured.records:
+            self.assertIn("operation=entries", record.getMessage())
+            self.assertIn("target_id=target", record.getMessage())
+            self.assertIn("code=", record.getMessage())
+            self.assertIn("reason=", record.getMessage())
+            self.assertNotIn("/host/secret", record.getMessage())
 
     def test_same_key_attach_reuses_and_orphan_cleanup_is_bounded(self):
         with tempfile.TemporaryDirectory() as root:
@@ -419,6 +551,52 @@ class LiveFileRuntimeSafetyTests(unittest.TestCase):
             service.live_sessions.close()
             self.assertTrue(docker_client.helper.stopped)
             self.assertTrue(docker_client.helper.removed)
+
+    def test_multi_source_watch_starts_without_inspecting_the_host_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            named_root = Path(directory, "named")
+            bind_root = Path(directory, "bind")
+            named_root.mkdir()
+            bind_root.mkdir()
+            (named_root / "README.txt").write_bytes(b"named-data")
+            (bind_root / "status.txt").write_bytes(b"bind-data")
+            source_roots = {"volume-demo": str(named_root), str(bind_root): str(bind_root)}
+            docker_client = _MultiSourceFakeDockerClient(source_roots)
+            sources = (
+                LiveFileSource("volume", "volume-demo", docker_client, "worker-image", folder="demo-files"),
+                LiveFileSource("bind", str(bind_root), docker_client, "worker-image", folder="bind-files"),
+            )
+            runtime = LiveFileRuntime(sources, "s" * 32, watch_interval=0.01)
+            stop_event = threading.Event()
+            stop_event.set()
+            ready_event = threading.Event()
+            original_realpath = os.path.realpath
+
+            def guarded_realpath(path):
+                if path == runtime.root:
+                    raise AssertionError("multi-source watch inspected the daemon root")
+                return original_realpath(path)
+
+            with patch(
+                "src.worker_agent.infrastructure.adapters.live_file_runtime.os.path.realpath",
+                side_effect=guarded_realpath,
+            ) as realpath:
+                runtime.watch_changes(stop_event, Mock(), ready_event)
+
+            self.assertTrue(ready_event.is_set())
+            self.assertNotIn(runtime.root, [call.args[0] for call in realpath.call_args_list])
+            self.assertEqual(docker_client.containers.run.call_count, 1)
+            self.assertEqual(
+                docker_client.run_kwargs["volumes"],
+                {
+                    "volume-demo": {"bind": "/target/demo-files", "mode": "ro"},
+                    str(bind_root): {"bind": "/target/bind-files", "mode": "ro"},
+                },
+            )
+            self.assertTrue(docker_client.run_kwargs["read_only"])
+            self.assertTrue(docker_client.run_kwargs["network_disabled"])
+            runtime.cancel()
+
     def test_cursors_gaps_queues_raw_limits_and_revocation_fail_closed(self):
         service = LiveFileService(cursor_secret="c" * 32, max_events=2, max_subscribers=2, queue_size=1, max_chunk_bytes=4, max_stream_bytes=8); key = LiveSessionKey("target", "revision", "worker"); first, second = service.attach(key), service.attach(key); event = service.publish_change(key, "modified", "/safe.txt", "file", 4, 1); self.assertNotIn("content", event.projection()); self.assertEqual(first.get(timeout=1)["event"]["path"], "/safe.txt")
         for index in range(2, 4): service.publish_change(key, "modified", f"/f{index}", "file")

@@ -30,7 +30,7 @@ from src.control_plane.infrastructure.repositories.in_memory import (
 )
 from src.control_plane.infrastructure.repositories.sqlite import SQLiteTargetRepository
 from src.control_plane.infrastructure.security.worker_auth import WorkerAuthState
-from src.control_plane.main import ControlPlaneApplication, ControlPlaneHTTPServer, ControlPlaneRequestHandler, LiveWorkerLane
+from src.control_plane.main import ControlPlaneApplication, ControlPlaneHTTPServer, ControlPlaneRequestHandler, LiveWorkerError, LiveWorkerLane
 from src.worker_agent.application.services.live_target_session_manager import LiveTargetSessionKey, LiveTargetSessionManager
 from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
@@ -196,6 +196,29 @@ class LiveTargetFoundationTests(unittest.TestCase):
         worker.last_seen_at = utcnow()
         self.assertFalse(service.is_live_target_eligible(target.id))
         self.assertEqual(service.get_live_target_context(target.id)["reason"], "worker_disabled")
+
+    def test_control_plane_maps_only_known_worker_reasons_to_safe_statuses(self):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        for reason, code, status in (
+            ("source_unavailable", "live_worker_unavailable", 503),
+            ("helper_request_failed", "live_worker_unavailable", 503),
+            ("invalid_source", "live_request_rejected", 400),
+            ("protected_volume", "live_access_denied", 403),
+        ):
+            with self.assertRaises(LiveWorkerError) as raised:
+                handler._raise_live_worker_error("/safe", {"status": status, "code": code, "reason": reason})
+            failure = raised.exception
+            self.assertEqual((failure.status, failure.code, failure.reason), (status, code, reason))
+            payload = handler._live_worker_error_payload(failure)
+            self.assertEqual((payload["code"], payload["reason"]), (code, reason))
+            if reason != "protected_volume":
+                self.assertNotIn("path", payload)
+
+        with self.assertRaises(LiveSessionError):
+            handler._raise_live_worker_error(
+                "/safe",
+                {"status": 500, "code": "worker_error", "reason": "raw_exception"},
+            )
 
 
 class LiveMountDescriptorTests(unittest.TestCase):
@@ -724,6 +747,35 @@ class LiveTargetAcceptanceTests(unittest.TestCase):
                 harness.live_url("entries", "?path=%2Fsafe-folder")
             )
             self.assertEqual((status, [entry["name"] for entry in safe_page["entries"]]), (200, ["status.txt"]))
+        finally:
+            harness.close()
+
+    def test_sse_worker_failure_is_logged_and_returned_before_stream_headers(self):
+        harness = _LiveHttpHarness()
+        try:
+            def reject(command):
+                harness.lane.respond(
+                    "worker-a",
+                    command["operation_id"],
+                    {"status": 503, "code": "live_worker_unavailable", "reason": "helper_start_failed"},
+                )
+
+            harness.worker._handle = reject
+            with self.assertLogs("src.control_plane.main", level="WARNING") as captured:
+                status, _, body = harness.request(harness.live_url("events"))
+            self.assertEqual(
+                (status, json.loads(body)),
+                (
+                    503,
+                    {
+                        "error": "live helper unavailable",
+                        "code": "live_worker_unavailable",
+                        "reason": "helper_start_failed",
+                    },
+                ),
+            )
+            self.assertTrue(any("operation=watch" in record.getMessage() for record in captured.records))
+            self.assertTrue(all("/host/" not in record.getMessage() for record in captured.records))
         finally:
             harness.close()
 

@@ -444,11 +444,14 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .btn.danger:disabled { opacity: .4; cursor: not-allowed; }
 
 .dropdown { position: relative; display: inline-block; }
-.dropdown-trigger { white-space: nowrap; }
+.dropdown-trigger { white-space: nowrap; touch-action: manipulation; }
 .dropdown-menu {
   display: none;
   position: fixed;
-  min-width: 200px;
+  min-width: min(200px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  box-sizing: border-box;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -457,6 +460,9 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
   padding: 4px;
   flex-direction: column;
   gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .dropdown-menu.open { display: flex; }
 .dropdown-item {
@@ -472,9 +478,12 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
   font-size: 13px;
   border-radius: var(--radius);
   cursor: pointer;
-  white-space: nowrap;
+  touch-action: manipulation;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .dropdown-item:hover:not(:disabled) { background: var(--accent); }
+.dropdown-item:focus-visible { outline: 0; box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--ring); }
 .dropdown-item:disabled { opacity: .4; cursor: not-allowed; }
 .dropdown-item.danger { color: #991b1b; }
 .dropdown-item.danger:hover { background: #fee2e2; }
