@@ -71,7 +71,7 @@ class ControlPlaneService:
     LIVE_REVISION_SCHEMA_VERSION = 1
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    SNAPSHOT_LISTING_MODES = frozenset({"tree", "ls"})
+    SNAPSHOT_LISTING_MODES = frozenset({"tree", "ls", "direct"})
     SNAPSHOT_LISTING_ERROR_CODES = frozenset(
         {"output_limit", "entry_limit", "timeout", "malformed_tree", "path_failure", "runtime_failure", "repository"}
     )
@@ -690,14 +690,14 @@ class ControlPlaneService:
             else:
                 error_msg = logs.strip().splitlines()[-1] if logs.strip() else f"job {job_status}"
             response["status"] = JobStatus.CANCELED if job_status == JobStatus.CANCELED else JobStatus.FAILED
-            response["error"] = f"restic cat tree failed: {error_msg}"
+            response["error"] = f"restic ls failed: {error_msg}"
             response["listing_complete"] = False
             return response
         if job_status == "timeout":
             response.update(
                 {
-                    "error": "restic cat tree timed out (60s)",
-                    "listing_mode": "tree",
+                    "error": "restic ls timed out (60s)",
+                    "listing_mode": "direct",
                     "listing_complete": False,
                     "listing_entry_count": 0,
                     "listing_error_code": "timeout",
@@ -722,16 +722,17 @@ class ControlPlaneService:
                         pass
         response["entries"] = entries
         if (
-            result_summary.get("listing_mode") == "tree" and result_summary.get("listing_complete") is not True
+            result_summary.get("listing_mode") in self.SNAPSHOT_LISTING_MODES
+            and result_summary.get("listing_complete") is not True
         ) or (not entries and result_summary.get("listing_complete") is not True):
             response.update(
                 {
                     "status": JobStatus.FAILED,
-                    "error": "snapshot tree listing was incomplete",
-                    "listing_mode": "tree",
+                    "error": "snapshot listing was incomplete",
+                    "listing_mode": result_summary.get("listing_mode") or "direct",
                     "listing_complete": False,
                     "listing_entry_count": 0,
-                    "listing_error_code": "malformed_tree",
+                    "listing_error_code": "runtime_failure",
                 }
             )
         return response
@@ -1281,8 +1282,7 @@ class ControlPlaneService:
         volumes = self._normalize_runtime_volumes(volumes, target)
         storage_context = self._storage_context(target, environment, resolved_files)
         if operation == "browse":
-            tree_target = snapshot_id if path == "/" else f"{snapshot_id}:{path}"
-            command = ["restic", "cat", "tree", tree_target]
+            command = ["restic", "ls", "--json", snapshot_id, path]
         elif operation in {"search", "find"}:
             command = ["restic", "ls", "--json", snapshot_id, path]
         elif operation == "dump" and archive:
@@ -2337,7 +2337,7 @@ class ControlPlaneService:
             and summary.get("listing_complete") is not True
         ):
             status = JobStatus.FAILED
-            error = error or "snapshot tree listing was incomplete"
+            error = error or "snapshot listing was incomplete"
         if error:
             error = self._redact_job_text(error, self._job_sensitive_values(job))[:2048]
         source = summary.get("source")

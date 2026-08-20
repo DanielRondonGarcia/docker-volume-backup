@@ -27,41 +27,45 @@ class SnapshotBrowserTests(unittest.TestCase):
         result = service.execute_job({"command": command, "payload": payload or {}})
         return result
 
-    def test_tree_listing_returns_direct_children_without_scanning_descendant_like_data(self):
-        nodes = [
-            {"name": f"folder-{index}", "type": "dir", "subtree": "a" * 64}
+    def test_direct_listing_returns_direct_children_without_scanning_descendant_like_data(self):
+        entries = [
+            {"struct_type": "node", "type": "dir", "path": f"/folder-{index}"}
             for index in range(50)
         ]
-        tree = {
-            "nodes": nodes,
-            "descendant_files": [{"path": f"/folder-0/file-{index}"} for index in range(10_001)],
-        }
 
         result = self.execute_snapshot(
             "snapshot.ls",
-            json.dumps(tree),
+            "\n".join(json.dumps(entry) for entry in entries),
             {"path": "/", "max_entries": 200},
         )
 
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
         self.assertTrue(result.result_summary["listing_complete"])
-        self.assertEqual(result.result_summary["listing_mode"], "tree")
+        self.assertEqual(result.result_summary["listing_mode"], "direct")
         self.assertEqual(result.result_summary["listing_entry_count"], 50)
         self.assertEqual(len(result.result_summary["entries"]), 50)
         self.assertEqual(result.result_summary["entries"][0]["path"], "/folder-0")
         self.assertEqual(result.result_summary["entries"][0]["type"], "dir")
 
-    def test_tree_listing_joins_requested_path_and_preserves_safe_metadata(self):
+    def test_direct_listing_filters_requested_path_and_preserves_safe_metadata(self):
         requested_path = "/backup/baget/packages/packages"
         result = self.execute_snapshot(
             "snapshot.ls",
-            json.dumps(
-                {
-                    "nodes": [
-                        {"name": "Acme.Library.1.0.0.nupkg", "type": "file", "size": 1234},
-                        {"name": "Nested.Package", "type": "dir"},
-                    ]
-                }
+            "\n".join(
+                json.dumps(entry)
+                for entry in (
+                    {
+                        "struct_type": "node",
+                        "type": "file",
+                        "path": f"{requested_path}/Acme.Library.1.0.0.nupkg",
+                        "size": 1234,
+                    },
+                    {
+                        "struct_type": "node",
+                        "type": "dir",
+                        "path": f"{requested_path}/Nested.Package",
+                    },
+                )
             ),
             {"path": requested_path, "max_entries": 200},
         )
@@ -106,27 +110,32 @@ class SnapshotBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
         self.assertEqual(result.result_summary["entries"], [entry])
 
-    def test_empty_tree_is_a_confirmed_success(self):
-        result = self.execute_snapshot("snapshot.ls", '{"nodes":[]}', {"path": "/"})
+    def test_empty_direct_listing_is_a_confirmed_success(self):
+        result = self.execute_snapshot("snapshot.ls", "", {"path": "/"})
 
         self.assertEqual(result.status, JobStatus.SUCCEEDED)
         self.assertEqual(result.result_summary["entries"], [])
         self.assertTrue(result.result_summary["listing_complete"])
         self.assertEqual(result.result_summary["listing_entry_count"], 0)
 
-    def test_malformed_tree_is_failed_and_not_an_empty_success(self):
-        logs = "\n".join(
-            [
-                '{"nodes":[{"name":"folder","type":"dir"}',
-            ]
+    def test_runtime_listing_failure_is_failed_and_not_an_empty_success(self):
+        result = self.execute_snapshot(
+            "snapshot.ls",
+            "runtime failure",
+            {"path": "/"},
+            runtime_result={
+                "success": False,
+                "status_code": 1,
+                "error": "runtime failure",
+                "logs": "runtime failure",
+                "stderr": "",
+            },
         )
-
-        result = self.execute_snapshot("snapshot.ls", logs, {"path": "/"})
 
         self.assertEqual(result.status, JobStatus.FAILED)
         self.assertEqual(result.result_summary["entries"], [])
         self.assertFalse(result.result_summary["listing_complete"])
-        self.assertIn("malformed", result.result_summary["error"])
+        self.assertEqual(result.result_summary["listing_error_code"], "runtime_failure")
 
     def test_timeout_and_output_limit_are_failed_with_bounded_diagnostics(self):
         for status_code, error_code, message in (
@@ -265,7 +274,7 @@ class SnapshotBrowserTests(unittest.TestCase):
 
         result = service.dispatch_snapshot_ls("target", "snapshot")
 
-        self.assertEqual(result["error"], "restic cat tree failed: Restic repository is not initialized.")
+        self.assertEqual(result["error"], "restic ls failed: Restic repository is not initialized.")
         self.assertNotIn("raw terminal detail", result["error"])
 
     def test_legacy_snapshot_listing_marks_incomplete_result_as_failed(self):
@@ -278,7 +287,7 @@ class SnapshotBrowserTests(unittest.TestCase):
                 "status": JobStatus.SUCCEEDED,
                 "result_summary": {
                     "entries": [],
-                    "listing_mode": "tree",
+                    "listing_mode": "direct",
                     "listing_complete": False,
                 },
                 "logs": "",
@@ -288,7 +297,7 @@ class SnapshotBrowserTests(unittest.TestCase):
         result = service.dispatch_snapshot_ls("target", "snapshot")
 
         self.assertEqual(result["status"], JobStatus.FAILED)
-        self.assertEqual(result["error"], "snapshot tree listing was incomplete")
+        self.assertEqual(result["error"], "snapshot listing was incomplete")
         self.assertFalse(result["listing_complete"])
 
 

@@ -106,11 +106,11 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(job.payload["request_id"], "request-1")
         self.assertEqual(job.payload["path"], "/folder with spaces/file.txt")
         self.assertEqual(job.payload["operation"], "browse")
-        self.assertEqual(job.payload["command"][:3], ["restic", "cat", "tree"])
+        self.assertEqual(job.payload["command"][:3], ["restic", "ls", "--json"])
         self.assertEqual(job.payload["command"][-1], "abcdef12:/folder with spaces/file.txt")
         self.assertEqual(job.payload["cache_generation"], 0)
 
-    def test_browse_uses_direct_tree_target_but_search_and_find_keep_restic_ls(self):
+    def test_browse_uses_direct_restic_ls_but_search_and_find_keep_restic_ls(self):
         service = self.make_service()
 
         root = service.dispatch_snapshot_read("target-a", "browse", "abcdef12", path="/")
@@ -122,8 +122,8 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         find = service.dispatch_snapshot_read("target-a", "find", "abcdef12", path="/packages", query="needle")
         find_job = service.get_job(find["job_id"])
 
-        self.assertEqual(root_job.payload["command"], ["restic", "cat", "tree", "abcdef12"])
-        self.assertEqual(nested_job.payload["command"], ["restic", "cat", "tree", "abcdef12:/packages"])
+        self.assertEqual(root_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/"])
+        self.assertEqual(nested_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/packages"])
         self.assertEqual(search_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/packages"])
         self.assertEqual(find_job.payload["command"], ["restic", "ls", "--json", "abcdef12", "/packages"])
 
@@ -230,7 +230,7 @@ class ControlPlaneDispatchTests(unittest.TestCase):
             result_summary={
                 "entries": [],
                 "status_code": 413,
-                "listing_mode": "tree",
+                "listing_mode": "direct",
                 "listing_complete": False,
                 "listing_entry_count": 0,
                 "listing_output_limit_bytes": 8 * 1024 * 1024,
@@ -244,7 +244,7 @@ class ControlPlaneDispatchTests(unittest.TestCase):
 
         self.assertEqual(contract["status"], JobStatus.FAILED)
         self.assertEqual(contract["status_code"], 413)
-        self.assertEqual(contract["listing_mode"], "tree")
+        self.assertEqual(contract["listing_mode"], "direct")
         self.assertFalse(contract["listing_complete"])
         self.assertEqual(contract["listing_error_code"], "output_limit")
         self.assertTrue(contract["error"])
@@ -423,7 +423,7 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual({job.target_id for job in jobs}, {"target-a"})
         self.assertEqual({job.command for job in jobs}, {"snapshot.ls", "backup.run"})
         read_job = next(job for job in jobs if job.command == "snapshot.ls")
-        self.assertEqual(read_job.payload["command"][1:3], ["cat", "tree"])
+        self.assertEqual(read_job.payload["command"][1:3], ["ls", "--json"])
         self.assertNotIn("--no-lock", read_job.payload["command"])
 
     def test_explicit_worker_id_does_not_merge_same_name(self):

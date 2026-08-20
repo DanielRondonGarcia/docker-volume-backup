@@ -532,14 +532,14 @@ class WorkerAgentService:
             )
 
         if command == "snapshot.ls":
-            error = "Snapshot tree listing was unavailable after worker restart."
+            error = "Snapshot listing was unavailable after worker restart."
             return WorkerJobExecutionResult(
                 status=JobStatus.FAILED,
                 result_summary={
                     "status_code": status_code,
                     "recovery": recovery,
                     "entries": [],
-                    "listing_mode": "tree",
+                    "listing_mode": "direct",
                     "listing_complete": False,
                     "listing_entry_count": 0,
                     "listing_error_code": "runtime_failure",
@@ -914,7 +914,7 @@ class WorkerAgentService:
             if command == "snapshot.ls":
                 result_summary.update(
                     {
-                        "listing_mode": "tree",
+                        "listing_mode": "direct",
                         "listing_complete": False,
                         "listing_entry_count": 0,
                         "listing_output_limit_bytes": self._snapshot_listing_output_limit(payload),
@@ -982,31 +982,21 @@ class WorkerAgentService:
             if command == "snapshot.ls":
                 listing_limit = self._snapshot_listing_output_limit(payload)
                 listing_fields = {
-                    "listing_mode": "tree",
+                    "listing_mode": "direct",
                     "listing_complete": False,
                     "listing_entry_count": 0,
                     "listing_output_limit_bytes": listing_limit,
                 }
                 entries: List[Dict[str, Any]] = []
                 if status == JobStatus.SUCCEEDED:
-                    entries, complete, parse_error, total_count = self._parse_snapshot_tree_entries(
+                    entries = self._parse_snapshot_ls_entries(
                         summary.get("logs", ""),
+                        payload.get("max_entries"),
                         path=payload.get("path"),
-                        max_entries=payload.get("max_entries"),
                         max_log_bytes=listing_limit,
                     )
-                    listing_fields["listing_entry_count"] = min(
-                        total_count,
-                        self.MAX_SNAPSHOT_ENTRIES + 1,
-                    )
-                    if complete:
-                        listing_fields["listing_complete"] = True
-                    else:
-                        status = JobStatus.FAILED
-                        error = parse_error or "snapshot tree JSON is malformed or incomplete"
-                        listing_fields["listing_error_code"] = self._snapshot_listing_error_code(
-                            summary.get("status_code"), error
-                        )
+                    listing_fields["listing_complete"] = True
+                    listing_fields["listing_entry_count"] = len(entries)
                 else:
                     listing_fields["listing_error_code"] = self._snapshot_listing_error_code(
                         summary.get("status_code"), error

@@ -3301,7 +3301,7 @@ docker compose up -d
     function isSuccessfulSnapshotResult(result) {
       const normalized = normalizeSnapshotContract(result);
       if (!normalized || normalized.error) return false;
-      if (normalized.listing_mode === "tree" && normalized.listing_complete !== true) return false;
+      if (normalized.listing_mode && normalized.listing_complete !== true) return false;
       const status = snapshotStatus(normalized);
       return status === "succeeded" || status === "success" || (!status && !normalized.error);
     }
@@ -3341,7 +3341,7 @@ docker compose up -d
         state.entries = cachedDirectory.entries;
         state.loading = false;
         state.listingComplete = cachedDirectory.listingComplete === true;
-        state.listingMode = "tree";
+        state.listingMode = "direct";
         state.listingEntryCount = cachedDirectory.entries.length;
         state.notice = { kind: "stale", message: "Mostrando datos en cache mientras se actualiza el directorio." };
         renderSnapshotBrowser(state.currentSnapshot, normalizedPath, cachedDirectory.entries, { focusFirst: false });
@@ -5617,11 +5617,11 @@ docker compose up -d
                 <div class="settings-card-sub">Salida de metadatos del listado</div>
               </div>
             </div>
-            <div class="helper">Controla la salida máxima capturada por <code>restic cat tree</code> y las búsquedas <code>restic ls --json</code> del Snapshot Explorer. No cambia el límite de 8 MiB para descargar archivos.</div>
+            <div class="helper">Controla la salida máxima capturada por <code>restic ls --json</code> del Snapshot Explorer. No cambia el límite de 8 MiB para descargar archivos.</div>
             <div class="field full" style="margin-top:12px;">
               <label for="settingsSnapshotListingMaxOutput">Límite de salida del listado (MiB)</label>
               <input id="settingsSnapshotListingMaxOutput" type="number" min="1" max="16" step="1" required value="${snapshotListingMaxMiB}" aria-describedby="settingsSnapshotListingMaxOutputHelp settingsSnapshotListingMaxOutputError" />
-              <div id="settingsSnapshotListingMaxOutputHelp" class="helper">Acepta un valor entero entre 1 y 16 MiB. Este ajuste es para el listado directo <code>restic cat tree</code> y las búsquedas <code>restic ls --json</code>, no para el tamaño de descarga de archivos.</div>
+              <div id="settingsSnapshotListingMaxOutputHelp" class="helper">Acepta un valor entero entre 1 y 16 MiB. Este ajuste es para los listados y búsquedas <code>restic ls --json</code>, no para el tamaño de descarga de archivos.</div>
               <div id="settingsSnapshotListingMaxOutputError" role="alert" aria-live="polite" style="margin-top:6px; color:var(--destructive); font-size:12px;"></div>
             </div>
           </div>
