@@ -688,6 +688,61 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         for marker in (".live-browser-status[data-state=\"connected\"]", ".live-browser-status[data-state=\"resync\"]", ".live-browser-status[data-state=\"restricted\"]", ".live-browser-status[data-state=\"error\"]", ".live-browser-entry:focus-visible"):
             self.assertIn(marker, self.css)
 
+    def test_live_file_browser_entries_are_sequenced_cancellable_and_path_safe(self):
+        entries = re.search(r"async function loadLiveBrowserEntries\(.*?\n    \}\n\n    async function preflightLiveBrowserEvents", self.source, re.S)
+        self.assertIsNotNone(entries)
+        entries_source = entries.group(0)
+        for marker in (
+            "normalizeLiveBrowserPath(path)",
+            "browser.requestedPath = normalizedPath;",
+            "browser.entriesRequest?.controller.abort();",
+            "new AbortController()",
+            "sequence: ++browser.entriesSequence",
+            "signal: request.controller.signal",
+            "isCurrentLiveBrowserEntriesRequest(browser, request)",
+            "browser.path = normalizedPath;",
+            "browser.nextCursor = result.next_cursor || null;",
+        ):
+            self.assertIn(marker, entries_source)
+
+        guard = re.search(r"function isCurrentLiveBrowserEntriesRequest\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(guard)
+        for marker in ("browser === liveBrowserState", "browser.entriesRequest === request", "browser.entriesSequence === request.sequence", "browser.requestedPath === request.path"):
+            self.assertIn(marker, guard.group(0))
+        self.assertIn("if (!browser || browser.entriesRequest || !browser.nextCursor) return;", self.source)
+
+    def test_live_file_browser_events_are_coalesced_and_resync_requires_manual_refresh(self):
+        refresh = re.search(r"function scheduleLiveBrowserRefresh\(.*?\n    \}\n\n    function isCurrentLiveBrowserEntriesRequest", self.source, re.S)
+        self.assertIsNotNone(refresh)
+        refresh_source = refresh.group(0)
+        for marker in ("browser.refreshPending = true", "if (browser.refreshTimer) return", "if (browser.entriesRequest) return", "browser.requestedPath", "setTimeout", "}, 250);"):
+            self.assertIn(marker, refresh_source)
+
+        changed = re.search(r'source.addEventListener\("changed".*?\n      \}\);', self.source, re.S)
+        self.assertIsNotNone(changed)
+        self.assertIn("scheduleLiveBrowserRefresh(browser);", changed.group(0))
+        resync = re.search(r'source.addEventListener\("resync_required".*?\n      \}\);', self.source, re.S)
+        self.assertIsNotNone(resync)
+        resync_source = resync.group(0)
+        self.assertIn("clearLiveBrowserRefresh(browser);", resync_source)
+        self.assertIn("browser.degraded = true;", resync_source)
+        self.assertNotIn("loadLiveBrowserEntries", resync_source)
+        self.assertIn('id="liveBrowserRefresh"', self.source)
+        self.assertIn(">Actualizar</button>", self.source)
+        self.assertIn("loadLiveBrowserEntries(browser.requestedPath)", self.source)
+        self.assertIn("Cambios live no sincronizados; la lista se mantiene estable. Actualiza manualmente.", self.source)
+
+    def test_live_file_browser_cleanup_aborts_entries_and_clears_refresh(self):
+        close = re.search(r"function closeLiveBrowser\(\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(close)
+        close_source = close.group(0)
+        for marker in ("browser.closed = true", "clearLiveBrowserRefresh(browser);", "browser.entriesRequest?.controller.abort();", "browser.entriesRequest = null;", "browser.entriesSequence += 1", "liveBrowserState = null;"):
+            self.assertIn(marker, close_source)
+        cleanup = re.search(r"function clearLiveBrowserRefresh\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(cleanup)
+        self.assertIn("clearTimeout(browser.refreshTimer)", cleanup.group(0))
+        self.assertIn("browser.refreshPending = false", cleanup.group(0))
+
 
 class StorageCardsUiStateTests(unittest.TestCase):
     @classmethod

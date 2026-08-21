@@ -1820,8 +1820,14 @@ docker compose up -d
       });
     }
 
+    function normalizeLiveBrowserPath(path) {
+      const raw = String(path || "/").replace(/\\/g, "/");
+      if (!raw.startsWith("/")) throw new Error("Invalid live browser path");
+      return normalizeSnapshotPath(raw);
+    }
+
     function liveBrowserParent(path) {
-      const parts = String(path || "/").split("/").filter(Boolean);
+      const parts = normalizeLiveBrowserPath(path).split("/").filter(Boolean);
       parts.pop();
       return parts.length ? `/${parts.join("/")}` : "/";
     }
@@ -1896,25 +1902,85 @@ docker compose up -d
       }));
     }
 
+    function clearLiveBrowserRefresh(browser) {
+      if (browser.refreshTimer) clearTimeout(browser.refreshTimer);
+      browser.refreshTimer = null;
+      browser.refreshPending = false;
+    }
+
+    function updateLiveBrowserPagination(browser) {
+      const next = document.getElementById("liveBrowserNext");
+      if (!next) return;
+      const hasNext = Boolean(browser.nextCursor);
+      next.hidden = !hasNext;
+      next.disabled = Boolean(browser.entriesRequest) || !hasNext;
+    }
+
+    function scheduleLiveBrowserRefresh(browser) {
+      if (browser !== liveBrowserState || browser.closed) return;
+      browser.refreshPending = true;
+      if (browser.refreshTimer) return;
+      browser.refreshTimer = setTimeout(() => {
+        browser.refreshTimer = null;
+        if (browser !== liveBrowserState || browser.closed) return;
+        if (browser.entriesRequest) return;
+        browser.refreshPending = false;
+        void loadLiveBrowserEntries(browser.requestedPath);
+      }, 250);
+    }
+
+    function isCurrentLiveBrowserEntriesRequest(browser, request) {
+      return browser === liveBrowserState
+        && !browser.closed
+        && browser.entriesRequest === request
+        && browser.entriesSequence === request.sequence
+        && browser.requestedPath === request.path;
+    }
+
     async function loadLiveBrowserEntries(path = "/", cursor = null) {
       const browser = liveBrowserState;
       if (!browser || browser.closed) return;
+      let normalizedPath;
+      try {
+        normalizedPath = normalizeLiveBrowserPath(path);
+      } catch (error) {
+        setLiveBrowserStatus("error", liveBrowserErrorMessage(error, path, "La ruta solicitada no es valida"));
+        return;
+      }
+      clearLiveBrowserRefresh(browser);
+      browser.requestedPath = normalizedPath;
+      browser.entriesRequest?.controller.abort();
+      const request = {
+        controller: new AbortController(),
+        path: normalizedPath,
+        sequence: ++browser.entriesSequence,
+      };
+      browser.entriesRequest = request;
+      updateLiveBrowserPagination(browser);
       setLiveBrowserStatus("connecting", "Cargando lista acotada...");
       try {
-        const query = `?path=${encodeURIComponent(path)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-        const result = await apiGet(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/entries${query}`);
-        if (browser !== liveBrowserState || browser.closed) return;
-        browser.path = path;
+        const query = `?path=${encodeURIComponent(normalizedPath)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const result = await apiGet(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/entries${query}`, { signal: request.controller.signal });
+        if (!isCurrentLiveBrowserEntriesRequest(browser, request)) return;
+        browser.path = normalizedPath;
         browser.nextCursor = result.next_cursor || null;
         const pathEl = document.getElementById("liveBrowserPath");
-        if (pathEl) pathEl.textContent = path;
+        if (pathEl) pathEl.textContent = normalizedPath;
         renderLiveBrowserEntries(Array.isArray(result.entries) ? result.entries : []);
-        const next = document.getElementById("liveBrowserNext");
-        if (next) next.hidden = !browser.nextCursor;
-        setLiveBrowserStatus("connected", "Conectado · lista actualizada");
+        updateLiveBrowserPagination(browser);
+        setLiveBrowserStatus(browser.degraded ? "resync" : "connected", browser.degraded ? "Cambios live no sincronizados; la lista se mantiene estable. Actualiza manualmente." : "Conectado · lista actualizada");
       } catch (error) {
-        const message = liveBrowserErrorMessage(error, path, "No se pudo cargar la lista live");
+        if (!isCurrentLiveBrowserEntriesRequest(browser, request) || error?.name === "AbortError") return;
+        const message = liveBrowserErrorMessage(error, normalizedPath, "No se pudo cargar la lista live");
         setLiveBrowserStatus(error?.code === "live_access_denied" ? "restricted" : "error", message);
+      } finally {
+        if (!isCurrentLiveBrowserEntriesRequest(browser, request)) return;
+        browser.entriesRequest = null;
+        updateLiveBrowserPagination(browser);
+        if (browser.refreshPending) {
+          browser.refreshPending = false;
+          scheduleLiveBrowserRefresh(browser);
+        }
       }
     }
 
@@ -1956,16 +2022,19 @@ docker compose up -d
       if (browser !== liveBrowserState || browser.closed) return;
       const source = new EventSource(`/api/v1/targets/${encodeURIComponent(browser.target.id)}/live/events`, { withCredentials: true });
       browser.eventSource = source;
-      source.onopen = () => { browser.reconnects = 0; setLiveBrowserStatus("connected", "Conectado · cambios en vivo activos"); };
+      source.onopen = () => {
+        browser.reconnects = 0;
+        setLiveBrowserStatus(browser.degraded ? "resync" : "connected", browser.degraded ? "Cambios live no sincronizados; la lista se mantiene estable. Actualiza manualmente." : "Conectado · cambios en vivo activos");
+      };
       source.addEventListener("changed", event => {
         browser.lastEventId = event.lastEventId || browser.lastEventId;
-        setLiveBrowserStatus("connected", "Cambio detectado · actualizando lista...");
-        void loadLiveBrowserEntries(browser.path);
+        setLiveBrowserStatus(browser.degraded ? "resync" : "connected", browser.degraded ? "Cambios live no sincronizados; la lista se mantiene estable. Actualiza manualmente." : "Cambio detectado · actualizando lista...");
+        scheduleLiveBrowserRefresh(browser);
       });
       source.addEventListener("resync_required", () => {
-        browser.nextCursor = null;
-        setLiveBrowserStatus("resync", "Resincronizando lista autorizada...");
-        void loadLiveBrowserEntries(browser.path);
+        clearLiveBrowserRefresh(browser);
+        browser.degraded = true;
+        setLiveBrowserStatus("resync", "Cambios live no sincronizados; la lista se mantiene estable. Actualiza manualmente.");
       });
       source.onerror = () => {
         source.close();
@@ -1978,10 +2047,15 @@ docker compose up -d
     }
 
     function closeLiveBrowser() {
-      if (!liveBrowserState) return;
-      liveBrowserState.closed = true;
-      liveBrowserState.eventSource?.close();
-      if (liveBrowserState.retryTimer) clearTimeout(liveBrowserState.retryTimer);
+      const browser = liveBrowserState;
+      if (!browser) return;
+      browser.closed = true;
+      browser.eventSource?.close();
+      if (browser.retryTimer) clearTimeout(browser.retryTimer);
+      clearLiveBrowserRefresh(browser);
+      browser.entriesRequest?.controller.abort();
+      browser.entriesRequest = null;
+      browser.entriesSequence += 1;
       liveBrowserState = null;
       const overlay = document.getElementById("modalOverlay");
       if (overlay) { overlay.classList.remove("open", "active"); overlay.innerHTML = ""; }
@@ -1991,12 +2065,23 @@ docker compose up -d
       closeLiveBrowser();
       const overlay = document.getElementById("modalOverlay");
       if (!overlay || !target || !target.live_access_enabled) return;
-      liveBrowserState = { target, path: "/", nextCursor: null, reconnects: 0, eventSource: null, retryTimer: null, closed: false };
-      overlay.innerHTML = `<div class="modal live-browser-modal" role="dialog" aria-modal="true" aria-labelledby="liveBrowserTitle" aria-describedby="liveBrowserHelp"><div class="modal-header"><h3 id="liveBrowserTitle">Archivos en vivo · ${escapeHtml(target.name)}</h3><button type="button" class="close" id="liveBrowserClose" aria-label="Cerrar archivos en vivo">&times;</button></div><div class="modal-body"><div class="helper" id="liveBrowserHelp">Solo lectura. El Control Plane limita la lista y descarga bytes sin abrir rutas del host.</div><div id="liveBrowserStatus" class="live-browser-status" data-state="connecting" role="status" aria-live="polite">Conectando...</div><div class="live-browser-toolbar"><button type="button" class="btn ghost sm" id="liveBrowserUp">Subir</button><code id="liveBrowserPath">/</code></div><div id="liveBrowserEntries" class="live-browser-entries" role="tree" tabindex="0" aria-label="Archivos y directorios del target"></div><div class="live-browser-pagination"><button type="button" class="btn ghost sm" id="liveBrowserNext" hidden>Siguiente pagina</button></div></div></div>`;
+      liveBrowserState = { target, path: "/", requestedPath: "/", nextCursor: null, reconnects: 0, eventSource: null, retryTimer: null, entriesRequest: null, entriesSequence: 0, refreshTimer: null, refreshPending: false, degraded: false, closed: false };
+      overlay.innerHTML = `<div class="modal live-browser-modal" role="dialog" aria-modal="true" aria-labelledby="liveBrowserTitle" aria-describedby="liveBrowserHelp"><div class="modal-header"><h3 id="liveBrowserTitle">Archivos en vivo · ${escapeHtml(target.name)}</h3><button type="button" class="close" id="liveBrowserClose" aria-label="Cerrar archivos en vivo">&times;</button></div><div class="modal-body"><div class="helper" id="liveBrowserHelp">Solo lectura. El Control Plane limita la lista y descarga bytes sin abrir rutas del host.</div><div id="liveBrowserStatus" class="live-browser-status" data-state="connecting" role="status" aria-live="polite">Conectando...</div><div class="live-browser-toolbar"><button type="button" class="btn ghost sm" id="liveBrowserUp">Subir</button><button type="button" class="btn ghost sm" id="liveBrowserRefresh" aria-label="Actualizar lista de archivos">Actualizar</button><code id="liveBrowserPath">/</code></div><div id="liveBrowserEntries" class="live-browser-entries" role="tree" tabindex="0" aria-label="Archivos y directorios del target"></div><div class="live-browser-pagination"><button type="button" class="btn ghost sm" id="liveBrowserNext" hidden>Siguiente pagina</button></div></div></div>`;
       overlay.classList.add("open");
       document.getElementById("liveBrowserClose").addEventListener("click", closeLiveBrowser);
-      document.getElementById("liveBrowserUp").addEventListener("click", () => void loadLiveBrowserEntries(liveBrowserParent(liveBrowserState.path)));
-      document.getElementById("liveBrowserNext").addEventListener("click", () => void loadLiveBrowserEntries(liveBrowserState.path, liveBrowserState.nextCursor));
+      document.getElementById("liveBrowserUp").addEventListener("click", () => {
+        const browser = liveBrowserState;
+        if (browser) void loadLiveBrowserEntries(liveBrowserParent(browser.requestedPath));
+      });
+      document.getElementById("liveBrowserRefresh").addEventListener("click", () => {
+        const browser = liveBrowserState;
+        if (browser) void loadLiveBrowserEntries(browser.requestedPath);
+      });
+      document.getElementById("liveBrowserNext").addEventListener("click", () => {
+        const browser = liveBrowserState;
+        if (!browser || browser.entriesRequest || !browser.nextCursor) return;
+        void loadLiveBrowserEntries(browser.path, browser.nextCursor);
+      });
       void loadLiveBrowserEntries();
       connectLiveBrowserEvents();
     }
