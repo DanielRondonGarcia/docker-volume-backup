@@ -149,6 +149,32 @@ class InMemoryJobRepository(JobRepository):
     def list(self) -> List[JobRecord]:
         return sorted(self._items.values(), key=lambda item: item.submitted_at, reverse=True)
 
+    def list_for_listing(self, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[JobRecord], int]:
+        jobs = sorted(self._items.values(), key=lambda item: (item.submitted_at, item.id), reverse=True)
+        total = len(jobs)
+        start = max(0, offset)
+        if limit is not None and limit > 0:
+            jobs = jobs[start : start + limit]
+        elif start > 0:
+            jobs = jobs[start:]
+        return [
+            JobRecord(
+                id=job.id,
+                worker_id=job.worker_id,
+                command=job.command,
+                requested_by=job.requested_by,
+                target_id=job.target_id,
+                trigger=job.trigger,
+                status=JobStatus.normalize(job.status),
+                attempt_count=job.attempt_count,
+                submitted_at=job.submitted_at,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                updated_at=job.updated_at,
+            )
+            for job in jobs
+        ], total
+
     def _reconcile_expired_leases_locked(self, now) -> int:
         interruption_log = "Worker lease expired before terminal status was reported."
         reconciled = 0

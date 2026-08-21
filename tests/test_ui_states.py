@@ -467,7 +467,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         )
         self.assertIsNotNone(polling)
         polling_source = polling.group(0)
-        state_index = polling_source.index("state.jobs = newJobs;")
+        state_index = polling_source.index("state.jobs = mergedJobs;")
         renderer_index = polling_source.index("_jobsRenderTableBody();")
         self.assertLess(state_index, renderer_index)
         self.assertIn("if (_jobsRenderTableBody)", polling_source)
@@ -475,6 +475,20 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn("renderJobLogs(job);", self.source)
         self.assertIn("await refreshAll();", self.source)
         self.assertIn('["succeeded", "failed", "canceled", "cancelled"]', self.source)
+
+    def test_jobs_list_refresh_uses_metadata_and_preserves_loaded_detail_projection(self):
+        refresh = re.search(r"async function refreshAll\(\) \{.*", self.source, re.S)
+        self.assertIsNotNone(refresh)
+        refresh_source = refresh.group(0)
+        self.assertNotIn("include_logs=true", self.source)
+        self.assertIn('apiGet("/api/v1/jobs")', refresh_source)
+        self.assertIn("state.jobs = mergeJobList(jobs.items || []);", refresh_source)
+        self.assertIn("function mergeJobList(items)", self.source)
+        self.assertIn("currentLogJobSnapshot", self.source)
+        self.assertIn('for (const key of ["result_summary", "storage_context", "progress", "log_lines"])', self.source)
+        self.assertIn("mergeJobProjection(job);", self.source)
+        self.assertIn("const mergedJobs = mergeJobList(newJobs);", self.source)
+        self.assertIn("state.jobs = mergedJobs;", self.source)
 
     def test_job_logs_render_progress_storage_context_and_normalize_in_progress(self):
         for marker in (

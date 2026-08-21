@@ -1968,16 +1968,41 @@ class ControlPlaneService:
     def public_job_view(self, job: JobRecord) -> Dict[str, Any]:
         return self._job_public_view(job)
 
+    @staticmethod
+    def _job_listing_view(job: JobRecord) -> Dict[str, Any]:
+        return {
+            "id": job.id,
+            "worker_id": job.worker_id,
+            "command": job.command,
+            "requested_by": job.requested_by,
+            "target_id": job.target_id,
+            "trigger": job.trigger,
+            "status": JobStatus.normalize(job.status),
+            "attempt_count": job.attempt_count,
+            "result_summary": {},
+            "storage_context": {},
+            "progress": None,
+            "log_lines": [],
+            "submitted_at": job.submitted_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "updated_at": job.updated_at,
+        }
+
     def list_job_views(self, limit: Optional[int] = None, offset: int = 0) -> tuple:
         self._reconcile_expired_jobs()
-        jobs = self.job_repository.list()
-        total = len(jobs)
-        views = [self._job_public_view(job) for job in jobs]
-        if limit is not None and limit > 0:
-            return views[offset:offset + limit], total
-        if offset > 0:
-            return views[offset:], total
-        return views, total
+        list_for_listing = getattr(self.job_repository, "list_for_listing", None)
+        if callable(list_for_listing):
+            jobs, total = list_for_listing(limit=limit, offset=offset)
+        else:
+            jobs = self.job_repository.list()
+            total = len(jobs)
+            start = max(0, offset)
+            if limit is not None and limit > 0:
+                jobs = jobs[start : start + limit]
+            elif start > 0:
+                jobs = jobs[start:]
+        return [self._job_listing_view(job) for job in jobs], total
 
     def update_job_progress(
         self,

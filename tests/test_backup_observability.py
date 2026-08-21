@@ -1,8 +1,9 @@
 import json
+import sqlite3
 import threading
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
@@ -140,6 +141,91 @@ class BackupObservabilityServiceTests(unittest.TestCase):
         self.assertNotIn("private-file-content", serialized)
         self.assertIn("storage_context", view)
         self.assertIn("log_lines", view)
+
+    def test_lightweight_job_listing_does_not_load_persisted_payload_or_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = f"{directory}/control-plane.db"
+            repository = SQLiteJobRepository(database_path)
+            service = self.make_service(job_repository=repository)
+            job = JobRecord(
+                worker_id="worker-a",
+                command="backup.run",
+                payload={"large": "payload"},
+                result_summary={"entries": [{"path": str(index)} for index in range(1000)]},
+                log_lines=["persisted log line"] * 1000,
+            )
+            repository.save(job)
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "UPDATE jobs SET payload_json = ?, result_summary_json = ?, log_lines_json = ? WHERE id = ?",
+                    ("not-json", "not-json", "not-json", job.id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with patch.object(service, "_job_storage_context", side_effect=AssertionError("listing touched storage context")), patch.object(
+                service, "_bounded_job_log_lines", side_effect=AssertionError("listing touched logs")
+            ), patch.object(service, "_safe_result_summary", side_effect=AssertionError("listing touched summary")):
+                views, total = service.list_job_views(limit=1)
+
+        self.assertEqual(total, 1)
+        self.assertEqual(views[0]["log_lines"], [])
+        self.assertEqual(views[0]["result_summary"], {})
+        self.assertEqual(views[0]["storage_context"], {})
+        self.assertNotIn("payload", views[0])
+
+    def test_lightweight_listing_order_total_and_pagination_match_repositories(self):
+        submitted_at = datetime(2026, 1, 1, 12, 0, 0)
+        jobs = [
+            JobRecord(id="job-old", worker_id="worker-a", command="backup.run", submitted_at=submitted_at),
+            JobRecord(id="job-tie-low", worker_id="worker-a", command="backup.run", submitted_at=submitted_at),
+            JobRecord(id="job-tie-high", worker_id="worker-a", command="backup.run", submitted_at=submitted_at),
+            JobRecord(id="job-new", worker_id="worker-a", command="backup.run", submitted_at=submitted_at + timedelta(minutes=1)),
+        ]
+        expected_order = ["job-new", "job-tie-low", "job-tie-high", "job-old"]
+        repositories = [InMemoryJobRepository()]
+        with tempfile.TemporaryDirectory() as directory:
+            repositories.append(SQLiteJobRepository(f"{directory}/control-plane.db"))
+            for repository in repositories:
+                for job in jobs:
+                    repository.save(
+                        JobRecord(
+                            id=job.id,
+                            worker_id=job.worker_id,
+                            command=job.command,
+                            submitted_at=job.submitted_at,
+                        )
+                    )
+                page, total = repository.list_for_listing(limit=2, offset=1)
+                all_items, all_total = repository.list_for_listing()
+                self.assertEqual([item.id for item in all_items], expected_order)
+                self.assertEqual([item.id for item in page], expected_order[1:3])
+                self.assertEqual(total, len(expected_order))
+                self.assertEqual(all_total, len(expected_order))
+                self.assertEqual(all_items[0].payload, {})
+                self.assertIsNone(all_items[0].result_summary)
+                self.assertEqual(all_items[0].log_lines, [])
+
+    def test_sqlite_job_indexes_are_idempotent_without_schema_version_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = f"{directory}/control-plane.db"
+            repository = SQLiteJobRepository(database_path)
+            SQLiteJobRepository(database_path)
+            connection = sqlite3.connect(database_path)
+            try:
+                indexes = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs'"
+                    )
+                }
+            finally:
+                connection.close()
+            self.assertIn("idx_jobs_submitted_at_id_desc", indexes)
+            self.assertIn("idx_jobs_status_lease_expires_at", indexes)
+            self.assertEqual(repository.get_schema_version(), 1)
 
     def test_progress_is_owned_monotonic_bounded_and_terminal_immutable_for_memory_and_sqlite(self):
         repositories = [InMemoryJobRepository()]

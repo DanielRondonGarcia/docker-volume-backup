@@ -105,6 +105,16 @@ class JobRepository(ABC):
     def list(self) -> List[JobRecord]:
         raise NotImplementedError
 
+    def list_for_listing(self, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[JobRecord], int]:
+        jobs = sorted(self.list(), key=lambda item: (item.submitted_at, item.id), reverse=True)
+        total = len(jobs)
+        start = max(0, offset)
+        if limit is not None and limit > 0:
+            jobs = jobs[start : start + limit]
+        elif start > 0:
+            jobs = jobs[start:]
+        return jobs, total
+
     @abstractmethod
     def claim_pending_for_worker(self, worker_id: str, lease_duration_seconds: int = 300) -> List[JobRecord]:
         raise NotImplementedError

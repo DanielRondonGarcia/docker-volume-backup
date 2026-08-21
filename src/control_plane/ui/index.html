@@ -3950,6 +3950,30 @@ docker compose up -d
       status.title = label;
     }
 
+    function hasJobDetail(value) {
+      if (Array.isArray(value)) return value.length > 0;
+      if (value && typeof value === "object") return Object.keys(value).length > 0;
+      return value !== null && value !== undefined;
+    }
+
+    function mergeJobList(items) {
+      const existingById = new Map((Array.isArray(state.jobs) ? state.jobs : []).map(job => [String(job.id), job]));
+      if (currentLogJobSnapshot && currentLogJobSnapshot.id) {
+        const key = String(currentLogJobSnapshot.id);
+        const existing = existingById.get(key);
+        existingById.set(key, existing ? { ...existing, ...currentLogJobSnapshot } : currentLogJobSnapshot);
+      }
+      return (Array.isArray(items) ? items : []).map(job => {
+        const existing = existingById.get(String(job.id));
+        if (!existing) return job;
+        const merged = { ...existing, ...job };
+        for (const key of ["result_summary", "storage_context", "progress", "log_lines"]) {
+          if (!hasJobDetail(job[key]) && hasJobDetail(existing[key])) merged[key] = existing[key];
+        }
+        return merged;
+      });
+    }
+
     function mergeJobProjection(job) {
       if (!job || !job.id) return job;
       const jobs = Array.isArray(state.jobs) ? state.jobs : [];
@@ -4276,6 +4300,7 @@ docker compose up -d
           if (currentLogJobId !== jobId) return;
           failures = 0;
           firstFailureAt = 0;
+          mergeJobProjection(job);
           currentLogJobSnapshot = job;
           renderJobLogs(job);
           if (isTerminalJobStatus(job.status)) {
@@ -4853,7 +4878,7 @@ docker compose up -d
             if (!confirm(`¿Cancelar el job ${jobId.slice(0,8)}?`)) return;
             await apiPost(`/api/v1/jobs/${jobId}/cancel`, {});
             const jobsResp = await apiGet("/api/v1/jobs");
-            state.jobs = jobsResp.items || [];
+            state.jobs = mergeJobList(jobsResp.items || []);
             renderJobs(content);
           }, "Cancelando...").catch(() => {}));
         });
@@ -4907,9 +4932,10 @@ docker compose up -d
           const newJobs = jobsResp.items || [];
           const oldIds = new Set((state.jobs || []).map(j => j.id));
           const hasNew = newJobs.some(j => !oldIds.has(j.id));
+          const mergedJobs = mergeJobList(newJobs);
           const jobFingerprint = j => JSON.stringify([j.id, normalizeJobStatus(j.status), j.updated_at || "", j.progress || (j.result_summary && j.result_summary.progress) || null, (j.log_lines || []).length]);
-          const hasChanged = JSON.stringify(newJobs.map(jobFingerprint)) !== JSON.stringify((state.jobs || []).map(jobFingerprint));
-          state.jobs = newJobs;
+          const hasChanged = JSON.stringify(mergedJobs.map(jobFingerprint)) !== JSON.stringify((state.jobs || []).map(jobFingerprint));
+          state.jobs = mergedJobs;
           if (hasNew || hasChanged) {
             const content = document.getElementById("content");
             if (content && state.currentView === "jobs") {
@@ -5812,7 +5838,7 @@ docker compose up -d
         const [workers, targets, jobs, storageProfiles, retentionPolicies, secrets, users, settings, schedulerConfig] = await Promise.all([
           apiGet("/api/v1/workers"),
           apiGet("/api/v1/targets"),
-          apiGet(currentLogJobId ? "/api/v1/jobs?include_logs=true" : "/api/v1/jobs"),
+          apiGet("/api/v1/jobs"),
           apiGet("/api/v1/storage-profiles"),
           apiGet("/api/v1/retention-policies"),
           apiGet("/api/v1/secrets").catch(() => ({ items: [] })),
@@ -5822,7 +5848,7 @@ docker compose up -d
         ]);
         state.workers = workers.items || [];
         state.targets = targets.items || [];
-        state.jobs = jobs.items || [];
+        state.jobs = mergeJobList(jobs.items || []);
         state.storageProfiles = storageProfiles.items || [];
         state.retentionPolicies = retentionPolicies.items || [];
         state.secrets = secrets.items || [];

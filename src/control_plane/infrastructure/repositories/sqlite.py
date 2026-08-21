@@ -272,6 +272,14 @@ class SQLiteRepositoryBase:
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
             self._ensure_column(connection, "targets", "live_access_enabled", "INTEGER NOT NULL DEFAULT 0")
             connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_submitted_at_id_desc "
+                "ON jobs (submitted_at DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_status_lease_expires_at "
+                "ON jobs (status, lease_expires_at)"
+            )
+            connection.execute(
                 "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
@@ -570,6 +578,42 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM jobs ORDER BY submitted_at DESC").fetchall()
         return [self._row_to_job(row) for row in rows]
+
+    def list_for_listing(self, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[JobRecord], int]:
+        start = max(0, offset)
+        columns = """
+            id, worker_id, command, requested_by, target_id, trigger, status,
+            attempt_count, submitted_at, started_at, finished_at, updated_at
+        """
+        query = f"SELECT {columns} FROM jobs ORDER BY submitted_at DESC, id DESC"
+        parameters: List[int] = []
+        if limit is not None and limit > 0:
+            query += " LIMIT ? OFFSET ?"
+            parameters.extend((limit, start))
+        elif start > 0:
+            query += " LIMIT -1 OFFSET ?"
+            parameters.append(start)
+        with self._connect() as connection:
+            total = connection.execute("SELECT COUNT(*) AS total FROM jobs").fetchone()["total"]
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._row_to_listing_job(row) for row in rows], total
+
+    @staticmethod
+    def _row_to_listing_job(row: sqlite3.Row) -> JobRecord:
+        return JobRecord(
+            id=row["id"],
+            worker_id=row["worker_id"],
+            command=row["command"],
+            requested_by=row["requested_by"],
+            target_id=row["target_id"],
+            trigger=row["trigger"],
+            status=JobStatus.normalize(row["status"]),
+            attempt_count=row["attempt_count"] or 0,
+            submitted_at=_dt(row["submitted_at"]) or datetime.utcnow(),
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
+            updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
+        )
 
     @staticmethod
     def _reconcile_expired_leases_locked(connection, now) -> int:
