@@ -563,6 +563,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
             parts = self._path_parts(path)
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "jobs"] and parts[4] == "logs":
+                if not self._require_auth(ROLE_VIEWER, head_only=head_only, api_mode=True):
+                    return
+                job_view = self._control_plane_service().get_job_view(parts[3])
+                if job_view is None:
+                    return self._write_json(404, {"error": "job not found"}, head_only=head_only)
+                return self._write_json(200, _to_jsonable(job_view), head_only=head_only)
             if len(parts) == 5 and parts[:3] == ["api", "v1", "jobs"] and parts[4] == "events" and not head_only:
                 return self._stream_job_events(parts[3])
             if len(parts) == 4 and parts[:3] == ["api", "v1", "jobs"]:

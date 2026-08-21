@@ -210,6 +210,72 @@ class JobEventRouteTests(unittest.TestCase):
         handler._require_auth.assert_called_once_with(ROLE_VIEWER, api_mode=True)
         handler._write_json.assert_not_called()
 
+    def test_logs_route_requires_viewer_auth(self):
+        handler = self.handler(_FakeJobService(JobEventBroker(), self.view()), path="/api/v1/jobs/job-1/logs")
+        handler._require_auth = Mock(return_value=None)
+
+        handler._handle_get_request(head_only=False)
+
+        handler._require_auth.assert_called_once_with(ROLE_VIEWER, head_only=False, api_mode=True)
+        handler._write_json.assert_not_called()
+
+    def test_logs_route_returns_404_for_missing_job(self):
+        handler = self.handler(
+            _FakeJobService(JobEventBroker(), {"id": "other", "status": JobStatus.PENDING}),
+            path="/api/v1/jobs/job-1/logs",
+        )
+
+        handler._handle_get_request(head_only=False)
+
+        handler._write_json.assert_called_once_with(404, {"error": "job not found"}, head_only=False)
+
+    def test_logs_route_returns_safe_full_detail_view(self):
+        broker = JobEventBroker()
+        service = JobEventServiceTests.make_service(broker)
+        job = service.dispatch_job(
+            "worker-a",
+            "backup.run",
+            payload={
+                "RESTIC_PASSWORD": "private-password",
+                "ACCESS_TOKEN": "private-token",
+                "RCLONE_CONF_CONTENT": "rclone-content",
+            },
+        )
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        service.update_job_status(
+            "worker-a",
+            job.id,
+            JobStatus.FAILED,
+            result_summary={"error": "password=private-password", "token": "private-token"},
+            log_lines=["private-password", "terminal failure"],
+            lease_token=claimed.lease_token,
+        )
+        handler = self.handler(service, path=f"/api/v1/jobs/{job.id}/logs")
+
+        handler._handle_get_request(head_only=False)
+
+        status, view = handler._write_json.call_args.args[:2]
+        self.assertEqual(status, 200)
+        self.assertEqual(view["id"], job.id)
+        self.assertIn("log_lines", view)
+        serialized = json.dumps(view, default=str)
+        self.assertNotIn("payload", view)
+        self.assertNotIn("lease_token", view)
+        for secret in ("private-password", "private-token", "rclone-content"):
+            self.assertNotIn(secret, serialized)
+
+    def test_logs_route_is_selected_separately_from_events_and_single_job_route(self):
+        handler = self.handler(
+            _FakeJobService(JobEventBroker(), self.view()),
+            path="/api/v1/jobs/job-1/logs",
+        )
+        handler._stream_job_events = Mock()
+
+        handler._handle_get_request(head_only=False)
+
+        handler._stream_job_events.assert_not_called()
+        self.assertEqual(handler._write_json.call_args.args[0], 200)
+
     def test_not_found_is_normal_json_before_subscribing(self):
         broker = JobEventBroker()
         service = _FakeJobService(broker, {"id": "other", "status": JobStatus.PENDING})

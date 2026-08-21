@@ -3938,6 +3938,7 @@ docker compose up -d
     let currentLogTargetId = null;
     let currentLogJobSnapshot = null;
     let targetJobEventSource = null;
+    let targetLogLoadToken = 0;
     const LOG_POLL_MAX_FAILURES = 5;
     const LOG_POLL_FAILURE_WINDOW_MS = 60000;
 
@@ -4195,11 +4196,7 @@ docker compose up -d
         if (!panel) { closeLogPanel(); return; }
         renderTargetLogPanelInto(panel, jobId, tid);
       }
-      if (existingJob && isTerminalJobStatus(existingJob.status)) {
-        setJobLiveState(getTargetLogHost(), "Finalizado", "terminal");
-      } else {
-        startTargetJobEvents(jobId);
-      }
+      void loadTargetJobLogs(jobId);
     }
 
     function closeLogPanel() {
@@ -4239,9 +4236,7 @@ docker compose up -d
         if (!panel) { closeLogPanel(); return; }
         renderTargetLogPanelInto(panel, jobId, tid);
       }
-      const knownJob = existingJob || currentLogJobSnapshot;
-      if (!knownJob || !isTerminalJobStatus(knownJob.status)) startTargetJobEvents(jobId);
-      else setJobLiveState(getTargetLogHost(), "Finalizado", "terminal");
+      void loadTargetJobLogs(jobId);
     }
 
     function renderJobLogs(job) {
@@ -4252,6 +4247,36 @@ docker compose up -d
     function stopTargetJobEvents() {
       if (targetJobEventSource) targetJobEventSource();
       targetJobEventSource = null;
+    }
+
+    async function loadTargetJobLogs(jobId) {
+      const loadToken = ++targetLogLoadToken;
+      const isActive = () => currentLogJobId === jobId && loadToken === targetLogLoadToken;
+      try {
+        const job = await apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`);
+        if (!isActive()) return;
+        mergeJobProjection(job);
+        currentLogJobSnapshot = job;
+        renderJobLogs(job);
+        if (isTerminalJobStatus(job.status)) {
+          stopTargetJobEvents();
+          if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+          setJobLiveState(getTargetLogHost(), "Finalizado", "terminal");
+          scheduleSnapshotCatalogRefreshAfterBackup(job);
+          return;
+        }
+        if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+        startTargetJobEvents(jobId);
+      } catch (error) {
+        if (!isActive()) return;
+        const host = getTargetLogHost();
+        const container = host ? host.querySelector("[data-target-log-container]") : null;
+        renderLogPollingError(
+          container,
+          error && error.message ? error.message : "No se pudo cargar el log.",
+          () => loadTargetJobLogs(jobId),
+        );
+      }
     }
 
     function startTargetJobEvents(jobId) {
@@ -4296,7 +4321,7 @@ docker compose up -d
         if (currentLogJobId !== jobId) return;
         try {
           setJobLiveState(getTargetLogHost(), "Actualizando por polling", "fallback");
-          const job = await apiGet(`/api/v1/jobs/${jobId}`);
+          const job = await apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`);
           if (currentLogJobId !== jobId) return;
           failures = 0;
           firstFailureAt = 0;
@@ -4493,6 +4518,7 @@ docker compose up -d
     let accordionLogTimer = null;
     let accordionContentEl = null;
     let accordionJobEventSource = null;
+    let accordionLogLoadToken = 0;
 
     function stopAccordionJobEvents() {
       if (accordionJobEventSource) accordionJobEventSource();
@@ -4573,11 +4599,7 @@ docker compose up -d
       accordionContentEl = contentDiv;
       const closeBtn = document.getElementById("logAccordionClose");
       if (closeBtn) closeBtn.addEventListener("click", closeJobLogAccordion);
-      if (existingJob && isTerminalJobStatus(existingJob.status)) {
-        setJobLiveState(contentDiv, "Finalizado", "terminal");
-      } else {
-        startAccordionJobEvents(jobId);
-      }
+      void loadAccordionJobLogs(jobId);
       accordionRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
 
@@ -4594,6 +4616,41 @@ docker compose up -d
       accordionContentEl = null;
     }
 
+    async function loadAccordionJobLogs(jobId) {
+      const loadToken = ++accordionLogLoadToken;
+      const isActive = () => accordionLogJobId === jobId && loadToken === accordionLogLoadToken;
+      try {
+        const job = await apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`);
+        if (!isActive()) return;
+        mergeJobProjection(job);
+        const container = accordionContentEl ? accordionContentEl.querySelector("#logContainer") : null;
+        if (container) renderJobLogsInto(job, container);
+        const pill = accordionContentEl ? accordionContentEl.querySelector(".job-status-pill") : null;
+        if (pill) {
+          const status = normalizeJobStatus(job.status);
+          pill.className = "job-status-pill " + status;
+          pill.textContent = jobStatusLabel(status);
+        }
+        if (isTerminalJobStatus(job.status)) {
+          stopAccordionJobEvents();
+          if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
+          setJobLiveState(accordionContentEl, "Finalizado", "terminal");
+          scheduleSnapshotCatalogRefreshAfterBackup(job);
+          return;
+        }
+        if (accordionLogTimer) { clearInterval(accordionLogTimer); accordionLogTimer = null; }
+        startAccordionJobEvents(jobId);
+      } catch (error) {
+        if (!isActive()) return;
+        const container = accordionContentEl ? accordionContentEl.querySelector("#logContainer") : null;
+        renderLogPollingError(
+          container,
+          error && error.message ? error.message : "No se pudo cargar el log.",
+          () => loadAccordionJobLogs(jobId),
+        );
+      }
+    }
+
     function pollAccordionJobLogs(jobId) {
       if (accordionLogTimer) clearInterval(accordionLogTimer);
       let failures = 0;
@@ -4602,7 +4659,8 @@ docker compose up -d
         if (accordionLogJobId !== jobId) return;
         try {
           setJobLiveState(accordionContentEl, "Actualizando por polling", "fallback");
-          const job = await apiGet("/api/v1/jobs/" + jobId);
+          const job = await apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`);
+          if (accordionLogJobId !== jobId) return;
           failures = 0;
           firstFailureAt = 0;
           mergeJobProjection(job);
@@ -4617,6 +4675,7 @@ docker compose up -d
             scheduleSnapshotCatalogRefreshAfterBackup(job);
           }
         } catch (error) {
+          if (accordionLogJobId !== jobId) return;
           failures += 1;
           if (!firstFailureAt) firstFailureAt = Date.now();
           const stopped = failures >= LOG_POLL_MAX_FAILURES || Date.now() - firstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS;

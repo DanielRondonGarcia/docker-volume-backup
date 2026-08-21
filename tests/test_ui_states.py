@@ -217,10 +217,32 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             "log-accordion-",
             "function closeJobLogAccordion()",
             "function pollAccordionJobLogs(jobId)",
+            "async function loadAccordionJobLogs(jobId)",
             'data-view-logs',
             "renderJobLogsInto(job, container)",
         ):
             self.assertIn(marker, self.source)
+
+    def test_initial_job_log_loaders_fetch_encoded_finite_detail_for_both_panels(self):
+        target_loader = re.search(r"async function loadTargetJobLogs\(jobId\) \{.*?\n    \}", self.source, re.S)
+        accordion_loader = re.search(r"async function loadAccordionJobLogs\(jobId\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(target_loader)
+        self.assertIsNotNone(accordion_loader)
+        for loader in (target_loader.group(0), accordion_loader.group(0)):
+            self.assertIn("apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`)", loader)
+            self.assertIn("if (!isActive()) return;", loader)
+            self.assertIn("mergeJobProjection(job);", loader)
+            self.assertIn("isTerminalJobStatus(job.status)", loader)
+            self.assertIn("Finalizado", loader)
+
+        target_open = re.search(r"function openLogPanel\(jobId, targetId\) \{.*?\n    \}\n\n    function closeLogPanel", self.source, re.S)
+        accordion_open = re.search(r"function toggleJobLogAccordion\(jobId, content\) \{.*?\n    \}\n\n    function closeJobLogAccordion", self.source, re.S)
+        self.assertIsNotNone(target_open)
+        self.assertIsNotNone(accordion_open)
+        self.assertIn("void loadTargetJobLogs(jobId);", target_open.group(0))
+        self.assertIn("void loadAccordionJobLogs(jobId);", accordion_open.group(0))
+        self.assertNotIn("if (existingJob && isTerminalJobStatus(existingJob.status))", target_open.group(0))
+        self.assertNotIn("if (existingJob && isTerminalJobStatus(existingJob.status))", accordion_open.group(0))
 
     def test_manual_target_backup_uses_accessible_hot_cold_dialog_and_override_payload(self):
         for marker in (
@@ -509,9 +531,9 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             "renderJobProgress(job)",
             "renderJobStorageContext(job)",
             "function pollJobLogs(jobId)",
-            "apiGet(`/api/v1/jobs/${jobId}`)",
+            "apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`)",
             "function pollAccordionJobLogs(jobId)",
-            'apiGet(\"/api/v1/jobs/\" + jobId)',
+            "apiGet(`/api/v1/jobs/${encodeURIComponent(jobId)}/logs`)",
             "setInterval(fetchJob, 2000)",
             "setInterval(fetchJobLogs, 3000)",
         ):
