@@ -706,6 +706,21 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     name=result["name"], host_name=result["host_name"], labels=result["labels"], worker_id=result["worker_id"]
                 )
                 return self._write_json(201, {"worker_id": worker.id, "credential_version": result["credential_version"]})
+            if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] == "about":
+                if not self._require_auth(ROLE_VIEWER, api_mode=True):
+                    return
+                if not isinstance(body, dict):
+                    raise ValueError("request body must be an object")
+                unsupported_fields = set(body) - {"snapshot_id", "request_id"}
+                if unsupported_fields:
+                    raise ValueError("unsupported snapshot about fields")
+                result = self._control_plane_service().dispatch_snapshot_about(
+                    target_id=parts[3],
+                    snapshot_id=body.get("snapshot_id"),
+                    request_id=body.get("request_id"),
+                    requested_by="api",
+                )
+                return self._write_json(202, result)
             if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] in {"browse", "search", "dump"}:
                 if not self._require_auth(ROLE_VIEWER, api_mode=True):
                     return

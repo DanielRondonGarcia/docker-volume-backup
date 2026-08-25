@@ -178,6 +178,47 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         self.assertNotEqual(cache.key_for(first), cache.key_for(second))
         self.assertNotEqual(cache._index_key(first), cache._index_key(second))
 
+    def test_snapshot_about_cache_is_isolated_and_accepts_only_projected_stats(self):
+        cache, client, _ = self.make_cache()
+        context = self.make_context(operation="snapshot.about", snapshot_id="abcdef12")
+        other_snapshot = self.make_context(operation="snapshot.about", snapshot_id="abcdef13")
+        other_target = {**context, "target_id": "target-b"}
+        other_repository = {**context, "repository": "local:/other-repository"}
+        value = {
+            "schema_version": 1,
+            "status": JobStatus.SUCCEEDED,
+            "status_code": 0,
+            "target_id": "target-a",
+            "stats": {"total_size": 2048, "total_file_count": 3, "snapshots_count": 1},
+        }
+
+        calls = []
+        first = cache.get_or_compute(context, lambda: calls.append("compute") or value, cacheable=lambda item: True)
+        second = cache.get_or_compute(context, lambda: calls.append("compute-again") or value, cacheable=lambda item: True)
+
+        self.assertEqual(first, (value, False, "restic"))
+        self.assertEqual(second, (value, True, "redis"))
+        self.assertEqual(calls, ["compute"])
+        self.assertNotEqual(cache.key_for(context), cache.key_for(other_snapshot))
+        self.assertNotEqual(cache.key_for(context), cache.key_for(other_target))
+        self.assertNotEqual(cache.key_for(context), cache.key_for(other_repository))
+        self.assertTrue(cache.set(context, value))
+        for unsafe in (
+            {**value, "stats": {"total_size": 1, "total_file_count": 1, "snapshots_count": 1, "logs": "secret"}},
+            {**value, "stats": {"total_size": 1, "total_file_count": "1", "snapshots_count": 1}},
+            {**value, "repository": "local:/private"},
+        ):
+            self.assertFalse(cache.set(context, unsafe))
+        stored = json.loads(client.get(cache.key_for(context)).decode("utf-8"))
+        self.assertEqual(stored["stats"], value["stats"])
+
+    def test_snapshot_about_cache_generation_changes_entry_key(self):
+        cache, _, _ = self.make_cache()
+        first = self.make_context(operation="snapshot.about", snapshot_id="abcdef12", cache_generation=0)
+        second = self.make_context(operation="snapshot.about", snapshot_id="abcdef12", cache_generation=1)
+
+        self.assertNotEqual(cache.key_for(first), cache.key_for(second))
+
     def test_listing_output_limit_changes_snapshot_entry_key(self):
         cache, _, _ = self.make_cache()
         default = self.make_context(max_log_bytes=4 * 1024 * 1024)
@@ -385,6 +426,13 @@ class RedisSnapshotCacheTests(unittest.TestCase):
             "stdout_bytes": b"binary-content",
             "stderr": "",
         }
+        runtime.get_restic_snapshot_stats.return_value = {
+            "success": True,
+            "status_code": 0,
+            "stats": {"total_size": 2048, "total_file_count": 3, "snapshots_count": 1},
+            "logs": "",
+            "stderr": "",
+        }
         service = WorkerAgentService(
             WorkerAgentConfig("http://control-plane", "worker", "host"),
             Mock(),
@@ -411,6 +459,17 @@ class RedisSnapshotCacheTests(unittest.TestCase):
         self.assertEqual(runtime.run_runtime_job.call_count, 1)
         self.assertEqual(dump.result_summary["b64_content"], "YmluYXJ5LWNvbnRlbnQ=")
         self.assertNotIn("cache_hit", dump.result_summary)
+
+        about_first = service.execute_job({"command": "snapshot.about", "payload": payload})
+        about_second = service.execute_job({"command": "snapshot.about", "payload": payload})
+
+        self.assertEqual(about_first.status, JobStatus.SUCCEEDED)
+        self.assertFalse(about_first.result_summary["cache_hit"])
+        self.assertEqual(about_first.result_summary["source"], "restic")
+        self.assertTrue(about_second.result_summary["cache_hit"])
+        self.assertEqual(about_second.result_summary["source"], "redis")
+        self.assertEqual(about_first.result_summary["stats"], about_second.result_summary["stats"])
+        self.assertEqual(runtime.get_restic_snapshot_stats.call_count, 1)
 
     def test_worker_snapshot_catalog_is_cached_and_unavailable_cache_falls_back(self):
         clock = FakeClock()

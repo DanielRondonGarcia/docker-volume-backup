@@ -137,6 +137,75 @@ class SnapshotBrowserTests(unittest.TestCase):
         self.assertFalse(result.result_summary["listing_complete"])
         self.assertEqual(result.result_summary["listing_error_code"], "runtime_failure")
 
+    def test_snapshot_about_projects_safe_restore_size_stats_without_raw_runtime_output(self):
+        runtime = Mock()
+        runtime.get_restic_snapshot_stats.return_value = {
+            "success": True,
+            "status_code": 0,
+            "stats": {
+                "total_size": 4096,
+                "total_file_count": 7,
+                "snapshots_count": 1,
+                "repository": "local:/private",
+            },
+            "logs": '{"repository":"local:/private"}',
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {
+                "command": "snapshot.about",
+                "payload": {
+                    "target_id": "target-a",
+                    "snapshot_id": "abcdef12",
+                    "environment": {"RESTIC_REPOSITORY": "local:/private"},
+                },
+            }
+        )
+
+        self.assertEqual(result.status, JobStatus.SUCCEEDED)
+        self.assertEqual(
+            result.result_summary["stats"],
+            {"total_size": 4096, "total_file_count": 7, "snapshots_count": 1},
+        )
+        self.assertNotIn("repository", result.result_summary["stats"])
+        self.assertNotIn("local:/private", repr(result))
+
+    def test_snapshot_about_rejects_malformed_or_incomplete_stats(self):
+        runtime = Mock()
+        runtime.get_restic_snapshot_stats.return_value = {
+            "success": True,
+            "status_code": 0,
+            "stats": {"total_size": 1, "total_file_count": "7"},
+            "logs": "raw output must not cross the boundary",
+            "stderr": "",
+        }
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+
+        result = service.execute_job(
+            {
+                "command": "snapshot.about",
+                "payload": {
+                    "target_id": "target-a",
+                    "snapshot_id": "abcdef12",
+                    "environment": {"RESTIC_REPOSITORY": "local:/private"},
+                },
+            }
+        )
+
+        self.assertEqual(result.status, JobStatus.FAILED)
+        self.assertEqual(result.result_summary["error"], "snapshot stats JSON is invalid")
+        self.assertNotIn("raw output must not cross the boundary", repr(result))
+
     def test_timeout_and_output_limit_are_failed_with_bounded_diagnostics(self):
         for status_code, error_code, message in (
             (124, "timeout", "runtime timed out after 30 seconds"),

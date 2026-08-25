@@ -75,6 +75,12 @@ class ControlPlaneService:
     SNAPSHOT_LISTING_ERROR_CODES = frozenset(
         {"output_limit", "entry_limit", "timeout", "malformed_tree", "path_failure", "runtime_failure", "repository"}
     )
+    SNAPSHOT_ABOUT_STAT_FIELDS = frozenset({"total_size", "total_file_count", "snapshots_count"})
+    MAX_SNAPSHOT_ABOUT_STAT = (1 << 63) - 1
+    TARGET_STATS_MODES = ("raw-data", "blobs-per-file")
+    MAX_TARGET_STATS_FIELDS = 64
+    MAX_TARGET_STATS_VALUE = (1 << 63) - 1
+    TARGET_STATS_FIELD_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
     SNAPSHOT_READ_COMMANDS = {
         "browse": "snapshot.ls",
         "search": "snapshot.search",
@@ -643,6 +649,33 @@ class ControlPlaneService:
         """Return the v2 read contract without exposing job payloads or logs."""
         return self._snapshot_job_contract(self._require_job(job_id))
 
+    def dispatch_snapshot_about(
+        self,
+        target_id: str,
+        snapshot_id: str,
+        request_id: Optional[str] = None,
+        requested_by: str = "api",
+    ) -> Dict[str, Any]:
+        """Queue a bounded, snapshot-scoped logical size query."""
+        target = self._require_target(target_id)
+        normalized_snapshot_id = self._validate_snapshot_id(snapshot_id)
+        normalized_request_id = self._normalize_request_id(request_id)
+        self._validate_snapshot_metadata_target(target.id, normalized_snapshot_id)
+        payload = self._build_snapshot_about_payload(
+            target=target,
+            snapshot_id=normalized_snapshot_id,
+            request_id=normalized_request_id,
+        )
+        job = self.dispatch_job(
+            worker_id=target.worker_id,
+            command="snapshot.about",
+            payload=payload,
+            requested_by=requested_by,
+            target_id=target.id,
+            trigger="interactive",
+        )
+        return self._snapshot_job_contract(job)
+
     def snapshot_catalog(self, target_id: str) -> List[Dict[str, Any]]:
         self._require_target(target_id)
         return [
@@ -659,7 +692,7 @@ class ControlPlaneService:
     def fetch_interactive_jobs_for_worker(self, worker_id: str) -> List[JobRecord]:
         """Claim through the durable lease path, returning explorer work first."""
         jobs = self.fetch_jobs_for_worker(worker_id)
-        interactive = {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "stats.get"}
+        interactive = {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "snapshot.about", "stats.get"}
         return sorted(jobs, key=lambda job: job.command not in interactive)
 
     def dispatch_snapshot_ls(self, target_id: str, snapshot_id: str, path: str = "") -> Dict[str, Any]:
@@ -1232,6 +1265,34 @@ class ControlPlaneService:
             operation="dump",
         )
 
+    def _build_snapshot_about_payload(
+        self,
+        target: BackupTargetRecord,
+        snapshot_id: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
+        volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
+        return {
+            "target_id": target.id,
+            "compose_project": target.compose_project,
+            "image": target.runtime_image,
+            "command": ["restic", "stats", "--mode", "restore-size", "--json", snapshot_id],
+            "environment": environment,
+            "volumes": volumes,
+            "network_mode": "bridge",
+            "resolved_files": resolved_files,
+            "labels": target.labels,
+            "cache_generation": self._snapshot_cache_generation(target),
+            "snapshot_id": snapshot_id,
+            "request_id": request_id,
+            "schema_version": 1,
+            "operation": "about",
+            "path": "/",
+            "storage_context": storage_context,
+        }
+
     def _build_storage_about_payload(
         self,
         profile: StorageProfileRecord,
@@ -1351,6 +1412,7 @@ class ControlPlaneService:
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": "restic stats --mode raw-data --json",
+            "stats_modes": list(self.TARGET_STATS_MODES),
             "environment": environment,
             "volumes": volumes,
             "network_mode": target.runtime_network_mode,
@@ -1860,6 +1922,7 @@ class ControlPlaneService:
             "state",
             "source",
             "cache_hit",
+            "snapshot_id",
             "recovery",
             "error",
             "retention_command",
@@ -1893,11 +1956,74 @@ class ControlPlaneService:
             if not isinstance(value, list):
                 continue
             safe[key] = [self._safe_public_value(item, job) for item in value[: self.MAX_PUBLIC_SUMMARY_ITEMS] if isinstance(item, dict)]
-        for key in ("metrics", "stats"):
+        for key in ("metrics", "stats", "stats_by_mode"):
             value = raw.get(key)
             if isinstance(value, dict):
-                safe[key] = self._safe_public_value(value, job)
+                if key == "stats" and job.command == "snapshot.about":
+                    projected = self._safe_snapshot_about_stats(value)
+                elif job.command == "stats.get":
+                    projected = (
+                        self._safe_target_stats(value)
+                        if key == "stats"
+                        else self._safe_target_stats_by_mode(value)
+                    )
+                else:
+                    projected = self._safe_public_value(value, job)
+                if projected:
+                    safe[key] = projected
         return safe
+
+    @classmethod
+    def _safe_snapshot_about_stats(cls, value: Any) -> Dict[str, int]:
+        if not isinstance(value, dict) or not cls.SNAPSHOT_ABOUT_STAT_FIELDS.issubset(value):
+            return {}
+        projected: Dict[str, int] = {}
+        for field in cls.SNAPSHOT_ABOUT_STAT_FIELDS:
+            raw = value.get(field)
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, int)
+                or raw < 0
+                or raw > cls.MAX_SNAPSHOT_ABOUT_STAT
+            ):
+                return {}
+            projected[field] = raw
+        return projected
+
+    @classmethod
+    def _safe_target_stats(cls, value: Any) -> Dict[str, int | float]:
+        if not isinstance(value, dict) or not value or len(value) > cls.MAX_TARGET_STATS_FIELDS:
+            return {}
+        projected: Dict[str, int | float] = {}
+        for field, raw in value.items():
+            if field == "modes":
+                continue
+            if (
+                not isinstance(field, str)
+                or not cls.TARGET_STATS_FIELD_PATTERN.fullmatch(field)
+                or isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(float(raw))
+                or raw < 0
+                or raw > cls.MAX_TARGET_STATS_VALUE
+            ):
+                return {}
+            projected[field] = raw
+        return projected
+
+    @classmethod
+    def _safe_target_stats_by_mode(cls, value: Any) -> Dict[str, Dict[str, int | float]]:
+        if not isinstance(value, dict) or len(value) > len(cls.TARGET_STATS_MODES):
+            return {}
+        projected: Dict[str, Dict[str, int | float]] = {}
+        for mode, stats in value.items():
+            if mode not in cls.TARGET_STATS_MODES:
+                return {}
+            safe_stats = cls._safe_target_stats(stats)
+            if not safe_stats:
+                return {}
+            projected[mode] = safe_stats
+        return projected
 
     @classmethod
     def _safe_snapshot_listing_diagnostics(cls, summary: Any) -> Dict[str, Any]:
@@ -2334,13 +2460,65 @@ class ControlPlaneService:
         return value
 
     def _validate_snapshot_metadata_target(self, target_id: str, snapshot_id: str) -> None:
+        for snapshot in self.snapshot_repository.list_by_target(target_id):
+            if snapshot.snapshot_id != snapshot_id:
+                continue
+            metadata_target_id = getattr(snapshot, "target_id", target_id)
+            if metadata_target_id == target_id:
+                return
+            raise ValueError("snapshot metadata belongs to another target")
+
         for candidate_target in self.target_repository.list():
+            if candidate_target.id == target_id:
+                continue
             for snapshot in self.snapshot_repository.list_by_target(candidate_target.id):
                 if snapshot.snapshot_id != snapshot_id:
                     continue
-                metadata_target_id = getattr(snapshot, "target_id", candidate_target.id)
-                if metadata_target_id != target_id or candidate_target.id != target_id:
-                    raise ValueError("snapshot metadata belongs to another target")
+                raise ValueError("snapshot metadata belongs to another target")
+
+    @staticmethod
+    def _safe_snapshot_about_text(value: Any, limit: int = 256) -> Optional[str]:
+        if not isinstance(value, str) or not value or len(value) > limit:
+            return None
+        if "\x00" in value or any(ord(character) < 32 for character in value):
+            return None
+        if re.search(r"(?i)(?:password|secret|token|credential|repository|rclone|https?://|(?:s3|gs|azure|local|file):)", value):
+            return None
+        return value
+
+    @classmethod
+    def _safe_snapshot_about_values(cls, values: Any) -> List[str]:
+        if not isinstance(values, list):
+            return []
+        safe = []
+        for value in values[:64]:
+            normalized = cls._safe_snapshot_about_text(value)
+            if normalized is not None:
+                safe.append(normalized)
+        return safe
+
+    def _snapshot_about_metadata(self, target_id: Optional[str], snapshot_id: str) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "snapshot_id": snapshot_id,
+            "created_at": None,
+            "hostname": None,
+            "paths": [],
+            "tags": [],
+        }
+        if not isinstance(target_id, str):
+            return metadata
+        for snapshot in self.snapshot_repository.list_by_target(target_id):
+            if snapshot.snapshot_id != snapshot_id or getattr(snapshot, "target_id", target_id) != target_id:
+                continue
+            created_at = getattr(snapshot, "created_at", None)
+            if hasattr(created_at, "isoformat"):
+                created_at = created_at.isoformat()
+            metadata["created_at"] = self._safe_snapshot_about_text(created_at, 128)
+            metadata["hostname"] = self._safe_snapshot_about_text(getattr(snapshot, "hostname", None))
+            metadata["paths"] = self._safe_snapshot_about_values(getattr(snapshot, "paths", []))
+            metadata["tags"] = self._safe_snapshot_about_values(getattr(snapshot, "tags", []))
+            break
+        return metadata
 
     def _snapshot_job_contract(self, job: JobRecord) -> Dict[str, Any]:
         status = JobStatus.normalize(job.status)
@@ -2380,6 +2558,11 @@ class ControlPlaneService:
             "error": error,
         }
         contract.update(self._safe_snapshot_listing_diagnostics(summary))
+        if job.command == "snapshot.about":
+            snapshot_id = payload.get("snapshot_id")
+            if isinstance(snapshot_id, str) and self.SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id):
+                contract.update(self._snapshot_about_metadata(job.target_id, snapshot_id))
+            contract["stats"] = self._safe_snapshot_about_stats(summary.get("stats"))
         return contract
 
     def _repository_fingerprint(self, target: BackupTargetRecord) -> str:
@@ -2722,11 +2905,22 @@ class ControlPlaneService:
         self.snapshot_repository.replace_for_target(target_id, snapshots)
 
     def _sync_stats_from_result(self, target_id: str, worker_id: str, result_summary: Dict[str, Any]) -> None:
+        legacy_stats = self._safe_target_stats(result_summary.get("stats"))
+        stats_by_mode = self._safe_target_stats_by_mode(result_summary.get("stats_by_mode"))
+        if set(stats_by_mode) == set(self.TARGET_STATS_MODES):
+            persisted_stats = dict(legacy_stats or stats_by_mode["raw-data"])
+            persisted_stats["modes"] = stats_by_mode
+        elif legacy_stats:
+            # Keep older workers and existing consumers compatible while the
+            # second mode is not available yet.
+            persisted_stats = legacy_stats
+        else:
+            return
         stats_record = self.target_stats_repository.get_by_target(target_id) or TargetStatsRecord(
             target_id=target_id,
             worker_id=worker_id,
         )
         stats_record.worker_id = worker_id
-        stats_record.stats = result_summary.get("stats") or result_summary
+        stats_record.stats = persisted_stats
         stats_record.updated_at = utcnow()
         self.target_stats_repository.save(stats_record)

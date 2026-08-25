@@ -107,8 +107,100 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(job.payload["path"], "/folder with spaces/file.txt")
         self.assertEqual(job.payload["operation"], "browse")
         self.assertEqual(job.payload["command"][:3], ["restic", "ls", "--json"])
-        self.assertEqual(job.payload["command"][-1], "abcdef12:/folder with spaces/file.txt")
+        self.assertEqual(job.payload["command"][-2:], ["abcdef12", "/folder with spaces/file.txt"])
         self.assertEqual(job.payload["cache_generation"], 0)
+
+    def test_snapshot_about_dispatch_uses_scoped_restore_size_stats_and_safe_contract(self):
+        service = self.make_service()
+        created_at = utcnow()
+        service.snapshot_repository.replace_for_target(
+            "target-a",
+            [
+                SnapshotRecord(
+                    "target-a",
+                    "worker-a",
+                    "abcdef12",
+                    created_at,
+                    hostname="backup-host",
+                    paths=["/data"],
+                    tags=["nightly"],
+                )
+            ],
+        )
+
+        response = service.dispatch_snapshot_about("target-a", "abcdef12", request_id="about-1")
+        job = service.get_job(response["job_id"])
+
+        self.assertEqual(response["status"], JobStatus.PENDING)
+        self.assertEqual(response["request_id"], "about-1")
+        self.assertEqual(job.command, "snapshot.about")
+        self.assertEqual(
+            job.payload["command"],
+            ["restic", "stats", "--mode", "restore-size", "--json", "abcdef12"],
+        )
+        self.assertEqual(job.payload["snapshot_id"], "abcdef12")
+        self.assertEqual(job.payload["cache_generation"], 0)
+
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        service.update_job_status(
+            "worker-a",
+            claimed.id,
+            JobStatus.SUCCEEDED,
+            result_summary={
+                "snapshot_id": "abcdef12",
+                "stats": {
+                    "total_size": 2048,
+                    "total_file_count": 3,
+                    "snapshots_count": 1,
+                    "repository": "local:/must-not-leak",
+                },
+                "cache_hit": True,
+                "source": "redis",
+            },
+            lease_token=claimed.lease_token,
+        )
+
+        contract = service.snapshot_job_contract(job.id)
+        self.assertEqual(contract["snapshot_id"], "abcdef12")
+        self.assertEqual(contract["created_at"], created_at.isoformat())
+        self.assertEqual(contract["hostname"], "backup-host")
+        self.assertEqual(contract["paths"], ["/data"])
+        self.assertEqual(contract["tags"], ["nightly"])
+        self.assertEqual(
+            contract["stats"],
+            {"total_size": 2048, "total_file_count": 3, "snapshots_count": 1},
+        )
+        self.assertTrue(contract["cache_hit"])
+        self.assertEqual(contract["source"], "redis")
+        self.assertNotIn("repository", contract["stats"])
+
+    def test_target_stats_dispatch_persists_both_modes_and_preserves_legacy_raw_stats(self):
+        service = self.make_service()
+
+        response = service.dispatch_stats_for_target("target-a", requested_by="operator")
+        job = service.get_job(response.id)
+        self.assertEqual(job.command, "stats.get")
+        self.assertEqual(job.payload["command"], "restic stats --mode raw-data --json")
+        self.assertEqual(job.payload["stats_modes"], ["raw-data", "blobs-per-file"])
+
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        raw_stats = {"total_size": 4096, "unique_size": 3072, "snapshots_count": 2}
+        blobs_stats = {"total_size": 2048, "total_file_count": 7, "total_blob_count": 9}
+        service.update_job_status(
+            "worker-a",
+            claimed.id,
+            JobStatus.SUCCEEDED,
+            result_summary={
+                "stats": raw_stats,
+                "stats_by_mode": {"raw-data": raw_stats, "blobs-per-file": blobs_stats},
+            },
+            lease_token=claimed.lease_token,
+        )
+
+        record = service.get_target_stats("target-a")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.stats["total_size"], 4096)
+        self.assertEqual(record.stats["modes"], {"raw-data": raw_stats, "blobs-per-file": blobs_stats})
 
     def test_browse_uses_direct_restic_ls_but_search_and_find_keep_restic_ls(self):
         service = self.make_service()
@@ -295,6 +387,33 @@ class ControlPlaneDispatchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "another target"):
             service.dispatch_snapshot_read("target-a", "browse", "abcdef12")
+
+    def test_duplicate_snapshot_short_id_is_scoped_to_requested_target(self):
+        service = self.make_service()
+        service.target_repository.save(
+            BackupTargetRecord(
+                name="target-c",
+                worker_id="worker-a",
+                id="target-c",
+                runtime_environment={"RESTIC_REPOSITORY": "local:/repo-c"},
+            )
+        )
+        service.snapshot_repository.replace_for_target(
+            "target-a",
+            [SnapshotRecord("target-a", "worker-a", "abcdef12", utcnow())],
+        )
+        service.snapshot_repository.replace_for_target(
+            "target-b",
+            [SnapshotRecord("target-b", "worker-b", "abcdef12", utcnow())],
+        )
+
+        about = service.dispatch_snapshot_about("target-a", "abcdef12")
+        read = service.dispatch_snapshot_read("target-a", "browse", "abcdef12")
+
+        self.assertEqual(service.get_job(about["job_id"]).target_id, "target-a")
+        self.assertEqual(service.get_job(read["job_id"]).target_id, "target-a")
+        with self.assertRaisesRegex(ValueError, "another target"):
+            service.dispatch_snapshot_about("target-c", "abcdef12")
 
     def test_boundary_rejects_invalid_values_without_stripping_them(self):
         service = self.make_service()
@@ -852,6 +971,42 @@ class ControlPlaneRouteTests(unittest.TestCase):
         handler._require_auth.assert_called_once_with(ROLE_VIEWER, api_mode=True)
         service.dispatch_snapshot_read.assert_called_once()
         self.assertEqual(handler._write_json.call_args.args[0], 202)
+
+    def test_about_route_requires_viewer_role_and_uses_exact_snapshot_payload(self):
+        handler = self.make_handler(
+            "/api/v2/targets/target-a/about",
+            '{"snapshot_id":"abcdef12"}',
+        )
+        service = Mock()
+        service.dispatch_snapshot_about.return_value = {"schema_version": 1, "status": "pending"}
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_VIEWER, api_mode=True)
+        service.dispatch_snapshot_about.assert_called_once_with(
+            target_id="target-a",
+            snapshot_id="abcdef12",
+            request_id=None,
+            requested_by="api",
+        )
+        self.assertEqual(handler._write_json.call_args.args[0], 202)
+
+    def test_target_stats_sync_route_requires_operator_and_returns_public_job(self):
+        handler = self.make_handler("/api/v1/targets/target-a/stats-sync", "{}")
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_OPERATOR}
+        service = Mock()
+        service.dispatch_stats_for_target.return_value = SimpleNamespace(id="job-1")
+        service.public_job_view.return_value = {"id": "job-1", "status": "pending"}
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_auth.assert_called_once_with(ROLE_OPERATOR, api_mode=True)
+        service.dispatch_stats_for_target.assert_called_once_with("target-a", requested_by="api")
+        service.public_job_view.assert_called_once_with(service.dispatch_stats_for_target.return_value)
+        self.assertEqual(handler._write_json.call_args.args, (202, service.public_job_view.return_value))
 
     def test_cancel_route_requires_operator_role(self):
         handler = self.make_handler("/api/v2/jobs/job-1/cancel", "{}")

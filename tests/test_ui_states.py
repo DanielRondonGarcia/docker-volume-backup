@@ -34,6 +34,91 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn("/snapshot-dump", self.source)
         self.assertIn("/api/v1/jobs/${encodeURIComponent(request.jobId)}", self.source)
 
+    def test_snapshot_about_action_uses_v2_polling_and_renders_safe_logical_details(self):
+        for marker in (
+            'data-snapshot-about',
+            '>Información</button>',
+            'requestSnapshotOperation(request, "about"',
+            '/api/v2/targets/${encodeURIComponent(request.targetId)}/${operation}',
+            'Tamaño lógico/restaurable',
+            'total_file_count',
+            'snapshots_count',
+            'Redis (cache hit)',
+            'renderSnapshotAboutLoading',
+            'data-snapshot-about-open-browser',
+            'La consulta fue cancelada.',
+        ):
+            self.assertIn(marker, self.source)
+        about = re.search(r"async function loadSnapshotAbout\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(about)
+        about_source = about.group(0)
+        for marker in (
+            'beginSnapshotRequest("about", selectedId, null)',
+            'request_id: `ui-${request.seq}`',
+            'isCurrentSnapshotRequest(request)',
+            'finishSnapshotRequest(request)',
+        ):
+            self.assertIn(marker, about_source)
+        self.assertIn('snapshot-poll-timeout', self.source)
+        navigation = re.search(r"function handleSnapshotNavigationClick\(event\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(navigation)
+        self.assertIn('void loadSnapshotAbout(about.dataset.snapshotId)', navigation.group(0))
+        self.assertIn('!event.target.closest("[data-snapshot-restore], [data-snapshot-about]")', navigation.group(0))
+        self.assertIn('escapeHtml(source)', self.source)
+        self.assertIn('metadataValue(normalized.created_at ? fmtDate(normalized.created_at) : "")', self.source)
+
+    def test_snapshot_about_uses_bounded_page_session_cache_and_honest_source(self):
+        for marker in (
+            "SNAPSHOT_ABOUT_SESSION_CACHE_LIMIT = 24",
+            "const snapshotAboutSessionCache = new Map()",
+            "snapshotAboutSessionCacheKey(targetId, snapshotId)",
+            "getSnapshotAboutSessionCache(state.target.id, selectedId)",
+            "setSnapshotAboutSessionCache(state.target.id, selectedId, state.about)",
+            "snapshotAboutSessionCache.size > SNAPSHOT_ABOUT_SESSION_CACHE_LIMIT",
+            'source: "browser-session-cache"',
+            'normalized.source === "browser-session-cache"',
+            "if (result && result.changed) clearSnapshotAboutSessionCache(current.target.id)",
+            "if (result && result.changed) clearSnapshotAboutSessionCache(state.target.id)",
+        ):
+            self.assertIn(marker, self.source)
+        about = re.search(r"async function loadSnapshotAbout\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(about)
+        about_source = about.group(0)
+        self.assertIn("invalidateSnapshotRequest(false);", about_source)
+        self.assertIn("const cachedAbout = bypassSessionCache ? null : getSnapshotAboutSessionCache(state.target.id, selectedId);", about_source)
+        self.assertIn("if (cachedAbout)", about_source)
+        self.assertLess(about_source.index("getSnapshotAboutSessionCache"), about_source.index("requestSnapshotOperation"))
+
+    def test_snapshot_about_retry_bypasses_page_session_cache(self):
+        retry = re.search(r"function retrySnapshotAction\(\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(retry)
+        self.assertIn('loadSnapshotAbout(state.currentSnapshot, { bypassSessionCache: true });', retry.group(0))
+        about = re.search(r"async function loadSnapshotAbout\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(about)
+        self.assertIn("const bypassSessionCache = options.bypassSessionCache === true;", about.group(0))
+        self.assertIn("const cachedAbout = bypassSessionCache ? null", about.group(0))
+
+    def test_target_stats_action_is_restic_only_and_cache_first_with_bounded_job_refresh(self):
+        for marker in (
+            'data-action="target-stats"',
+            ">Ver stats</button>",
+            'api/v1/targets/${encodeURIComponent(request.targetId)}/stats',
+            'api/v1/targets/${encodeURIComponent(request.targetId)}/stats-sync',
+            'TARGET_STATS_MODES = ["raw-data", "blobs-per-file"]',
+            'Fuente:</strong> Registro persistido',
+            'Última actualización:</strong>',
+            'raw-data representa almacenamiento físico/deduplicado',
+            'blobs-per-file',
+            'connectJobEvents(request.jobId',
+            'Actualizando por polling',
+            'state.currentRole === "admin" || state.currentRole === "operator"',
+        ):
+            self.assertIn(marker, self.source)
+        actions = re.search(r"function bindTargetActions\(\).*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(actions)
+        self.assertIn('else if (action === "target-stats") { await openTargetStats(target, e.currentTarget); }', actions.group(0))
+        self.assertNotIn('data-action="target-stats"', re.search(r"function renderSnapshotList\(\).*?\n    \}", self.source, re.S).group(0))
+
     def test_snapshot_catalog_sync_runs_after_persisted_catalog_load_and_surfaces_failures(self):
         modal = re.search(r"async function openSnapshotsModal\(target\) \{.*?\n    \}", self.source, re.S)
         self.assertIsNotNone(modal)

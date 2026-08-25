@@ -210,7 +210,7 @@ class WorkerAgentService:
     )
     JOB_LEASE_RENEWAL_INTERVAL_SECONDS = 60.0
     INTERACTIVE_COMMANDS = frozenset(
-        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "stats.get", "storage.about"}
+        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.dump", "snapshot.about", "stats.get", "storage.about"}
     )
 
     def __init__(
@@ -579,6 +579,29 @@ class WorkerAgentService:
                 log_lines=self._recovery_log_lines(command, inspection, status, error),
             )
 
+        if command == "snapshot.about":
+            parsed, valid = self._parse_recovery_json(inspection.get("logs"), {})
+            stats: Dict[str, int] = {}
+            if valid and isinstance(parsed, dict):
+                try:
+                    stats = DockerRuntimeAdapter.project_snapshot_stats(parsed)
+                except ValueError:
+                    valid = False
+            error = None
+            if not runtime_ok:
+                error = f"snapshot.about runtime exited with status code {status_code}."
+            elif not valid:
+                error = "Snapshot details were unavailable after worker restart."
+            status = JobStatus.SUCCEEDED if runtime_ok and valid else JobStatus.FAILED
+            summary = {"status_code": status_code, "recovery": recovery, "stats": stats}
+            if error:
+                summary["error"] = error
+            return WorkerJobExecutionResult(
+                status=status,
+                result_summary=summary,
+                log_lines=[error] if error else ["Snapshot details recovered after worker restart."],
+            )
+
         if command in ("backup.run", "retention.run", "restore.dry_run", "restore.run"):
             error = None if runtime_ok else (
                 f"{command} runtime exited with status code {status_code}."
@@ -892,6 +915,102 @@ class WorkerAgentService:
             "max_entries": payload.get("max_entries"),
             "max_log_bytes": max_log_bytes,
         }
+
+    def _execute_snapshot_about(
+        self,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None,
+        progress_reporter: _JobProgressReporter | None = None,
+    ) -> WorkerJobExecutionResult:
+        image = payload.get("image") or self.config.backup_runtime_image
+        snapshot_id = payload.get("snapshot_id")
+        direct_log_lines: List[str] = []
+
+        if self._storage_repository_unconfigured(payload):
+            error = self.UNCONFIGURED_RESTIC_REPOSITORY_ERROR
+            return WorkerJobExecutionResult(
+                status=JobStatus.FAILED,
+                result_summary={
+                    "target_id": payload.get("target_id"),
+                    "snapshot_id": snapshot_id,
+                    "error": error,
+                },
+                log_lines=[error],
+            )
+
+        def compute() -> Dict[str, Any]:
+            summary = self._invoke_runtime(
+                self.docker_runtime.get_restic_snapshot_stats,
+                image,
+                payload,
+                cancel_check,
+                progress_reporter.callback if progress_reporter else None,
+            )
+            status = self._runtime_status(summary)
+            error = None
+            if status == JobStatus.CANCELED:
+                error = "snapshot.about runtime was canceled."
+            elif status != JobStatus.SUCCEEDED:
+                classified_error = self._classify_snapshot_runtime_error("snapshot.about", payload, summary)
+                error = (
+                    self.MISSING_RESTIC_REPOSITORY_ERROR
+                    if classified_error == self.MISSING_RESTIC_REPOSITORY_ERROR
+                    else f"snapshot.about runtime exited with status code {summary.get('status_code', 'unavailable')}."
+                )
+            stats: Dict[str, int] = {}
+            if status == JobStatus.SUCCEEDED:
+                try:
+                    stats = DockerRuntimeAdapter.project_snapshot_stats(summary.get("stats"))
+                except ValueError:
+                    status = JobStatus.FAILED
+                    error = "snapshot stats JSON is invalid"
+            value = {
+                "schema_version": 1,
+                "status": status,
+                "status_code": summary.get("status_code"),
+                "target_id": payload.get("target_id"),
+                "stats": stats,
+            }
+            if error:
+                value["error"] = error
+            if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+                direct_log_lines[:] = [error]
+            else:
+                if error and not direct_log_lines:
+                    direct_log_lines.append(error)
+            return value
+
+        context = self._snapshot_cache_context("snapshot.about", payload)
+        cache_hit = False
+        source = "restic-fallback"
+        if self.snapshot_cache is not None and context is not None:
+            value, cache_hit, source = self.snapshot_cache.get_or_compute(
+                context,
+                compute,
+                cacheable=lambda result: result.get("status") == JobStatus.SUCCEEDED,
+                cancel_check=cancel_check,
+            )
+        else:
+            value = compute()
+
+        result_summary = {
+            "status_code": value.get("status_code"),
+            "target_id": payload.get("target_id"),
+            "snapshot_id": snapshot_id,
+            "stats": value.get("stats", {}),
+            "cache_hit": bool(cache_hit),
+            "source": source,
+        }
+        if progress_reporter and progress_reporter.latest_progress:
+            result_summary["progress"] = dict(progress_reporter.latest_progress)
+        if value.get("error"):
+            result_summary["error"] = value["error"]
+        log_lines = direct_log_lines if not cache_hit else direct_log_lines + ["Snapshot about served from Redis"]
+        return WorkerJobExecutionResult(
+            status=value.get("status", JobStatus.FAILED),
+            result_summary=result_summary,
+            log_lines=log_lines,
+        )
 
     def _execute_snapshot_metadata(
         self,
@@ -1504,6 +1623,9 @@ class WorkerAgentService:
             if command in ("snapshot.ls", "snapshot.search", "snapshot.find"):
                 return self._execute_snapshot_metadata(command, payload, cancel_check, progress_reporter)
 
+            if command == "snapshot.about":
+                return self._execute_snapshot_about(payload, cancel_check, progress_reporter)
+
             if command == "snapshot.dump":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self._invoke_runtime(self.docker_runtime.run_runtime_job_binary, image, payload, cancel_check)
@@ -1535,6 +1657,7 @@ class WorkerAgentService:
                         "status_code": summary.get("status_code"),
                         "target_id": payload.get("target_id"),
                         "stats": summary.get("stats", {}),
+                        "stats_by_mode": summary.get("stats_by_mode", {}),
                     },
                     log_lines=self._bounded_log_lines(payload, summary.get("logs"), summary.get("stderr")),
                 )

@@ -34,6 +34,8 @@ class DockerRuntimeAdapter:
     MAX_DUMP_BYTES = 16 * 1024 * 1024
     MAX_ZIP_BYTES = 64 * 1024 * 1024
     MAX_SNAPSHOT_ENTRIES = 10_000
+    MAX_SNAPSHOT_STATS_VALUE = (1 << 63) - 1
+    MAX_TARGET_STATS_FIELDS = 64
     MAX_RECOVERY_LOG_BYTES = 512 * 1024
     MAX_SNAPSHOT_PATH_LENGTH = 4096
     _SHELL_METACHARACTERS = frozenset(";|&`$><\\\"'\n\r\x00(){}[]*?!")
@@ -41,6 +43,8 @@ class DockerRuntimeAdapter:
     _READ_ONLY_OPERATIONS = frozenset({"snapshots", "ls", "cat", "dump", "find", "stats"})
     _WRITE_OPERATIONS = frozenset({"backup", "restore", "forget", "prune"})
     _SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
+    _STATS_FIELD_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+    _TARGET_STATS_MODES = frozenset({"raw-data", "blobs-per-file"})
     _SAFE_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
     _RCLONE_REMOTE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
     _REPOSITORY_URL_PATTERN = re.compile(r"(?i)\b(?:https?|s3|gs|az|swift)://[^\s\"'<>]+")
@@ -121,6 +125,15 @@ class DockerRuntimeAdapter:
         if operation == "snapshots" and argv == ["restic", "snapshots", "--json"]:
             return argv
         if operation == "stats" and argv == ["restic", "stats", "--mode", "raw-data", "--json"]:
+            return argv
+        if operation == "stats" and argv == ["restic", "stats", "--mode", "blobs-per-file", "--json"]:
+            return argv
+        if (
+            operation == "stats"
+            and len(argv) == 6
+            and argv[2:5] == ["--mode", "restore-size", "--json"]
+        ):
+            cls.validate_snapshot_id(argv[5])
             return argv
         if operation == "cat" and len(argv) == 4 and argv[2] == "tree":
             snapshot_id, path = cls._snapshot_tree_arguments(argv[3])
@@ -267,6 +280,12 @@ class DockerRuntimeAdapter:
                 return argv[operation_index + 1], argv[operation_index + 2]
             if len(argv) == operation_index + 5:
                 return argv[operation_index + 3], argv[operation_index + 4]
+        if (
+            operation == "stats"
+            and len(argv) == operation_index + 5
+            and argv[operation_index + 1 : operation_index + 4] == ["--mode", "restore-size", "--json"]
+        ):
+            return argv[operation_index + 4], "/"
         return None, None
 
     @classmethod
@@ -720,6 +739,11 @@ class DockerRuntimeAdapter:
                 argv[operation_index : operation_index + 2] == ["cat", "tree"]
                 and len(argv) == operation_index + 3
             )
+        if operation == "stats":
+            return (
+                argv[operation_index : operation_index + 4] == ["stats", "--mode", "restore-size", "--json"]
+                and len(argv) == operation_index + 5
+            )
         return (
             operation in {"ls", "find"}
             and len(argv) in {operation_index + 3, operation_index + 4}
@@ -739,6 +763,19 @@ class DockerRuntimeAdapter:
     def _bounded_bytes(value: Any, limit: int) -> tuple[bytes, bool]:
         raw = value if isinstance(value, bytes) else str(value or "").encode("utf-8", errors="replace")
         return raw[:limit], len(raw) > limit
+
+    @staticmethod
+    def _capture_binary_output(container: Any) -> tuple[Any, Any]:
+        attached = container.attach(
+            stdout=True,
+            stderr=True,
+            stream=False,
+            logs=True,
+            demux=True,
+        )
+        if isinstance(attached, tuple) and len(attached) == 2:
+            return attached
+        return attached, b""
 
     @classmethod
     def _safe_cache_component(cls, value: Any, label: str) -> str:
@@ -1394,20 +1431,123 @@ class DockerRuntimeAdapter:
         cancel_check: Callable[[], bool] | None = None,
         output_callback: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
+        requested_modes = payload.get("stats_modes", ["raw-data"])
+        if (
+            not isinstance(requested_modes, (list, tuple))
+            or not requested_modes
+            or len(requested_modes) > len(self._TARGET_STATS_MODES)
+            or any(not isinstance(mode, str) or mode not in self._TARGET_STATS_MODES for mode in requested_modes)
+            or len(set(requested_modes)) != len(requested_modes)
+        ):
+            return {
+                "success": False,
+                "status_code": 1,
+                "error": "unsupported restic stats mode",
+                "logs": "",
+                "stderr": "",
+                "stats": {},
+                "stats_by_mode": {},
+            }
+
+        summaries = []
+        stats_by_mode: Dict[str, Dict[str, int | float]] = {}
+        for mode in requested_modes:
+            mode_payload = dict(payload)
+            mode_payload["command"] = ["restic", "stats", "--mode", mode, "--json"]
+            kwargs = {}
+            if cancel_check:
+                kwargs["cancel_check"] = cancel_check
+            if output_callback:
+                kwargs["output_callback"] = output_callback
+            summary = self.run_runtime_job(image=image, payload=mode_payload, **kwargs)
+            summaries.append(summary)
+            if not summary.get("success"):
+                return {
+                    **summary,
+                    "logs": "\n".join(str(item.get("logs", "") or "") for item in summaries if item.get("logs")),
+                    "stderr": "\n".join(str(item.get("stderr", "") or "") for item in summaries if item.get("stderr")),
+                    "stats": {},
+                    "stats_by_mode": {},
+                    "failed_mode": mode,
+                }
+            try:
+                parsed = json.loads(summary.get("logs", "") or "{}")
+                stats_by_mode[mode] = self.project_restic_stats(parsed)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return {
+                    **summary,
+                    "success": False,
+                    "error": "failed to parse restic stats JSON",
+                    "stats": {},
+                    "stats_by_mode": {},
+                    "failed_mode": mode,
+                }
+
+        logs = "\n".join(str(item.get("logs", "") or "") for item in summaries if item.get("logs"))
+        stderr = "\n".join(str(item.get("stderr", "") or "") for item in summaries if item.get("stderr"))
+        legacy_stats = stats_by_mode.get("raw-data") or next(iter(stats_by_mode.values()), {})
+        return {
+            "success": True,
+            "status_code": summaries[-1].get("status_code", 0),
+            "logs": logs,
+            "stderr": stderr,
+            "stats": legacy_stats,
+            "stats_by_mode": stats_by_mode,
+        }
+
+    @classmethod
+    def project_restic_stats(cls, value: Any) -> Dict[str, int | float]:
+        if not isinstance(value, dict) or not value or len(value) > cls.MAX_TARGET_STATS_FIELDS:
+            raise ValueError("restic stats JSON must be a bounded non-empty object")
+        projected: Dict[str, int | float] = {}
+        for field, raw in value.items():
+            if not isinstance(field, str) or not cls._STATS_FIELD_PATTERN.fullmatch(field):
+                raise ValueError("restic stats JSON contains an invalid field")
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(float(raw)):
+                raise ValueError("restic stats JSON contains invalid numeric fields")
+            if raw < 0 or raw > cls.MAX_SNAPSHOT_STATS_VALUE:
+                raise ValueError("restic stats JSON contains out-of-range numeric fields")
+            projected[field] = raw
+        return projected
+
+    @classmethod
+    def project_snapshot_stats(cls, value: Any) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            raise ValueError("snapshot stats JSON must be an object")
+        projected: Dict[str, int] = {}
+        for field in ("total_size", "total_file_count", "snapshots_count"):
+            raw = value.get(field)
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, int)
+                or raw < 0
+                or raw > cls.MAX_SNAPSHOT_STATS_VALUE
+            ):
+                raise ValueError("snapshot stats JSON contains invalid numeric fields")
+            projected[field] = raw
+        return projected
+
+    def get_restic_snapshot_stats(
+        self,
+        image: str,
+        payload: Dict[str, Any],
+        cancel_check: Callable[[], bool] | None = None,
+        output_callback: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any]:
         kwargs = {}
         if cancel_check:
             kwargs["cancel_check"] = cancel_check
         if output_callback:
             kwargs["output_callback"] = output_callback
         summary = self.run_runtime_job(image=image, payload=payload, **kwargs)
-        logs = summary.get("logs", "")
-        stats = {}
+        stats: Dict[str, int] = {}
         if summary.get("success"):
             try:
-                stats = json.loads(logs or "{}")
-            except json.JSONDecodeError:
+                parsed = json.loads(summary.get("logs", "") or "{}")
+                stats = self.project_snapshot_stats(parsed)
+            except (json.JSONDecodeError, TypeError, ValueError):
                 summary["success"] = False
-                summary["error"] = "failed to parse restic stats JSON"
+                summary["error"] = "failed to parse restic snapshot stats JSON"
         summary["stats"] = stats
         return summary
 
@@ -1451,9 +1591,10 @@ class DockerRuntimeAdapter:
             is_zip = len(command) > operation_index and command[operation_index] == "dump" and "zip" in command
             default_limit = self.MAX_ZIP_BYTES if is_zip else self.MAX_DUMP_BYTES
             output_limit = self._bounded_limit(payload.get("max_output_bytes"), default_limit, default_limit)
-            raw_stdout, stdout_exceeded = self._bounded_bytes(container.logs(stdout=True, stderr=False), output_limit)
+            attached_stdout, attached_stderr = self._capture_binary_output(container)
+            raw_stdout, stdout_exceeded = self._bounded_bytes(attached_stdout, output_limit)
             raw_stderr, stderr_exceeded = self._bounded_bytes(
-                container.logs(stdout=False, stderr=True),
+                attached_stderr,
                 self._bounded_limit(payload.get("max_log_bytes"), self.MAX_LOG_BYTES, self.MAX_LOG_BYTES),
             )
             if stdout_exceeded:

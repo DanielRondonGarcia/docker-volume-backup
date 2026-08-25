@@ -95,12 +95,33 @@
     .snapshot-option-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px/1.4 var(--font-mono); }
     .snapshot-option-date { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
     .snapshot-option-paths { margin-top: 5px; color: var(--muted-foreground); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-    .snapshot-option-actions { display: flex; justify-content: flex-end; margin-top: 7px; }
+    .snapshot-option-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
     .snapshot-workspace { min-width: 0; min-height: 0; overflow-y: auto; padding: 20px; }
     .snapshot-workspace-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .snapshot-workspace-title { margin: 0; font-size: 16px; }
     .snapshot-workspace-subtitle { margin-top: 4px; color: var(--muted-foreground); font-size: 12px; }
     .snapshot-workspace-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .snapshot-about-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .snapshot-about-item { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+    .snapshot-about-label { color: var(--muted-foreground); font-size: 11px; }
+    .snapshot-about-value { margin-top: 5px; overflow-wrap: anywhere; font-size: 13px; }
+    .snapshot-about-value.mono { font-family: var(--font-mono); }
+    .target-stats-modal { width: min(980px, 94vw); max-width: none; max-height: min(88vh, 820px); }
+    .target-stats-body { min-width: 0; overflow-y: auto; }
+    .target-stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .target-stats-card { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+    .target-stats-card h4 { margin: 0; font: 600 14px/1.4 var(--font-mono); }
+    .target-stats-card p { margin: 6px 0 12px; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+    .target-stats-list { display: grid; gap: 7px; margin: 0; }
+    .target-stats-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-top: 7px; border-top: 1px solid var(--border); }
+    .target-stats-row dt { color: var(--muted-foreground); font-size: 11px; overflow-wrap: anywhere; }
+    .target-stats-row dd { margin: 0; text-align: right; font: 600 12px/1.4 var(--font-mono); overflow-wrap: anywhere; }
+    .target-stats-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 14px; color: var(--muted-foreground); font-size: 12px; }
+    .target-stats-meta strong { color: var(--foreground); }
+    .target-stats-empty { padding: 18px 12px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+    .target-stats-note { margin-top: 14px; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; }
+    .target-stats-skeleton { display: grid; gap: 8px; }
+    .target-stats-skeleton div { height: 42px; border-radius: var(--radius); background: linear-gradient(90deg, var(--card) 25%, var(--muted) 50%, var(--card) 75%); background-size: 200% 100%; animation: snapshot-skeleton 1.2s ease-in-out infinite; }
     .snapshot-search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
     .snapshot-search-field { position: relative; flex: 1; min-width: 180px; }
     .snapshot-search-field input { width: 100%; box-sizing: border-box; padding: 9px 38px 9px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); color: var(--foreground); }
@@ -143,6 +164,9 @@
       .snapshot-workspace { padding: 14px; }
       .snapshot-workspace-header { flex-direction: column; }
       .snapshot-workspace-actions { justify-content: flex-start; }
+      .snapshot-about-grid { grid-template-columns: 1fr; }
+      .target-stats-modal { width: 100%; max-height: 92vh; }
+      .target-stats-grid { grid-template-columns: 1fr; }
       .snapshot-entry-option { grid-template-columns: 24px minmax(0, 1fr); }
       .snapshot-entry-action { grid-column: 2; justify-self: start; }
     }
@@ -1577,9 +1601,10 @@ docker compose up -d
               <div class="dropdown">
                <button type="button" class="btn ghost xs dropdown-trigger" id="target-dropdown-trigger-${escapeHtml(t.id)}" data-dropdown="${escapeHtml(t.id)}" aria-haspopup="menu" aria-expanded="false" aria-controls="dd-${escapeHtml(t.id)}">Acciones ▾</button>
                <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}" role="menu" aria-labelledby="target-dropdown-trigger-${escapeHtml(t.id)}">
-                  ${canRunTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
-                  ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
-                   ${lastJob ? `<button type="button" role="menuitem" class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
+                   ${canRunTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
+                   ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
+                   ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="target-stats" data-id="${escapeHtml(t.id)}">Ver stats</button>` : ""}
+                    ${lastJob ? `<button type="button" role="menuitem" class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
                   ${t.live_access_enabled ? `<button type="button" role="menuitem" class="dropdown-item" data-action="live-browser" data-id="${escapeHtml(t.id)}">Ver archivos en vivo</button>` : `<span class="dropdown-item live-access-state" role="status">Live: deshabilitado</span>`}
                   ${canManageTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="live-toggle" data-id="${escapeHtml(t.id)}" data-enabled="${t.live_access_enabled ? "false" : "true"}">${t.live_access_enabled ? "Deshabilitar acceso live" : "Habilitar acceso live"}</button>` : ""}
                   ${canManageTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="edit" data-id="${escapeHtml(t.id)}">Editar</button>
@@ -1791,9 +1816,10 @@ docker compose up -d
           const jobId = btn.dataset.job;
           const target = state.targets.find(t => t.id === id);
           if (!target) return;
-          if (action === "run") { await runBackupNow(id, e.currentTarget); }
-          else if (action === "snapshots") { openSnapshotsModal(target); }
-          else if (action === "logs") { openLogPanel(jobId, id); }
+           if (action === "run") { await runBackupNow(id, e.currentTarget); }
+           else if (action === "snapshots") { openSnapshotsModal(target); }
+           else if (action === "target-stats") { await openTargetStats(target, e.currentTarget); }
+           else if (action === "logs") { openLogPanel(jobId, id); }
           else if (action === "live-browser") { openLiveBrowser(target); }
           else if (action === "live-toggle") {
             if (state.currentRole !== "admin") return;
@@ -2189,7 +2215,400 @@ docker compose up -d
       openBackupRunModal(targetId, btn);
     }
 
+    const TARGET_STATS_MODES = ["raw-data", "blobs-per-file"];
+    const TARGET_STATS_POLL_INTERVAL_MS = 2000;
+    const TARGET_STATS_POLL_MAX_MS = 90000;
+    const TARGET_STATS_FIELD_LABELS = {
+      total_size: "Tamaño total",
+      total_uncompressed_size: "Tamaño sin comprimir",
+      unique_size: "Tamaño deduplicado único",
+      snapshots_count: "Snapshots",
+      total_file_count: "Archivos",
+      total_blob_count: "Blobs",
+      compression_ratio: "Ratio de compresión",
+      compression_progress: "Progreso de compresión",
+      compression_space_saving: "Ahorro de espacio",
+      unique_size_percent: "Tamaño único (%)",
+    };
+    const TARGET_STATS_SIZE_FIELDS = new Set(["total_size", "total_uncompressed_size", "unique_size"]);
+    let targetStatsState = null;
+
+    function targetStatsCanUpdate() {
+      return state.currentRole === "admin" || state.currentRole === "operator";
+    }
+
+    function safeTargetStatsValues(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+      return Object.fromEntries(Object.entries(value)
+        .filter(([key, item]) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key)
+          && typeof item === "number"
+          && Number.isFinite(item)
+          && item >= 0)
+        .slice(0, 64));
+    }
+
+    function normalizeTargetStatsRecord(record) {
+      if (!record || typeof record !== "object") return null;
+      const rawStats = record.stats && typeof record.stats === "object" && !Array.isArray(record.stats) ? record.stats : {};
+      const nestedModes = rawStats.modes && typeof rawStats.modes === "object" && !Array.isArray(rawStats.modes)
+        ? rawStats.modes
+        : rawStats.stats_by_mode && typeof rawStats.stats_by_mode === "object" && !Array.isArray(rawStats.stats_by_mode)
+          ? rawStats.stats_by_mode
+          : {};
+      const modes = {};
+      TARGET_STATS_MODES.forEach(mode => {
+        const candidate = nestedModes[mode] || rawStats[mode];
+        const values = safeTargetStatsValues(candidate);
+        if (Object.keys(values).length) modes[mode] = values;
+      });
+      if (!modes["raw-data"]) {
+        const legacy = safeTargetStatsValues(Object.fromEntries(Object.entries(rawStats).filter(([key]) => key !== "modes" && key !== "stats_by_mode")));
+        if (Object.keys(legacy).length) modes["raw-data"] = legacy;
+      }
+      return {
+        target_id: record.target_id ? String(record.target_id) : "",
+        updated_at: typeof record.updated_at === "string" ? record.updated_at : null,
+        modes,
+      };
+    }
+
+    function targetStatsFieldLabel(field) {
+      return TARGET_STATS_FIELD_LABELS[field] || field;
+    }
+
+    function targetStatsFormatValue(field, value) {
+      if (TARGET_STATS_SIZE_FIELDS.has(field)) {
+        const formatted = formatSnapshotBytes(value);
+        if (formatted) return `${formatted} (${value.toLocaleString("es-CO")} B)`;
+      }
+      if (field.endsWith("_percent")) return `${value.toLocaleString("es-CO", { maximumFractionDigits: 3 })}%`;
+      return value.toLocaleString("es-CO", { maximumFractionDigits: 6 });
+    }
+
+    function renderTargetStatsMode(mode, stats) {
+      const descriptions = {
+        "raw-data": "Tamaño físico y deduplicado del repositorio. No es el tamaño lógico/restaurable de un snapshot.",
+        "blobs-per-file": "Estadísticas de blobs por archivo para entender la distribución física del repositorio.",
+      };
+      const entries = stats ? Object.entries(stats) : [];
+      const content = entries.length
+        ? `<dl class="target-stats-list">${entries.map(([field, value]) => `<div class="target-stats-row"><dt>${escapeHtml(targetStatsFieldLabel(field))}</dt><dd>${escapeHtml(targetStatsFormatValue(field, value))}</dd></div>`).join("")}</dl>`
+        : `<div class="target-stats-empty">No hay valores persistidos para este modo.</div>`;
+      return `<article class="target-stats-card"><h4><code>${escapeHtml(mode)}</code></h4><p>${escapeHtml(descriptions[mode])}</p>${content}</article>`;
+    }
+
+    function targetStatsNoticeMarkup(notice) {
+      if (!notice) return "";
+      const kind = notice.kind === "error" ? "error" : notice.kind === "empty" ? "stale" : "loading";
+      const role = kind === "error" ? "alert" : "status";
+      return `<div class="snapshot-status" data-state="${escapeHtml(kind)}" role="${role}" aria-live="polite"><strong>${escapeHtml(notice.label || "Estado")}</strong><span>${escapeHtml(notice.message || "")}</span></div>`;
+    }
+
+    function renderTargetStatsBody() {
+      const current = targetStatsState;
+      const body = current && current.overlay ? current.overlay.querySelector("#targetStatsBody") : null;
+      const refresh = current && current.overlay ? current.overlay.querySelector("#targetStatsRefresh") : null;
+      if (!current || !body) return;
+      const canUpdate = targetStatsCanUpdate();
+      if (refresh) {
+        refresh.hidden = !canUpdate;
+        refresh.disabled = current.loading || !canUpdate;
+        refresh.setAttribute("aria-busy", current.loading ? "true" : "false");
+        refresh.textContent = current.loading ? "Actualizando..." : "Actualizar";
+      }
+      const help = `<div id="targetStatsHelp" class="helper">Consulta primero el registro persistido. El cálculo solo se ejecuta al no existir cache o al elegir Actualizar.</div>`;
+      if (current.loading) {
+        body.setAttribute("aria-busy", "true");
+        body.innerHTML = `${help}${targetStatsNoticeMarkup(current.notice || { kind: "loading", label: "Cargando", message: "Consultando estadísticas persistidas..." })}<div id="targetStatsLiveState" class="snapshot-status" data-state="loading" role="status" aria-live="polite">${escapeHtml(current.liveState || "Conectando...")}</div><div class="target-stats-skeleton" aria-hidden="true">${[1, 2, 3, 4].map(() => "<div></div>").join("")}</div>`;
+        return;
+      }
+      body.setAttribute("aria-busy", "false");
+      const normalized = normalizeTargetStatsRecord(current.record);
+      const modes = normalized ? normalized.modes : {};
+      const modeCount = TARGET_STATS_MODES.filter(mode => modes[mode]).length;
+      const status = normalized && modeCount
+        ? "Persistido"
+        : "Sin registro persistido";
+      const updatedAt = normalized && normalized.updated_at ? fmtDate(normalized.updated_at) : "No disponible";
+      const notice = targetStatsNoticeMarkup(current.notice);
+      const emptyMessage = canUpdate
+        ? "Selecciona Actualizar para calcular y persistir las estadísticas del repositorio."
+        : "No hay estadísticas persistidas. Tu rol puede consultar valores guardados, pero no iniciar el cálculo.";
+      body.innerHTML = `${help}${notice}<div class="target-stats-meta" aria-label="Estado de las estadísticas"><span><strong>Estado:</strong> ${escapeHtml(status)}</span><span><strong>Última actualización:</strong> ${escapeHtml(updatedAt)}</span><span><strong>Fuente:</strong> Registro persistido</span><span id="targetStatsLiveState" role="status" aria-live="polite">${escapeHtml(current.liveState || "Persistido")}</span></div>${modeCount ? `<div class="target-stats-grid">${TARGET_STATS_MODES.map(mode => renderTargetStatsMode(mode, modes[mode] || null)).join("")}</div>` : `<div class="target-stats-empty"><strong>No hay estadísticas disponibles.</strong> ${escapeHtml(emptyMessage)}</div>`}<div class="target-stats-note">raw-data representa almacenamiento físico/deduplicado del repositorio. Para el tamaño lógico/restaurable de un snapshot, usa Información dentro de Snapshots.</div>`;
+    }
+
+    function finishTargetStatsRequest(request) {
+      if (targetStatsState && targetStatsState.request === request) targetStatsState.request = null;
+    }
+
+    function isCurrentTargetStatsRequest(request) {
+      return Boolean(targetStatsState
+        && !targetStatsState.closed
+        && request
+        && targetStatsState.request === request
+        && !request.controller.signal.aborted
+        && String(targetStatsState.target.id) === request.targetId);
+    }
+
+    function stopTargetStatsMonitoring(request) {
+      if (!request) return;
+      if (request.eventSource) request.eventSource();
+      request.eventSource = null;
+      if (request.pollTimer) clearInterval(request.pollTimer);
+      request.pollTimer = null;
+      if (request.deadlineTimer) clearTimeout(request.deadlineTimer);
+      request.deadlineTimer = null;
+    }
+
+    function targetStatsJobFailure(job) {
+      const summary = job && job.result_summary && typeof job.result_summary === "object" ? job.result_summary : {};
+      const error = new Error(String(job && (job.error || summary.error) || "El worker no pudo calcular las estadísticas."));
+      error.status = Number.isFinite(Number(summary.status_code)) ? Number(summary.status_code) : null;
+      return error;
+    }
+
+    function waitForTargetStatsJob(request, initialJob) {
+      request.jobId = String(initialJob.id || initialJob.job_id || "");
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let failures = 0;
+        let firstFailureAt = 0;
+        const cleanup = () => {
+          stopTargetStatsMonitoring(request);
+          request.cancelWait = null;
+        };
+        const settle = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          callback(value);
+        };
+        const handleJob = (job) => {
+          if (!isCurrentTargetStatsRequest(request)) return;
+          mergeJobProjection(job);
+          if (!isTerminalJobStatus(job.status)) return;
+          if (normalizeJobStatus(job.status) === "succeeded") settle(resolve, job);
+          else settle(reject, targetStatsJobFailure(job));
+        };
+        const poll = async () => {
+          if (!isCurrentTargetStatsRequest(request)) return;
+          try {
+            const job = await apiGet(`/api/v1/jobs/${encodeURIComponent(request.jobId)}`, { signal: request.controller.signal });
+            if (!isCurrentTargetStatsRequest(request)) return;
+            failures = 0;
+            firstFailureAt = 0;
+            handleJob(job);
+          } catch (error) {
+            if (!isCurrentTargetStatsRequest(request) || isSnapshotAbortError(error)) return;
+            failures += 1;
+            if (!firstFailureAt) firstFailureAt = Date.now();
+            if (failures >= LOG_POLL_MAX_FAILURES || Date.now() - firstFailureAt >= LOG_POLL_FAILURE_WINDOW_MS) {
+              const stopped = new Error("La consulta de estadísticas se detuvo tras varios fallos.");
+              stopped.code = "target-stats-poll-failed";
+              settle(reject, stopped);
+            }
+          }
+        };
+        const startPolling = () => {
+          if (!isCurrentTargetStatsRequest(request) || request.pollTimer) return;
+          currentTargetStatsLiveState("Actualizando por polling");
+          void poll();
+          request.pollTimer = setInterval(poll, TARGET_STATS_POLL_INTERVAL_MS);
+        };
+        request.cancelWait = () => settle(reject, new DOMException("Aborted", "AbortError"));
+        request.deadlineTimer = setTimeout(() => {
+          const timeout = new Error("La consulta de estadísticas tardó demasiado.");
+          timeout.code = "target-stats-poll-timeout";
+          settle(reject, timeout);
+        }, TARGET_STATS_POLL_MAX_MS);
+        if (!request.jobId) {
+          settle(reject, new Error("La respuesta de stats-sync no incluyó un job."));
+          return;
+        }
+        if (isTerminalJobStatus(initialJob.status)) {
+          handleJob(initialJob);
+          return;
+        }
+        request.eventSource = connectJobEvents(request.jobId, {
+          isActive: () => isCurrentTargetStatsRequest(request),
+          onState: (connectionState) => currentTargetStatsLiveState(connectionState === "live" ? "En vivo" : "Actualizando por polling"),
+          onJob: handleJob,
+          onFallback: startPolling,
+        });
+      });
+    }
+
+    function currentTargetStatsLiveState(value) {
+      if (targetStatsState) targetStatsState.liveState = String(value || "");
+      const element = targetStatsState && targetStatsState.overlay
+        ? targetStatsState.overlay.querySelector("#targetStatsLiveState")
+        : null;
+      if (element) element.textContent = String(value || "");
+    }
+
+    async function loadTargetStatsRecord(request, options = {}) {
+      if (!isCurrentTargetStatsRequest(request)) return;
+      try {
+        const record = await apiGet(`/api/v1/targets/${encodeURIComponent(request.targetId)}/stats`, { signal: request.controller.signal });
+        if (!isCurrentTargetStatsRequest(request)) return;
+        const normalized = normalizeTargetStatsRecord(record);
+        if (!normalized || !Object.keys(normalized.modes).length) {
+          targetStatsState.record = record;
+          if (options.autoRefreshMissing && targetStatsCanUpdate()) {
+            await refreshTargetStats(request);
+            return;
+          }
+          targetStatsState.loading = false;
+          targetStatsState.notice = { kind: "empty", label: "Sin cache", message: "El registro persistido no contiene valores utilizables." };
+          renderTargetStatsBody();
+          return;
+        }
+        targetStatsState.record = record;
+        targetStatsState.loading = false;
+        targetStatsState.notice = null;
+        currentTargetStatsLiveState("Persistido");
+        renderTargetStatsBody();
+      } catch (error) {
+        if (!isCurrentTargetStatsRequest(request) || isSnapshotAbortError(error)) return;
+        if (error.status === 404) {
+          targetStatsState.record = null;
+          if (options.autoRefreshMissing && targetStatsCanUpdate()) {
+            targetStatsState.loading = true;
+            targetStatsState.notice = { kind: "loading", label: "Sin cache", message: "No hay un registro persistido; calculando estadísticas..." };
+            renderTargetStatsBody();
+            await refreshTargetStats(request);
+            return;
+          }
+          targetStatsState.loading = false;
+          targetStatsState.notice = { kind: "empty", label: "Sin cache", message: "No existe un registro persistido para este target." };
+          renderTargetStatsBody();
+          return;
+        }
+        targetStatsState.loading = false;
+        targetStatsState.notice = { kind: "error", label: "Error", message: String(error && error.message || "No se pudieron cargar las estadísticas.").slice(0, 300) };
+        renderTargetStatsBody();
+      }
+    }
+
+    async function refreshTargetStats(existingRequest = null) {
+      const current = targetStatsState;
+      if (!current || current.closed || !targetStatsCanUpdate()) return;
+      const request = existingRequest || (() => {
+        if (current.request) {
+          current.request.controller.abort();
+          current.request.cancelWait?.();
+        }
+        current.request = {
+          targetId: String(current.target.id),
+          controller: new AbortController(),
+          eventSource: null,
+          pollTimer: null,
+          deadlineTimer: null,
+          cancelWait: null,
+          jobId: null,
+        };
+        return current.request;
+      })();
+      if (!isCurrentTargetStatsRequest(request)) return;
+      current.loading = true;
+      current.syncing = true;
+      current.notice = { kind: "loading", label: "Actualizando", message: "Calculando raw-data y blobs-per-file con Restic..." };
+      currentTargetStatsLiveState("Conectando...");
+      renderTargetStatsBody();
+      try {
+        const job = await apiPost(`/api/v1/targets/${encodeURIComponent(request.targetId)}/stats-sync`, { requested_by: "ui" }, { signal: request.controller.signal });
+        if (!isCurrentTargetStatsRequest(request)) return;
+        request.jobId = String(job && (job.id || job.job_id) || "");
+        const completed = await waitForTargetStatsJob(request, { ...job, id: request.jobId });
+        if (!isCurrentTargetStatsRequest(request)) return;
+        current.loading = true;
+        current.notice = { kind: "loading", label: "Guardado", message: "Job exitoso; cargando el registro persistido..." };
+        renderTargetStatsBody();
+        await loadTargetStatsRecord(request, { autoRefreshMissing: false });
+      } catch (error) {
+        if (!isCurrentTargetStatsRequest(request) || isSnapshotAbortError(error)) return;
+        current.loading = false;
+        current.notice = { kind: "error", label: "Error", message: String(error && error.message || "No se pudieron actualizar las estadísticas.").slice(0, 300) };
+        renderTargetStatsBody();
+      } finally {
+        if (isCurrentTargetStatsRequest(request)) {
+          current.syncing = false;
+          finishTargetStatsRequest(request);
+        }
+      }
+    }
+
+    function renderTargetStatsModalFrame() {
+      const current = targetStatsState;
+      const overlay = current && current.overlay;
+      if (!current || !overlay) return;
+      overlay.innerHTML = `<div class="modal target-stats-modal" role="dialog" aria-modal="true" aria-labelledby="targetStatsTitle" aria-describedby="targetStatsHelp" tabindex="-1"><div class="modal-header"><div><h3 id="targetStatsTitle">Stats del target</h3><div class="subtitle" style="font-size:12px; color:var(--muted-foreground); margin-top:2px;">${escapeHtml(current.target.name || "Sin nombre")}</div></div><div class="snapshot-workspace-actions"><button type="button" class="btn ghost xs" id="targetStatsRefresh" ${targetStatsCanUpdate() ? "" : "hidden"}>Actualizar</button><button type="button" class="close" data-target-stats-close aria-label="Cerrar estadísticas del target">&times;</button></div></div><div class="modal-body target-stats-body" id="targetStatsBody"><div id="targetStatsHelp" class="helper">Consulta primero el registro persistido. El cálculo solo se ejecuta al no existir cache o al elegir Actualizar.</div><div id="targetStatsLiveState" class="snapshot-status" data-state="loading" role="status" aria-live="polite">Conectando...</div></div></div>`;
+      const close = () => closeTargetStatsModal();
+      overlay.querySelector("[data-target-stats-close]")?.addEventListener("click", close);
+      overlay.querySelector("#targetStatsRefresh")?.addEventListener("click", () => void refreshTargetStats());
+      overlay.onclick = event => { if (event.target === overlay || event.target.closest("[data-target-stats-close]")) close(); };
+      overlay.onkeydown = event => { if (event.key === "Escape") { event.preventDefault(); close(); } };
+    }
+
+    async function openTargetStats(target, triggerButton) {
+      if (!target || target.backup_strategy !== "restic") return;
+      closeTargetStatsModal();
+      const overlay = document.getElementById("modalOverlay");
+      if (!overlay) return;
+      targetStatsState = {
+        target,
+        overlay,
+        record: null,
+        request: null,
+        loading: true,
+        syncing: false,
+        notice: { kind: "loading", label: "Cargando", message: "Consultando estadísticas persistidas..." },
+        liveState: "Conectando...",
+        closed: false,
+        returnFocus: triggerButton || document.activeElement,
+      };
+      renderTargetStatsModalFrame();
+      overlay.classList.add("open");
+      const closeButton = overlay.querySelector("[data-target-stats-close]");
+      if (closeButton) closeButton.focus();
+      const request = {
+        targetId: String(target.id),
+        controller: new AbortController(),
+        eventSource: null,
+        pollTimer: null,
+        deadlineTimer: null,
+        cancelWait: null,
+        jobId: null,
+      };
+      targetStatsState.request = request;
+      renderTargetStatsBody();
+      await loadTargetStatsRecord(request, { autoRefreshMissing: true });
+      if (targetStatsState && targetStatsState.request === request) finishTargetStatsRequest(request);
+    }
+
+    function closeTargetStatsModal() {
+      const current = targetStatsState;
+      if (!current) return;
+      current.closed = true;
+      if (current.request) {
+        stopTargetStatsMonitoring(current.request);
+        current.request.cancelWait?.();
+        current.request.controller.abort();
+      }
+      const overlay = current.overlay;
+      const returnFocus = current.returnFocus;
+      targetStatsState = null;
+      if (overlay) {
+        overlay.classList.remove("open", "active");
+        overlay.innerHTML = "";
+        overlay.onclick = null;
+        overlay.onkeydown = null;
+      }
+      if (returnFocus && typeof returnFocus.focus === "function" && document.contains(returnFocus)) returnFocus.focus();
+    }
+
     const SNAPSHOT_CACHE_LIMIT = 8;
+    const SNAPSHOT_ABOUT_SESSION_CACHE_LIMIT = 24;
     const SNAPSHOT_PREFETCH_LIMIT = 2;
     const SNAPSHOT_MAX_ENTRIES = 200; // catalog and search response cap
     const SNAPSHOT_PAGE_SIZE = 200;
@@ -2222,6 +2641,7 @@ docker compose up -d
       unsupported: "No disponible",
       ready: "Listo",
     };
+    const snapshotAboutSessionCache = new Map();
     let snapshotBrowserState = null;
 
     function createSnapshotBrowserState(target) {
@@ -2231,6 +2651,7 @@ docker compose up -d
         currentSnapshot: null,
         currentPath: "/",
         entries: [],
+        about: null,
         directoryLoadedLimit: SNAPSHOT_PAGE_SIZE,
         directoryHasMore: false,
         loadingMore: false,
@@ -2281,6 +2702,70 @@ docker compose up -d
 
     function snapshotCacheKey(targetId, snapshotId, path) {
       return JSON.stringify([String(targetId), String(snapshotId), normalizeSnapshotPath(path)]);
+    }
+
+    function snapshotAboutSessionCacheKey(targetId, snapshotId) {
+      return JSON.stringify([String(targetId), String(snapshotId)]);
+    }
+
+    function normalizeSnapshotAboutCacheResult(targetId, snapshotId, result) {
+      const normalized = normalizeSnapshotContract(result);
+      if (!isSuccessfulSnapshotAboutResult(normalized)) return null;
+      const rawStats = normalized.stats && typeof normalized.stats === "object" && !Array.isArray(normalized.stats)
+        ? normalized.stats
+        : {};
+      const stats = Object.fromEntries(Object.entries(rawStats)
+        .filter(([key]) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key))
+        .map(([key, value]) => [key, Number(value)])
+        .filter(([, value]) => Number.isFinite(value) && value >= 0)
+        .slice(0, 64));
+      return {
+        schema_version: normalized.schema_version,
+        status: normalized.status,
+        status_code: normalized.status_code,
+        target_id: String(targetId),
+        snapshot_id: String(normalized.snapshot_id || snapshotId),
+        created_at: typeof normalized.created_at === "string" ? normalized.created_at : null,
+        hostname: typeof normalized.hostname === "string" ? normalized.hostname : null,
+        paths: Array.isArray(normalized.paths) ? normalized.paths.slice(0, 64).map(String) : [],
+        tags: Array.isArray(normalized.tags) ? normalized.tags.slice(0, 64).map(String) : [],
+        stats,
+        source: typeof normalized.source === "string" ? normalized.source : "restic",
+        cache_hit: normalized.cache_hit === true,
+      };
+    }
+
+    function getSnapshotAboutSessionCache(targetId, snapshotId) {
+      const key = snapshotAboutSessionCacheKey(targetId, snapshotId);
+      const cached = snapshotAboutSessionCache.get(key);
+      if (!cached) return null;
+      snapshotAboutSessionCache.delete(key);
+      snapshotAboutSessionCache.set(key, cached);
+      return {
+        ...cached,
+        source: "browser-session-cache",
+        paths: cached.paths.slice(),
+        tags: cached.tags.slice(),
+        stats: { ...cached.stats },
+      };
+    }
+
+    function setSnapshotAboutSessionCache(targetId, snapshotId, result) {
+      const normalized = normalizeSnapshotAboutCacheResult(targetId, snapshotId, result);
+      if (!normalized) return;
+      const key = snapshotAboutSessionCacheKey(targetId, snapshotId);
+      snapshotAboutSessionCache.delete(key);
+      snapshotAboutSessionCache.set(key, normalized);
+      while (snapshotAboutSessionCache.size > SNAPSHOT_ABOUT_SESSION_CACHE_LIMIT) {
+        snapshotAboutSessionCache.delete(snapshotAboutSessionCache.keys().next().value);
+      }
+    }
+
+    function clearSnapshotAboutSessionCache(targetId) {
+      const normalizedTargetId = String(targetId);
+      for (const [key, value] of snapshotAboutSessionCache.entries()) {
+        if (value.target_id === normalizedTargetId) snapshotAboutSessionCache.delete(key);
+      }
     }
 
     function normalizeSnapshotDirectoryLimit(limit) {
@@ -2529,6 +3014,7 @@ docker compose up -d
         current.catalogRefreshTimer = null;
         try {
           const result = await loadSnapshotsList(current.target, { background: true });
+          if (result && result.changed) clearSnapshotAboutSessionCache(current.target.id);
           if (result && result.changed) {
             current.catalogRefreshActive = false;
             return;
@@ -2566,7 +3052,8 @@ docker compose up -d
           state.loading = false;
           state.loadingMore = false;
           state.notice = { kind: "canceled", message: "La operacion fue cancelada.", retry: true };
-          renderCurrentSnapshotBrowser(false);
+          if (state.view === "about") renderSnapshotAbout(state.currentSnapshot, state.about, false);
+          else renderCurrentSnapshotBrowser(false);
         }
       }
     }
@@ -2602,7 +3089,7 @@ docker compose up -d
       if (!Array.isArray(normalized.entries) && Array.isArray(summary.entries)) normalized.entries = summary.entries;
       if (typeof normalized.b64_content !== "string" && typeof summary.b64_content === "string") normalized.b64_content = summary.b64_content;
       if (!normalized.error && typeof summary.error === "string") normalized.error = summary.error;
-      for (const key of ["status_code", "listing_mode", "listing_complete", "listing_entry_count", "listing_output_limit_bytes", "listing_error_code"]) {
+      for (const key of ["status_code", "listing_mode", "listing_complete", "listing_entry_count", "listing_output_limit_bytes", "listing_error_code", "snapshot_id", "created_at", "hostname", "paths", "tags", "stats"]) {
         if (normalized[key] === undefined && summary[key] !== undefined) normalized[key] = summary[key];
       }
       return normalized;
@@ -2728,11 +3215,15 @@ docker compose up -d
     }
 
     function formatSnapshotBytes(value) {
-      const size = Number(value);
+      let size = Number(value);
       if (!Number.isFinite(size) || size < 0) return "";
-      if (size < 1024) return `${size} B`;
-      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
-      return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+      }
+      return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
     }
 
     function normalizeSnapshotEntry(entry) {
@@ -2821,7 +3312,7 @@ docker compose up -d
         return `<div class="snapshot-option" role="option" tabindex="${selected ? "0" : "-1"}" aria-selected="${selected ? "true" : "false"}" data-snapshot-option data-snapshot-id="${escapeHtml(id)}">
           <div class="snapshot-option-main"><span class="snapshot-option-id">${escapeHtml(id || "Sin ID")}</span><span class="snapshot-option-date">${escapeHtml(date)}</span></div>
           <div class="snapshot-option-paths">${escapeHtml(pathText)}</div>
-          <div class="snapshot-option-actions"><button type="button" class="btn ghost xs danger" data-snapshot-restore data-snapshot-id="${escapeHtml(id)}" data-snapshot-date="${escapeHtml(date)}">Restaurar</button></div>
+          <div class="snapshot-option-actions"><button type="button" class="btn ghost xs" data-snapshot-about data-snapshot-id="${escapeHtml(id)}">Información</button><button type="button" class="btn ghost xs danger" data-snapshot-restore data-snapshot-id="${escapeHtml(id)}" data-snapshot-date="${escapeHtml(date)}">Restaurar</button></div>
         </div>`;
       }).join("")}`;
       const selected = list.querySelector(`[data-snapshot-option][aria-selected="true"]`);
@@ -2861,6 +3352,58 @@ docker compose up -d
         <div class="snapshot-search-row"><div class="snapshot-search-field"><input id="snapshotSearch" type="search" value="${escapeHtml(state.searchQuery)}" placeholder="Buscar en el path actual..." aria-label="Buscar en el snapshot y path actual" autocomplete="off" /><button type="button" class="snapshot-search-clear" aria-label="Limpiar busqueda" data-snapshot-clear-search>&times;</button></div></div>
         ${renderSnapshotState("indexing", message || "Listando contenido...", { cancel: true })}
         <div class="snapshot-skeleton-list" aria-hidden="true">${[1, 2, 3, 4, 5].map(() => `<div class="snapshot-skeleton-row"></div>`).join("")}</div>`;
+    }
+
+    function renderSnapshotAboutLoading(snapshotId) {
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!workspace) return;
+      workspace.innerHTML = `
+        <div class="snapshot-workspace-header"><div><h4 class="snapshot-workspace-title">Información del snapshot</h4><div class="snapshot-workspace-subtitle"><code>${escapeHtml(snapshotId)}</code></div></div></div>
+        ${renderSnapshotState("loading", "Consultando tamaño lógico y metadatos...", { cancel: true })}
+        <div class="snapshot-skeleton-list" aria-hidden="true">${[1, 2, 3, 4].map(() => `<div class="snapshot-skeleton-row"></div>`).join("")}</div>`;
+    }
+
+    function renderSnapshotAbout(snapshotId, result, focusAction = false) {
+      const state = snapshotBrowserState;
+      const workspace = document.getElementById("snapshotWorkspace");
+      if (!state || !workspace) return;
+      const normalized = normalizeSnapshotContract(result) || {};
+      const stats = normalized.stats && typeof normalized.stats === "object" ? normalized.stats : {};
+      const validStats = ["total_size", "total_file_count", "snapshots_count"].every(field => {
+        const value = Number(stats[field]);
+        return Number.isFinite(value) && value >= 0;
+      });
+      const paths = Array.isArray(normalized.paths) ? normalized.paths.slice(0, 64).map(String) : [];
+      const tags = Array.isArray(normalized.tags) ? normalized.tags.slice(0, 64).map(String) : [];
+      const source = normalized.source === "browser-session-cache"
+        ? "browser-session-cache"
+        : (normalized.cache_hit === true
+          ? "Redis (cache hit)"
+          : (normalized.source ? String(normalized.source) : "Restic"));
+      const notice = state.notice ? renderSnapshotState(state.notice.kind, state.notice.message, { retry: state.notice.retry, cancel: state.notice.kind === "loading" }) : "";
+      const size = validStats ? formatSnapshotBytes(stats.total_size) : "No disponible";
+      const fileCount = validStats ? Number(stats.total_file_count).toLocaleString("es-CO") : "No disponible";
+      const snapshotCount = validStats ? Number(stats.snapshots_count).toLocaleString("es-CO") : "No disponible";
+      const metadataValue = (value, fallback = "No disponible") => value ? escapeHtml(value) : fallback;
+      workspace.innerHTML = `
+        <div class="snapshot-workspace-header"><div><h4 class="snapshot-workspace-title">Información del snapshot</h4><div class="snapshot-workspace-subtitle">Metadatos seguros y tamaño lógico/restaurable</div></div><div class="snapshot-workspace-actions"><button type="button" class="btn ghost xs" data-snapshot-about-open-browser data-snapshot-id="${escapeHtml(snapshotId)}">Abrir explorador</button></div></div>
+        ${notice}
+        <div class="snapshot-about-grid" aria-live="polite">
+          <div class="snapshot-about-item"><div class="snapshot-about-label">ID del snapshot</div><div class="snapshot-about-value mono">${metadataValue(normalized.snapshot_id || snapshotId)}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Creación</div><div class="snapshot-about-value">${metadataValue(normalized.created_at ? fmtDate(normalized.created_at) : "")}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Hostname</div><div class="snapshot-about-value">${metadataValue(normalized.hostname)}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Tamaño lógico/restaurable</div><div class="snapshot-about-value">${escapeHtml(size)}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Total de archivos</div><div class="snapshot-about-value">${escapeHtml(fileCount)}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Snapshots incluidos</div><div class="snapshot-about-value">${escapeHtml(snapshotCount)}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Paths</div><div class="snapshot-about-value">${escapeHtml(paths.length ? paths.join(", ") : "Todos los paths")}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Tags</div><div class="snapshot-about-value">${escapeHtml(tags.length ? tags.join(", ") : "Sin tags")}</div></div>
+          <div class="snapshot-about-item"><div class="snapshot-about-label">Origen</div><div class="snapshot-about-value">${escapeHtml(source)}</div></div>
+        </div>
+        <div class="snapshot-safe-note">El tamaño mostrado es lógico/restaurable del snapshot, no el almacenamiento físico del repositorio.</div>`;
+      if (focusAction) {
+        const action = workspace.querySelector("[data-snapshot-about-open-browser]");
+        if (action && document.contains(action) && snapshotModalIsOpen()) action.focus();
+      }
     }
 
     function renderCurrentSnapshotBrowser(focusFirst) {
@@ -2941,6 +3484,7 @@ docker compose up -d
       state.currentSnapshot = selectedId;
       state.currentPath = "/";
       state.entries = [];
+      state.about = null;
       state.searchQuery = "";
       state.searchActive = false;
       state.view = "browser";
@@ -2981,6 +3525,8 @@ docker compose up -d
       state.notice = null;
       if (!state.currentSnapshot) {
         loadSnapshotsList(state.target);
+      } else if (state.view === "about") {
+        loadSnapshotAbout(state.currentSnapshot, { bypassSessionCache: true });
       } else if (state.searchActive && state.searchQuery.length >= SNAPSHOT_SEARCH_MIN_LENGTH) {
         searchSnapshot(state.currentSnapshot, state.currentPath, state.searchQuery);
       } else {
@@ -3027,13 +3573,18 @@ docker compose up -d
         openRestoreFromSnapshotModal(restore.dataset.snapshotId, restore.dataset.snapshotDate);
         return;
       }
+      const about = event.target.closest("[data-snapshot-about]");
+      if (about) {
+        void loadSnapshotAbout(about.dataset.snapshotId);
+        return;
+      }
       const option = event.target.closest("[data-snapshot-option]");
-      if (option && !event.target.closest("[data-snapshot-restore]")) selectSnapshot(option.dataset.snapshotId);
+      if (option && !event.target.closest("[data-snapshot-restore], [data-snapshot-about]")) selectSnapshot(option.dataset.snapshotId);
     }
 
     function handleSnapshotNavigationKeydown(event) {
       const list = event.currentTarget;
-      if (event.target.closest("[data-snapshot-restore]")) return;
+      if (event.target.closest("[data-snapshot-restore], [data-snapshot-about]")) return;
       const option = event.target.closest("[data-snapshot-option]");
       if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
         event.preventDefault();
@@ -3051,6 +3602,8 @@ docker compose up -d
       if (!state) return;
       if (event.target.closest("[data-snapshot-cancel]")) { invalidateSnapshotRequest(true); return; }
       if (event.target.closest("[data-snapshot-retry]")) { retrySnapshotAction(); return; }
+      const aboutBrowser = event.target.closest("[data-snapshot-about-open-browser]");
+      if (aboutBrowser) { selectSnapshot(aboutBrowser.dataset.snapshotId); return; }
       if (event.target.closest("[data-snapshot-clear-search]")) {
         const search = document.getElementById("snapshotSearch");
         if (search) search.value = "";
@@ -3147,6 +3700,9 @@ docker compose up -d
       if (state.currentSnapshot && state.view === "browser") {
         if (state.loading) renderSnapshotWorkspaceLoading(state.searchActive ? "Buscando resultados..." : "Listando contenido...");
         else renderSnapshotBrowser(state.currentSnapshot, state.currentPath, state.entries, { focusFirst: false });
+      } else if (state.currentSnapshot && state.view === "about") {
+        if (state.loading) renderSnapshotAboutLoading(state.currentSnapshot);
+        else renderSnapshotAbout(state.currentSnapshot, state.about, false);
       } else {
         renderSnapshotWorkspaceIntro();
       }
@@ -3210,7 +3766,7 @@ docker compose up -d
       state.catalogStatus = state.snapshots.length ? "refreshing" : "loading";
       renderSnapshotList();
       if (!state.currentSnapshot) renderSnapshotWorkspaceIntro();
-      const previousSnapshotIds = state.snapshots.map(snapshotItemId).join("\n");
+      const previousSnapshotIds = new Set(state.snapshots.map(snapshotItemId));
       try {
         let payload;
         try {
@@ -3224,7 +3780,9 @@ docker compose up -d
         }
         if (!isCurrentSnapshotCatalogRequest(request)) return;
         const nextSnapshots = getSnapshotCatalogItems(payload).slice(0, SNAPSHOT_MAX_ENTRIES);
-        const changed = previousSnapshotIds !== nextSnapshots.map(snapshotItemId).join("\n");
+        const nextSnapshotIds = new Set(nextSnapshots.map(snapshotItemId));
+        const changed = previousSnapshotIds.size !== nextSnapshotIds.size
+          || Array.from(previousSnapshotIds).some(snapshotId => !nextSnapshotIds.has(snapshotId));
         state.snapshots = nextSnapshots;
         state.catalogStatus = snapshotCatalogStatus(payload);
         const stillExists = state.currentSnapshot && state.snapshots.some(item => snapshotItemId(item) === String(state.currentSnapshot));
@@ -3281,7 +3839,8 @@ docker compose up -d
           throw failure;
         }
         if (!isCurrentSnapshotCatalogSyncRequest(syncRequest)) return;
-        await loadSnapshotsList(state.target);
+        const result = await loadSnapshotsList(state.target);
+        if (result && result.changed) clearSnapshotAboutSessionCache(state.target.id);
       } catch (error) {
         if (isSnapshotAbortError(error) || syncRequest.controller.signal.aborted) return;
         const timeout = error && error.code === "snapshot-poll-timeout";
@@ -3394,6 +3953,92 @@ docker compose up -d
     function isWarmSnapshotResult(result) {
       const source = String(result && result.source || "").toLowerCase();
       return Boolean(result && result.cache_hit === true) || ["redis", "local", "memory"].includes(source);
+    }
+
+    function isSuccessfulSnapshotAboutResult(result) {
+      const normalized = normalizeSnapshotContract(result);
+      if (!isSuccessfulSnapshotResult(normalized)) return false;
+      const stats = normalized && normalized.stats;
+      return Boolean(stats && typeof stats === "object" && ["total_size", "total_file_count", "snapshots_count"].every(field => {
+        const value = Number(stats[field]);
+        return Number.isFinite(value) && value >= 0;
+      }));
+    }
+
+    function showSnapshotAboutError(request, resultOrError) {
+      const state = snapshotBrowserState;
+      if (!state || !isCurrentSnapshotRequest(request)) return;
+      const result = resultOrError && typeof resultOrError === "object" ? resultOrError : {};
+      const status = snapshotStatus(result);
+      let kind = "error";
+      let message = String(result.error || resultOrError && resultOrError.message || "No se pudo cargar la información del snapshot.");
+      if (status === "canceled" || status === "cancelled") {
+        kind = "canceled";
+        message = result.error || "La consulta fue cancelada.";
+      } else if (resultOrError && resultOrError.code === "snapshot-poll-timeout") {
+        kind = "timeout";
+        message = "La consulta tardó demasiado. Intenta nuevamente.";
+      } else if (resultOrError && resultOrError.status === 404) {
+        kind = "deleted";
+        message = "El target o snapshot ya no existe.";
+      }
+      state.loading = false;
+      state.about = null;
+      state.notice = { kind, message, retry: true };
+      renderSnapshotAbout(state.currentSnapshot, null, false);
+    }
+
+    async function loadSnapshotAbout(snapshotId, options = {}) {
+      const state = snapshotBrowserState;
+      if (!state || state.closed || !snapshotId) return;
+      const selectedId = String(snapshotId);
+      const bypassSessionCache = options.bypassSessionCache === true;
+      abortSnapshotPrefetches();
+      clearSnapshotSearchTimer();
+      invalidateSnapshotRequest(false);
+      state.currentSnapshot = selectedId;
+      state.currentPath = "/";
+      state.view = "about";
+      state.about = null;
+      state.loading = true;
+      state.notice = null;
+      const cachedAbout = bypassSessionCache ? null : getSnapshotAboutSessionCache(state.target.id, selectedId);
+      if (cachedAbout) {
+        state.about = cachedAbout;
+        state.loading = false;
+        renderSnapshotList();
+        renderSnapshotAbout(selectedId, cachedAbout, true);
+        return;
+      }
+      const request = beginSnapshotRequest("about", selectedId, null);
+      if (!request) return;
+      renderSnapshotList();
+      renderSnapshotAboutLoading(selectedId);
+      try {
+        const result = await requestSnapshotOperation(request, "about", {
+          snapshot_id: selectedId,
+          request_id: `ui-${request.seq}`,
+        }, null);
+        if (!isCurrentSnapshotRequest(request)) return;
+        const status = snapshotStatus(result);
+        if (status === "canceled" || status === "cancelled") {
+          showSnapshotAboutError(request, result);
+          return;
+        }
+        if (!isSuccessfulSnapshotAboutResult(result)) {
+          showSnapshotAboutError(request, result);
+          return;
+        }
+        state.about = normalizeSnapshotContract(result);
+        setSnapshotAboutSessionCache(state.target.id, selectedId, state.about);
+        state.loading = false;
+        state.notice = null;
+        renderSnapshotAbout(selectedId, state.about, true);
+      } catch (error) {
+        if (!isSnapshotAbortError(error)) showSnapshotAboutError(request, error);
+      } finally {
+        finishSnapshotRequest(request);
+      }
     }
 
     async function browseSnapshot(snapshotId, path) {

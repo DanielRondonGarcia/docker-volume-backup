@@ -14,10 +14,11 @@ from src.worker_agent.infrastructure.security.job_recovery_journal import Worker
 
 class DockerRuntimeSafetyTests(unittest.TestCase):
     @staticmethod
-    def container(logs=b"ok"):
+    def container(logs=b"ok", attach_output=None):
         container = Mock()
         container.wait.return_value = {"StatusCode": 0}
         container.logs.return_value = logs
+        container.attach.return_value = logs if attach_output is None else attach_output
         return container
 
     def runtime(self, container, no_lock=False, cache_dir=None):
@@ -75,6 +76,145 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
             self.assertTrue(write_result["success"])
             write_command = write_runtime.client.containers.run.call_args.kwargs["command"]
             self.assertNotIn("--no-lock", write_command)
+
+    def test_snapshot_about_allows_only_scoped_restore_size_stats_argv(self):
+        admitted = DockerRuntimeAdapter._runtime_command_argv(
+            ["restic", "stats", "--mode", "restore-size", "--json", "abcdef12"]
+        )
+        self.assertEqual(
+            admitted,
+            ["restic", "stats", "--mode", "restore-size", "--json", "abcdef12"],
+        )
+        self.assertTrue(
+            DockerRuntimeAdapter._is_snapshot_metadata_command(
+                ["restic", "stats", "--mode", "restore-size", "--json", "abcdef12", "--no-lock"]
+            )
+        )
+
+        for variant in (
+            ["restic", "stats", "--mode", "raw-data", "--json", "abcdef12"],
+            ["restic", "stats", "--mode", "blobs-per-file", "--json", "abcdef12"],
+            ["restic", "stats", "--mode", "restore-size", "--json"],
+            ["restic", "stats", "--mode", "restore-size", "--json", "abcdef12", "extra"],
+            ["restic", "stats", "--json", "--mode", "restore-size", "abcdef12"],
+            ["restic", "stats", "--mode", "restore-size", "--json", "not-a-snapshot"],
+        ):
+            with self.subTest(variant=variant), self.assertRaises(ValueError):
+                DockerRuntimeAdapter._runtime_command_argv(variant)
+
+        runtime = self.runtime(
+            self.container(
+                logs=json.dumps(
+                    {"total_size": 4096, "total_file_count": 7, "snapshots_count": 1}
+                ).encode("utf-8")
+            )
+        )
+        result = runtime.get_restic_snapshot_stats(
+            "runtime",
+            {
+                "command": admitted,
+                "snapshot_id": "abcdef12",
+            },
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            result["stats"],
+            {"total_size": 4096, "total_file_count": 7, "snapshots_count": 1},
+        )
+        self.assertEqual(
+            runtime.client.containers.run.call_args.kwargs["command"],
+            admitted,
+        )
+
+    def test_target_stats_runs_both_exact_read_only_modes_and_keeps_legacy_stats(self):
+        raw_stats = {
+            "total_size": 4096,
+            "total_uncompressed_size": 8192,
+            "unique_size": 3072,
+            "snapshots_count": 2,
+        }
+        blobs_stats = {
+            "total_size": 2048,
+            "total_file_count": 7,
+            "total_blob_count": 9,
+        }
+        raw_container = self.container(logs=json.dumps(raw_stats).encode("utf-8"))
+        blobs_container = self.container(logs=json.dumps(blobs_stats).encode("utf-8"))
+        runtime = self.runtime(raw_container)
+        runtime.client.containers.run.side_effect = [raw_container, blobs_container]
+
+        blob_argv = ["restic", "stats", "--mode", "blobs-per-file", "--json"]
+        self.assertEqual(DockerRuntimeAdapter._runtime_command_argv(blob_argv), blob_argv)
+        self.assertTrue(DockerRuntimeAdapter._is_read_only_argv(blob_argv))
+
+        result = runtime.get_restic_stats(
+            "runtime",
+            {
+                "command": ["restic", "stats", "--mode", "raw-data", "--json"],
+                "stats_modes": ["raw-data", "blobs-per-file"],
+            },
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["stats"], raw_stats)
+        self.assertEqual(result["stats_by_mode"], {"raw-data": raw_stats, "blobs-per-file": blobs_stats})
+        self.assertEqual(
+            [call.kwargs["command"] for call in runtime.client.containers.run.call_args_list],
+            [
+                ["restic", "stats", "--mode", "raw-data", "--json"],
+                blob_argv,
+            ],
+        )
+
+    def test_target_stats_rejects_unsupported_modes_and_fails_closed_on_malformed_second_mode(self):
+        for mode in ("restore-size", "raw-data --json", "unknown"):
+            with self.subTest(mode=mode):
+                runtime = self.runtime(self.container())
+                result = runtime.get_restic_stats("runtime", {"stats_modes": [mode]})
+                self.assertFalse(result["success"])
+                self.assertEqual(result["stats"], {})
+                self.assertEqual(result["stats_by_mode"], {})
+                runtime.client.containers.run.assert_not_called()
+
+        runtime = self.runtime(self.container(logs=json.dumps({"total_size": 1}).encode("utf-8")))
+        runtime.client.containers.run.side_effect = [
+            self.container(logs=json.dumps({"total_size": 1}).encode("utf-8")),
+            self.container(logs=b"not-json"),
+        ]
+        result = runtime.get_restic_stats(
+            "runtime",
+            {"stats_modes": ["raw-data", "blobs-per-file"]},
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stats"], {})
+        self.assertEqual(result["stats_by_mode"], {})
+        self.assertEqual(len(runtime.client.containers.run.call_args_list), 2)
+
+    def test_snapshot_about_stats_parser_rejects_unbounded_or_malformed_output(self):
+        for logs in (
+            b"not-json",
+            b'{"total_size": 1, "total_file_count": 2}',
+            b'{"total_size": -1, "total_file_count": 2, "snapshots_count": 1}',
+            b'{"total_size": 1, "total_file_count": "2", "snapshots_count": 1}',
+        ):
+            with self.subTest(logs=logs):
+                runtime = self.runtime(self.container(logs=logs))
+                result = runtime.get_restic_snapshot_stats(
+                    "runtime",
+                    {
+                        "command": [
+                            "restic",
+                            "stats",
+                            "--mode",
+                            "restore-size",
+                            "--json",
+                            "abcdef12",
+                        ],
+                        "snapshot_id": "abcdef12",
+                    },
+                )
+                self.assertFalse(result["success"])
+                self.assertEqual(result["stats"], {})
 
     def test_rclone_about_argv_is_admitted_and_variants_fail_closed(self):
         admitted = DockerRuntimeAdapter._runtime_command_argv(["rclone", "about", "rem:", "--json"])
@@ -357,7 +497,7 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(result["removed_ids"], ["marked-container"])
 
     def test_dump_zip_output_is_allowlisted_and_bounded(self):
-        small = self.runtime(self.container(logs=b"zip-content"))
+        small = self.runtime(self.container(attach_output=b"zip-content"))
         result = small.run_runtime_job_binary(
             "runtime",
             {
@@ -367,8 +507,16 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         )
         self.assertTrue(result["success"])
         self.assertEqual(result["stdout_bytes"], b"zip-content")
+        small.client.containers.run.return_value.logs.assert_not_called()
+        small.client.containers.run.return_value.attach.assert_called_once_with(
+            stdout=True,
+            stderr=True,
+            stream=False,
+            logs=True,
+            demux=True,
+        )
 
-        large = self.runtime(self.container(logs=b"0123456789"))
+        large = self.runtime(self.container(attach_output=b"0123456789"))
         result = large.run_runtime_job_binary(
             "runtime",
             {
@@ -379,6 +527,60 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["status_code"], 413)
         self.assertEqual(result["stdout_bytes"], b"")
+
+    def test_binary_dump_preserves_non_text_stdout_and_redacts_demuxed_stderr(self):
+        secret = "runtime-secret"
+        png = b"\x89PNG\r\n\x1a\n\x00\xff\x80image-data"
+        container = self.container(
+            attach_output=(png, f"restic failed: {secret}".encode("utf-8"))
+        )
+        runtime = self.runtime(container)
+
+        result = runtime.run_runtime_job_binary(
+            "runtime",
+            {
+                "command": "restic dump abcdef12 /image.png",
+                "environment": {"RESTIC_PASSWORD": secret},
+            },
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["stdout_bytes"], png)
+        self.assertIn("<redacted>", result["stderr"])
+        self.assertNotIn(secret, result["stderr"])
+        container.logs.assert_not_called()
+
+    def test_binary_dump_stderr_limit_fails_closed_without_log_fallback(self):
+        container = self.container(attach_output=(b"png", b"12345"))
+        runtime = self.runtime(container)
+
+        result = runtime.run_runtime_job_binary(
+            "runtime",
+            {
+                "command": "restic dump abcdef12 /image.png",
+                "max_log_bytes": 4,
+            },
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status_code"], 413)
+        self.assertEqual(result["stdout_bytes"], b"")
+        container.logs.assert_not_called()
+
+    def test_binary_dump_attach_failure_does_not_fallback_to_logs(self):
+        container = self.container(attach_output=b"should-not-be-used")
+        container.attach.side_effect = RuntimeError("raw capture unavailable")
+        runtime = self.runtime(container)
+
+        result = runtime.run_runtime_job_binary(
+            "runtime",
+            {"command": "restic dump abcdef12 /image.png"},
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stdout_bytes"], b"")
+        self.assertIn("raw capture unavailable", result["error"])
+        container.logs.assert_not_called()
 
     def test_snapshot_metadata_log_limit_can_exceed_generic_default_but_stays_bounded(self):
         over_default = b"x" * (DockerRuntimeAdapter.MAX_LOG_BYTES + 1)

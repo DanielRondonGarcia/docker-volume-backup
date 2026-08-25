@@ -25,7 +25,7 @@ class RedisSnapshotCache:
 
     KEY_PREFIX = "sx:v4"
     CACHEABLE_OPERATIONS = frozenset(
-        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find"}
+        {"snapshots.list", "snapshot.ls", "snapshot.search", "snapshot.find", "snapshot.about"}
     )
     DEFAULT_TTL_SECONDS = 86400
     DEFAULT_MAX_ENTRIES = 1000
@@ -53,6 +53,8 @@ class RedisSnapshotCache:
     _URL_PATTERN = re.compile(
         r"(?i)(?:[a-z][a-z0-9+.-]*://|(?:s3|gs|azure|rclone|local|file):)[^\s\"']+"
     )
+    _SNAPSHOT_ABOUT_STAT_FIELDS = frozenset({"total_size", "total_file_count", "snapshots_count"})
+    _MAX_SNAPSHOT_ABOUT_STAT = (1 << 63) - 1
     _RELEASE_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
@@ -325,30 +327,47 @@ return 0
             return sanitized
         return cls._INVALID
 
+    @classmethod
+    def _valid_snapshot_about_stats(cls, value: Any) -> bool:
+        if not isinstance(value, dict) or set(value) != cls._SNAPSHOT_ABOUT_STAT_FIELDS:
+            return False
+        return all(
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= cls._MAX_SNAPSHOT_ABOUT_STAT
+            for item in value.values()
+        )
+
     def _encoded_value(self, context: Mapping[str, Any], value: Any) -> Optional[bytes]:
         if not isinstance(value, dict):
             return None
-        allowed = {
-            "schema_version",
-            "status",
-            "status_code",
-            "target_id",
-            "entries",
-            "snapshots",
-            "listing_mode",
-            "listing_complete",
-            "listing_entry_count",
-            "listing_output_limit_bytes",
-            "listing_error_code",
-        }
-        if not set(value).issubset(allowed):
-            return None
-        if "entries" not in value and "snapshots" not in value:
-            return None
-        for collection_name in ("entries", "snapshots"):
-            if collection_name in value and not isinstance(value[collection_name], list):
+        operation = context.get("operation")
+        if operation == "snapshot.about":
+            allowed = {"schema_version", "status", "status_code", "target_id", "stats"}
+            if not set(value).issubset(allowed) or not self._valid_snapshot_about_stats(value.get("stats")):
                 return None
-        if "status" in value and value.get("status") != "succeeded":
+        else:
+            allowed = {
+                "schema_version",
+                "status",
+                "status_code",
+                "target_id",
+                "entries",
+                "snapshots",
+                "listing_mode",
+                "listing_complete",
+                "listing_entry_count",
+                "listing_output_limit_bytes",
+                "listing_error_code",
+            }
+            if not set(value).issubset(allowed):
+                return None
+            if "entries" not in value and "snapshots" not in value:
+                return None
+            for collection_name in ("entries", "snapshots"):
+                if collection_name in value and not isinstance(value[collection_name], list):
+                    return None
+        if value.get("status") != "succeeded":
             return None
         target_id = value.get("target_id")
         context_target = context.get("target_id")
