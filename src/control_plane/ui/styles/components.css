@@ -338,16 +338,21 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .action-cell { white-space: nowrap; vertical-align: middle; }
 .action-cell .dropdown { display: flex; justify-content: center; }
 .action-cell .btn { margin: 2px 2px 0 0; }
-.targets-table { min-width: 1280px; table-layout: fixed; }
-.targets-table col.target-col-name { width: 150px; }
-.targets-table col.target-col-worker { width: 170px; }
-.targets-table col.target-col-compose { width: 165px; }
-.targets-table col.target-col-mode { width: 78px; }
-.targets-table col.target-col-volumes { width: 235px; }
-.targets-table col.target-col-retention { width: 150px; }
-.targets-table col.target-col-cron { width: 245px; }
-.targets-table col.target-col-toggle { width: 86px; }
-.targets-table col.target-col-actions { width: 145px; }
+.targets-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+.targets-table col.target-col-name { width: 12%; }
+.targets-table col.target-col-worker { width: 13%; }
+.targets-table col.target-col-compose { width: 12%; }
+.targets-table col.target-col-mode { width: 7%; }
+.targets-table col.target-col-volumes { width: 15%; }
+.targets-table col.target-col-retention { width: 11%; }
+.targets-table col.target-col-cron { width: 13%; }
+.targets-table col.target-col-toggle { width: 7%; }
+.targets-table col.target-col-actions { width: 10%; }
+.targets-table th, .targets-table td { padding-inline: 8px; }
 .targets-table th, .targets-table td { overflow-wrap: anywhere; }
 .targets-table .target-compose-cell,
 .targets-table .target-cron-cell { word-break: break-word; }
@@ -355,9 +360,11 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .targets-table .vol-targets-cell { max-width: none; }
 .targets-table .vol-cell { align-items: flex-start; white-space: normal; overflow: visible; }
 .targets-table .vol-cell code { min-width: 0; white-space: normal; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; }
+.targets-table .toggle-cell { white-space: normal; }
+.targets-table th.col-actions,
 .targets-table td.action-cell { display: table-cell; text-align: right; white-space: nowrap; overflow-wrap: normal; }
-.targets-table .action-cell > .dropdown { display: flex; justify-content: flex-end; }
-.targets-table .action-cell .dropdown-trigger { max-width: 100%; }
+.targets-table .action-cell > .dropdown { display: flex; justify-content: flex-end; min-width: 0; max-width: 100%; }
+.targets-table .action-cell .dropdown-trigger { min-width: 0; max-width: 100%; }
 .col-toggle { width: 80px; }
 .btn.xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
 .btn.danger { color: #dc2626; border-color: #fecaca; }
@@ -718,3 +725,191 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .live-browser-entry-meta { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 .live-browser-empty { padding: 24px 12px; color: var(--muted-foreground); text-align: center; }
 @media (max-width: 640px) { .live-browser-entry { grid-template-columns: 24px minmax(0, 1fr); } .live-browser-entry-meta { grid-column: 2; } }
+
+@media (max-width: 1200px) {
+  .targets-table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    table-layout: auto;
+  }
+  .targets-table colgroup { display: none; }
+  .targets-table > thead {
+    display: block;
+    width: 100%;
+    padding: 12px 12px 0;
+  }
+  .targets-table > thead > tr:not(.filter-row) { display: none; }
+  .targets-table > thead > tr.filter-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    gap: 8px;
+    padding: 0 0 12px;
+  }
+  .targets-table > thead > tr.filter-row > th {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  .targets-table > thead > tr.filter-row > th:nth-child(5),
+  .targets-table > thead > tr.filter-row > th:nth-child(8),
+  .targets-table > thead > tr.filter-row > th:nth-child(9) { display: none; }
+  .targets-table > thead > tr.filter-row .dt-filter {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+  }
+  .targets-table > tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 0 12px 12px;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) + 2px);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+    overflow: visible;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row):hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) > td {
+    display: grid;
+    grid-template-columns: minmax(7rem, 30%) minmax(0, 1fr);
+    align-items: start;
+    gap: 8px 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 10px 12px;
+    overflow-wrap: anywhere;
+    border-bottom: 1px solid var(--border);
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) > td::before {
+    grid-column: 1;
+    grid-row: 1;
+    color: var(--muted-foreground);
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    line-height: 1.4;
+    text-transform: uppercase;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) > td > * {
+    grid-column: 2;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) > td:last-child { border-bottom: 0; }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) > td:first-child { font-weight: 600; }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .target-worker-name,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .target-worker-state,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .target-compose-cell,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .target-cron-cell,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .vol-targets-cell,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .vol-cell,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .vol-cell code,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .target-cron-cell code {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .vol-cell {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .vol-name-pill {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) td.action-cell {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) td.action-cell::before,
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) td.action-cell > * { grid-column: 1; }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .action-cell > .dropdown {
+    display: block;
+    width: 100%;
+  }
+  .targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row) .action-cell .dropdown-trigger {
+    width: 100%;
+    min-height: 44px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .targets-table > tbody > tr.empty-targets-row {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: transparent;
+    box-shadow: none;
+  }
+  .targets-table > tbody > tr.empty-targets-row > td.empty-state {
+    display: block;
+    width: 100%;
+    padding: 32px 16px;
+    border: 0;
+  }
+  .targets-table > tbody > tr.empty-targets-row > td.empty-state::before { display: none; content: none; }
+  .targets-table > tbody > tr.target-log-row {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    overflow: hidden;
+  }
+  .targets-table > tbody > tr.target-log-row > td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    padding: 0 !important;
+    border: 0;
+  }
+  .targets-table > tbody > tr.target-log-row > td::before { display: none; content: none; }
+  .targets-table .target-log-content {
+    width: 100%;
+    min-width: 0;
+    padding: 12px;
+  }
+  .targets-table .target-log-content .log-panel,
+  .targets-table .target-log-content .log-container {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .targets-table .target-log-content .log-panel-header,
+  .targets-table .target-log-content .job-status-bar { flex-wrap: wrap; }
+  .targets-table .target-log-content .log-panel-title,
+  .targets-table .target-log-content .log-panel-title h3,
+  .targets-table .target-log-content .job-meta { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  #targetsTableContainer .pagination {
+    align-items: flex-start;
+    gap: 8px;
+  }
+  #targetsTableContainer .pagination-info,
+  #targetsTableContainer .pagination-controls,
+  #targetsTableContainer .pagination-size {
+    min-width: 0;
+    max-width: 100%;
+  }
+  #targetsTableContainer .pagination-controls,
+  #targetsTableContainer .pagination-size { flex-basis: 100%; }
+  #targetsTableContainer .pagination-size select { max-width: 100%; }
+}

@@ -1484,13 +1484,13 @@ docker compose up -d
               <th class="col-actions">Acciones</th>
             </tr>
             <tr class="filter-row">
-              <th><input type="text" class="dt-filter" data-col="name" placeholder="Filtrar nombre..." value="${escapeHtml(f.name)}" /></th>
-              <th><input type="text" class="dt-filter" data-col="worker" placeholder="Filtrar worker..." value="${escapeHtml(f.worker)}" /></th>
-              <th><input type="text" class="dt-filter" data-col="compose" placeholder="Filtrar compose..." value="${escapeHtml(f.compose)}" /></th>
-              <th><input type="text" class="dt-filter" data-col="mode" placeholder="Filtrar modo..." value="${escapeHtml(f.mode)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="name" aria-label="Filtrar nombre" placeholder="Filtrar nombre..." value="${escapeHtml(f.name)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="worker" aria-label="Filtrar worker" placeholder="Filtrar worker..." value="${escapeHtml(f.worker)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="compose" aria-label="Filtrar compose" placeholder="Filtrar compose..." value="${escapeHtml(f.compose)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="mode" aria-label="Filtrar modo" placeholder="Filtrar modo..." value="${escapeHtml(f.mode)}" /></th>
               <th></th>
-              <th><input type="text" class="dt-filter" data-col="retention" placeholder="Filtrar..." value="${escapeHtml(f.retention)}" /></th>
-              <th><input type="text" class="dt-filter" data-col="cron" placeholder="Filtrar..." value="${escapeHtml(f.cron)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="retention" aria-label="Filtrar retencion" placeholder="Filtrar..." value="${escapeHtml(f.retention)}" /></th>
+              <th><input type="text" class="dt-filter" data-col="cron" aria-label="Filtrar cron" placeholder="Filtrar..." value="${escapeHtml(f.cron)}" /></th>
               <th></th>
               <th></th>
             </tr>
@@ -1583,21 +1583,21 @@ docker compose up -d
           ? "No se puede habilitar: el worker no es elegible"
           : t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target";
         const targetRow = `<tr class="${executionBlocked ? "target-execution-blocked" : ""}" title="${executionBlocked ? "Ejecucion bloqueada hasta resolver el estado del target o worker" : ""}">
-           <td>${escapeHtml(t.name)}</td>
-           <td><div class="target-worker-name">${escapeHtml(workerName)}</div>${fmtTargetWorkerState({ ...t, worker_status: workerStatus, blocked_reason: blockedReason })}</td>
-           <td class="mono target-compose-cell">${escapeHtml(t.compose_project || "—")}</td>
-           <td>${escapeHtml(t.backup_mode)}</td>
-           <td class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
-           <td>${escapeHtml(retention ? retention.name : "—")}</td>
-           <td class="target-cron-cell">${cronLabel}</td>
-           <td class="toggle-cell">
+           <td data-label="Nombre">${escapeHtml(t.name)}</td>
+           <td data-label="Worker"><div class="target-worker-name">${escapeHtml(workerName)}</div>${fmtTargetWorkerState({ ...t, worker_status: workerStatus, blocked_reason: blockedReason })}</td>
+           <td data-label="Compose project" class="mono target-compose-cell">${escapeHtml(t.compose_project || "—")}</td>
+           <td data-label="Modo">${escapeHtml(t.backup_mode)}</td>
+           <td data-label="Vol&uacute;menes" class="vol-targets-cell">${renderVolumeTargetsCell(t)}</td>
+           <td data-label="Retenci&oacute;n">${escapeHtml(retention ? retention.name : "—")}</td>
+           <td data-label="Cron" class="target-cron-cell">${cronLabel}</td>
+           <td data-label="Activo" class="toggle-cell">
              ${canManageTargets ? `<label class="switch" title="${escapeHtml(toggleTitle)}">
                <input type="checkbox" data-action="toggle" data-id="${escapeHtml(t.id)}" aria-label="${escapeHtml(toggleTitle)}" ${t.enabled ? "checked" : ""} ${toggleDisabled ? "disabled" : ""} />
                <span class="slider"></span>
              </label>` : ""}
              <span class="toggle-label ${t.enabled && !executionBlocked ? "on" : ""}">${targetStatusLabel}</span>
             </td>
-            <td class="action-cell">
+             <td data-label="Acciones" class="action-cell">
               <div class="dropdown">
                <button type="button" class="btn ghost xs dropdown-trigger" id="target-dropdown-trigger-${escapeHtml(t.id)}" data-dropdown="${escapeHtml(t.id)}" aria-haspopup="menu" aria-expanded="false" aria-controls="dd-${escapeHtml(t.id)}">Acciones ▾</button>
                <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}" role="menu" aria-labelledby="target-dropdown-trigger-${escapeHtml(t.id)}">
@@ -1615,7 +1615,7 @@ docker compose up -d
            </td>
          </tr>`;
         return targetRow + (currentLogJobId && String(activeLogTargetId) === String(t.id) ? renderTargetLogDetailRow(t) : "");
-      }).join("") : `<tr><td colspan="9" class="empty-state">Sin targets que coincidan con los filtros</td></tr>`;
+       }).join("") : `<tr class="empty-targets-row"><td colspan="9" class="empty-state">Sin targets que coincidan con los filtros</td></tr>`;
       const infoEl = document.querySelector("#targetsTableContainer .pagination-info");
       if (infoEl) infoEl.textContent = total === 0 ? "Sin resultados" : `${startIdx + 1}-${Math.min(startIdx + pageSize, total)} de ${total}`;
       const controlsEl = document.querySelector("#targetsTableContainer .pagination-controls");

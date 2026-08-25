@@ -5,6 +5,7 @@ from pathlib import Path
 
 UI_PATH = Path(__file__).resolve().parents[1] / "src" / "control_plane" / "ui" / "index.html"
 UI_CSS_PATH = Path(__file__).resolve().parents[1] / "src" / "control_plane" / "ui" / "styles" / "components.css"
+UI_APP_CSS_PATH = Path(__file__).resolve().parents[1] / "src" / "control_plane" / "ui" / "styles" / "app.css"
 
 
 class SnapshotExplorerUiStateTests(unittest.TestCase):
@@ -12,6 +13,7 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = UI_PATH.read_text(encoding="utf-8")
         cls.css = UI_CSS_PATH.read_text(encoding="utf-8")
+        cls.app_css = UI_APP_CSS_PATH.read_text(encoding="utf-8")
 
     def test_worker_commands_modal_removes_http_warning_and_keeps_renewal_compose_markers(self):
         self.assertNotIn("HTTP no es confidencial", self.source)
@@ -162,26 +164,114 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.source)
 
-    def test_targets_table_has_scoped_fixed_columns_and_responsive_scroll_contract(self):
+    def test_targets_table_has_fluid_desktop_columns_and_responsive_scroll_contract(self):
         table = re.search(r'<table class="table datatable targets-table">.*?</table>', self.source, re.S)
         self.assertIsNotNone(table)
         table_source = table.group(0)
         for marker in (
             "<colgroup>",
             'class="target-col-name"',
+            'class="target-col-worker"',
+            'class="target-col-compose"',
+            'class="target-col-mode"',
+            'class="target-col-volumes"',
+            'class="target-col-retention"',
             'class="target-col-actions"',
             'class="target-col-cron"',
+            'class="target-col-toggle"',
         ):
             self.assertIn(marker, table_source)
+        self.assertRegex(
+            self.css,
+            r"\.targets-table \{\s*width: 100%;\s*min-width: 0;\s*table-layout: fixed;\s*\}",
+        )
+        column_widths = dict(
+            re.findall(r"\.targets-table col\.(target-col-[\w-]+) \{ width: (\d+)%; \}", self.css)
+        )
+        self.assertEqual(
+            set(column_widths),
+            {
+                "target-col-name",
+                "target-col-worker",
+                "target-col-compose",
+                "target-col-mode",
+                "target-col-volumes",
+                "target-col-retention",
+                "target-col-cron",
+                "target-col-toggle",
+                "target-col-actions",
+            },
+        )
+        self.assertEqual(sum(map(int, column_widths.values())), 100)
+        self.assertEqual(int(column_widths["target-col-actions"]), 10)
+        self.assertNotIn("min-width: 1280px", self.css)
         for marker in (
-            ".targets-table { min-width:",
-            "table-layout: fixed",
-            ".targets-table col.target-col-actions",
+            ".targets-table th.col-actions,",
+            ".targets-table td.action-cell { display: table-cell;",
             ".targets-table .target-cron-cell",
             ".targets-table .vol-cell code",
-            "overflow-x: auto",
+            ".targets-table th, .targets-table td { padding-inline: 8px; }",
+            ".targets-table .toggle-cell { white-space: normal; }",
         ):
             self.assertIn(marker, self.css)
+        self.assertIn("overflow-x: auto", self.app_css)
+        self.assertIn("min-width: 0", self.app_css)
+
+    def test_targets_mobile_layout_keeps_cards_labels_filters_actions_and_logs_visible(self):
+        table = re.search(r'<table class="table datatable targets-table">.*?</table>', self.source, re.S)
+        self.assertIsNotNone(table)
+        table_source = table.group(0)
+        for marker in (
+            'data-label="Nombre"',
+            'data-label="Worker"',
+            'data-label="Compose project"',
+            'data-label="Modo"',
+            'data-label="Vol&uacute;menes"',
+            'data-label="Retenci&oacute;n"',
+            'data-label="Cron"',
+            'data-label="Activo"',
+            'data-label="Acciones"',
+            'class="empty-targets-row"',
+        ):
+            self.assertIn(marker, self.source)
+        for marker in (
+            'aria-label="Filtrar nombre"',
+            'aria-label="Filtrar worker"',
+            'aria-label="Filtrar compose"',
+            'aria-label="Filtrar modo"',
+            'aria-label="Filtrar retencion"',
+            'aria-label="Filtrar cron"',
+        ):
+            self.assertIn(marker, table_source)
+        mobile = re.search(r'@media \(max-width: 1200px\) \{.*?\n\}', self.css, re.S)
+        self.assertIsNotNone(mobile)
+        mobile_css = mobile.group(0)
+        self.assertIn("@media (max-width: 1200px)", mobile_css)
+        self.assertNotIn("@media (max-width: 900px)", self.css)
+        for marker in (
+            ".targets-table {",
+            "min-width: 0",
+            ".targets-table > thead > tr.filter-row",
+            "grid-template-columns: repeat(auto-fit",
+            ".targets-table > tbody > tr:not(.target-log-row):not(.empty-targets-row)",
+            "content: attr(data-label)",
+            ".targets-table > tbody > tr.target-log-row",
+            ".targets-table > tbody > tr.target-log-row > td::before { display: none;",
+            ".action-cell .dropdown-trigger",
+            "min-height: 44px",
+            "overflow-wrap: anywhere",
+        ):
+            self.assertIn(marker, mobile_css)
+        for marker in (
+            ".targets-table > thead > tr.filter-row > th:nth-child(5)",
+            ".targets-table > thead > tr.filter-row > th:nth-child(8)",
+            ".targets-table > thead > tr.filter-row > th:nth-child(9)",
+        ):
+            self.assertIn(marker, mobile_css)
+        self.assertIn("overflow-x: hidden", self.app_css)
+        self.assertIn("min-width: 0", self.app_css)
+        for marker in ("renderTargetLogDetailRow(t)", "positionTargetDropdown(trigger, menu)", "overflow-y: auto"):
+            self.assertIn(marker, self.source if marker != "overflow-y: auto" else self.css)
 
     def test_target_action_cell_keeps_table_layout_and_non_target_tables_keep_flex_actions(self):
         self.assertIsNone(re.search(r"(?m)^\.action-cell\s*\{\s*display:\s*flex;", self.css))
