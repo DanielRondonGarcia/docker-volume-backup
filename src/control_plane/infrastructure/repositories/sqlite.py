@@ -38,25 +38,7 @@ from src.control_plane.domain.models import (
     WorkerRecord,
     utcnow,
 )
-
-
-class _SQLiteConnection:
-    def __init__(self, database_path: str):
-        self._connection = sqlite3.connect(database_path)
-        self._connection.row_factory = sqlite3.Row
-
-    def __enter__(self):
-        self._connection.__enter__()
-        return self._connection
-
-    def __exit__(self, *args):
-        try:
-            return self._connection.__exit__(*args)
-        finally:
-            self._connection.close()
-
-    def __getattr__(self, name):
-        return getattr(self._connection, name)
+from src.control_plane.infrastructure.sqlite_runtime import SQLiteConnection as _SQLiteConnection
 
 
 def _dt(value: Optional[str]) -> Optional[datetime]:

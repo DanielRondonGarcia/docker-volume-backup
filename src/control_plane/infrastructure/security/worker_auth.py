@@ -1,4 +1,4 @@
-import json, sqlite3, time; from contextlib import contextmanager; from dataclasses import dataclass; from datetime import datetime, timedelta; from threading import Lock; from uuid import uuid4; from src.control_plane.domain.models import utcnow; from src.security.hmac_protocol import digest_secret, verify_request
+import json, time; from contextlib import contextmanager; from dataclasses import dataclass; from datetime import datetime, timedelta; from threading import Lock; from uuid import uuid4; from src.control_plane.domain.models import utcnow; from src.control_plane.infrastructure.sqlite_runtime import SQLiteConnection; from src.security.hmac_protocol import digest_secret, verify_request
 @dataclass
 class Credential: worker_id: str; version: str; secret_digest: str; status: str = "active"; revoked_at: datetime | None = None
 @dataclass
@@ -10,9 +10,11 @@ class WorkerAuthState:
         if self.path: self._initialize()
     @contextmanager
     def _db(self):
-        db = sqlite3.connect(self.path); db.row_factory = sqlite3.Row
+        db = SQLiteConnection(self.path)
         try: yield db
-        finally: db.commit(); db.close()
+        finally:
+            try: db.commit()
+            finally: db.close()
     def _initialize(self):
         with self._db() as db:
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
