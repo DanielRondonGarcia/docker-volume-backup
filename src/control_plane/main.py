@@ -782,6 +782,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     runtime_volumes=body.get("runtime_volumes"),
                     runtime_network_mode=body.get("runtime_network_mode"),
                     storage_profile_id=body.get("storage_profile_id"),
+                    path_storage=body.get("path_storage"),
                     retention_policy_id=body.get("retention_policy_id"),
                     restic_password_secret_id=body.get("restic_password_secret_id"),
                     restore_defaults=body.get("restore_defaults") or {},
@@ -1129,7 +1130,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             body = self._read_json_body() or {}
             parts = self._path_parts(path)
             if len(parts) == 4 and parts[:3] == ["api", "v1", "targets"]:
-                target = self._control_plane_service().update_target(
+                target_update = dict(
                     target_id=parts[3],
                     name=body.get("name"),
                     worker_id=body.get("worker_id"),
@@ -1149,6 +1150,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     enabled=body.get("enabled"),
                     live_access_enabled=body.get("live_access_enabled"),
                 )
+                if "path_storage" in body:
+                    target_update["path_storage"] = body.get("path_storage")
+                target = self._control_plane_service().update_target(**target_update)
                 if self._live_service() is not None:
                     self._live_service().invalidate_target(parts[3], "configuration_changed")
                 if self._live_lane() is not None:

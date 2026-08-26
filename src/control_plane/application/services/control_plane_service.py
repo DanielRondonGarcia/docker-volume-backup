@@ -45,6 +45,7 @@ from src.control_plane.domain.models import (
 )
 
 logger = logging.getLogger(__name__)
+_TARGET_FIELD_UNSET = object()
 
 
 class WorkerDeletionConflict(ValueError):
@@ -63,6 +64,7 @@ class ControlPlaneService:
     MAX_JOB_LOG_LINES = 1000
     MAX_JOB_LOG_CHARS = 512 * 1024
     MAX_REPOSITORY_DISPLAY_LENGTH = 256
+    MAX_PATH_STORAGE_LENGTH = 4096
     MAX_PUBLIC_SUMMARY_ITEMS = 200
     MAX_REQUEST_ID_LENGTH = 128
     MAX_SEARCH_QUERY_LENGTH = 256
@@ -327,10 +329,16 @@ class ControlPlaneService:
         labels: Optional[Dict[str, str]] = None,
         cron_expression: Optional[str] = None,
         live_access_enabled: bool = False,
+        path_storage: Optional[str] = None,
     ) -> BackupTargetRecord:
         backup_mode = self._validate_backup_mode(backup_mode)
         if not isinstance(live_access_enabled, bool):
             raise ValueError("live_access_enabled must be a boolean")
+        normalized_path_storage = self._normalize_path_storage(path_storage)
+        runtime_environment = runtime_environment or {}
+        self._validate_path_storage_target_environment(
+            normalized_path_storage, runtime_environment, backup_strategy
+        )
         self._require_eligible_worker(worker_id)
         if storage_profile_id:
             self._require_storage_profile(storage_profile_id)
@@ -364,7 +372,7 @@ class ControlPlaneService:
             backup_strategy=backup_strategy,
             runtime_image=runtime_image,
             runtime_command=runtime_command,
-            runtime_environment=runtime_environment or {},
+            runtime_environment=runtime_environment,
             runtime_volumes=client_runtime_volumes,
             runtime_network_mode=runtime_network_mode,
             storage_profile_id=storage_profile_id,
@@ -374,6 +382,7 @@ class ControlPlaneService:
             labels=labels or {},
             live_access_enabled=live_access_enabled,
             cron_expression=(cron_expression.strip() if cron_expression else None),
+            path_storage=normalized_path_storage,
         )
         return self.target_repository.save(target)
 
@@ -409,8 +418,25 @@ class ControlPlaneService:
         cron_expression: Optional[str] = None,
         enabled: Optional[bool] = None,
         live_access_enabled: Optional[bool] = None,
+        path_storage: Any = _TARGET_FIELD_UNSET,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
+        normalized_path_storage = getattr(target, "path_storage", None)
+        if path_storage is not _TARGET_FIELD_UNSET:
+            normalized_path_storage = self._normalize_path_storage(path_storage)
+        else:
+            normalized_path_storage = self._normalize_path_storage(normalized_path_storage)
+        path_storage_changed = (
+            path_storage is not _TARGET_FIELD_UNSET
+            and getattr(target, "path_storage", None) != normalized_path_storage
+        )
+        effective_runtime_environment = (
+            runtime_environment if runtime_environment is not None else target.runtime_environment
+        )
+        effective_backup_strategy = backup_strategy if backup_strategy is not None else target.backup_strategy
+        self._validate_path_storage_target_environment(
+            normalized_path_storage, effective_runtime_environment, effective_backup_strategy
+        )
         if backup_mode is not None:
             backup_mode = self._validate_backup_mode(backup_mode)
         if enabled is not None and not isinstance(enabled, bool):
@@ -469,8 +495,13 @@ class ControlPlaneService:
             target.enabled = bool(enabled)
         if live_access_enabled is not None:
             target.live_access_enabled = bool(live_access_enabled)
+        if path_storage is not _TARGET_FIELD_UNSET:
+            target.path_storage = normalized_path_storage
         target.updated_at = utcnow()
-        return self.target_repository.save(target)
+        saved_target = self.target_repository.save(target)
+        if path_storage_changed and self.index_repository:
+            self.index_repository.delete_for_target(target.id)
+        return saved_target
 
     def delete_target(self, target_id: str) -> bool:
         self._require_target(target_id)
@@ -991,6 +1022,89 @@ class ControlPlaneService:
         return cleaned or "root"
 
     @classmethod
+    def _normalize_path_storage(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("path_storage must be a string or null")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("path_storage must be non-empty when supplied")
+        if len(normalized) > cls.MAX_PATH_STORAGE_LENGTH:
+            raise ValueError("path_storage exceeds the permitted length")
+        if "\\" in normalized or any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+            raise ValueError("path_storage must use relative POSIX separators without control characters")
+        if normalized.startswith("/"):
+            raise ValueError("path_storage must be relative")
+        if (
+            re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", normalized)
+            or "://" in normalized
+            or "?" in normalized
+            or "#" in normalized
+        ):
+            raise ValueError("path_storage must not be URL or scheme-like")
+        parts = normalized.split("/")
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError("path_storage traversal is not allowed")
+        normalized = "/".join(part for part in parts if part)
+        if not normalized:
+            raise ValueError("path_storage must be non-empty when supplied")
+        return normalized
+
+    @staticmethod
+    def _validate_path_storage_target_environment(
+        path_storage: Optional[str], runtime_environment: Any, backup_strategy: str = "restic"
+    ) -> None:
+        if (
+            backup_strategy == "restic"
+            and path_storage
+            and isinstance(runtime_environment, dict)
+            and "RESTIC_REPOSITORY" in runtime_environment
+        ):
+            raise ValueError(
+                "path_storage cannot be combined with target runtime RESTIC_REPOSITORY; "
+                "configure the repository root in the storage profile or Settings"
+            )
+
+    @staticmethod
+    def _join_repository_path(repository_root: str, path_storage: str) -> str:
+        if repository_root and not repository_root.strip("/"):
+            return f"/{path_storage}"
+        root = repository_root.rstrip("/")
+        return f"{root}/{path_storage}" if root else path_storage
+
+    @classmethod
+    def _append_repository_path(cls, repository: Any, path_storage: str) -> str:
+        """Append a target path only to an unambiguous supported repository root.
+
+        Profile repositories are treated as roots by configuration contract. Query or
+        fragment-bearing and unsupported schemes are rejected instead of being joined
+        after a value whose repository boundary cannot be determined safely.
+        """
+        normalized_path = cls._normalize_path_storage(path_storage)
+        if normalized_path is None:
+            return str(repository or "")
+        if not isinstance(repository, str) or not repository.strip():
+            raise ValueError("path_storage requires a configured RESTIC_REPOSITORY root")
+        value = repository.strip()
+        if "?" in value or "#" in value:
+            raise ValueError("path_storage cannot be combined with a RESTIC_REPOSITORY query or fragment")
+
+        rclone_match = re.fullmatch(r"(?i)rclone:([A-Za-z0-9][A-Za-z0-9._-]*):(.*)", value)
+        if rclone_match:
+            remote, root = rclone_match.groups()
+            return f"rclone:{remote}:{cls._join_repository_path(root, normalized_path)}"
+
+        scheme_match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*:)(.*)$", value)
+        if scheme_match:
+            scheme, root = scheme_match.groups()
+            if scheme[:-1].lower() not in {"s3", "local", "file", "rest", "http", "https"}:
+                raise ValueError("path_storage cannot be combined with this RESTIC_REPOSITORY format")
+            return f"{scheme}{cls._join_repository_path(root, normalized_path)}"
+
+        return cls._join_repository_path(value, normalized_path)
+
+    @classmethod
     def _repository_kind(cls, repository: Any) -> str:
         value = str(repository or "").strip().lower()
         if value.startswith("rclone:"):
@@ -1043,19 +1157,62 @@ class ControlPlaneService:
         self,
         target: BackupTargetRecord,
         settings: Optional[SettingsRecord],
+        path_storage: Any = _TARGET_FIELD_UNSET,
     ) -> Optional[str]:
         if target.backup_strategy != "restic" or not settings or not settings.restic_repository_base:
             return None
+        if path_storage is _TARGET_FIELD_UNSET:
+            path_storage = getattr(target, "path_storage", None)
+        path_storage = self._normalize_path_storage(path_storage)
         base = settings.restic_repository_base.strip("/")
         safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", target.name or target.id)
         safe_name = safe_name or "root"
+        suffix = path_storage or safe_name
         if re.match(r"^[a-z]+:", base, re.IGNORECASE):
-            return f"{base}/{safe_name}"
+            return f"{base}/{suffix}"
         if settings.rclone_conf_secret_id:
             remote_name = self._extract_rclone_remote_name(settings.rclone_conf_secret_id)
             if remote_name:
-                return f"rclone:{remote_name}:{base}/{safe_name}"
-        return f"{base}/{safe_name}"
+                return f"rclone:{remote_name}:{base}/{suffix}"
+        return f"{base}/{suffix}"
+
+    def _resolve_effective_repository(
+        self,
+        target: BackupTargetRecord,
+        environment: Optional[Dict[str, str]] = None,
+        settings: Optional[SettingsRecord] = None,
+        compose_path: bool = True,
+    ) -> tuple[Optional[str], str]:
+        """Return the exact repository and its precedence source for one target."""
+        environment = environment if isinstance(environment, dict) else {}
+        settings = self.get_settings() if settings is None else settings
+        target_environment = target.runtime_environment or {}
+        path_storage = self._normalize_path_storage(getattr(target, "path_storage", None))
+        apply_custom_path = target.backup_strategy == "restic" and path_storage is not None
+
+        if "RESTIC_REPOSITORY" in target_environment:
+            if apply_custom_path:
+                self._validate_path_storage_target_environment(
+                    path_storage, target_environment, target.backup_strategy
+                )
+            repository = target_environment.get("RESTIC_REPOSITORY")
+            return repository, "target" if repository else "unconfigured"
+
+        profile = (
+            self.storage_profile_repository.get(target.storage_profile_id)
+            if target.storage_profile_id
+            else None
+        )
+        profile_environment = profile.environment if profile else {}
+        profile_secret_refs = profile.secret_refs if profile else {}
+        if "RESTIC_REPOSITORY" in profile_environment or "RESTIC_REPOSITORY" in profile_secret_refs:
+            repository = environment.get("RESTIC_REPOSITORY")
+            if repository and apply_custom_path and compose_path:
+                repository = self._append_repository_path(repository, path_storage)
+            return repository, "profile" if repository else "unconfigured"
+
+        repository = self._settings_repository_for_target(target, settings, path_storage=path_storage)
+        return repository, "settings" if repository else "unconfigured"
 
     def _storage_context(
         self,
@@ -1066,21 +1223,9 @@ class ControlPlaneService:
         environment = environment if isinstance(environment, dict) else {}
         profile = self.storage_profile_repository.get(target.storage_profile_id) if target.storage_profile_id else None
         settings = self.get_settings()
-        target_environment = target.runtime_environment or {}
-        profile_environment = profile.environment if profile else {}
-        profile_secret_refs = profile.secret_refs if profile else {}
-        repository = None
-        repository_source = "unconfigured"
-
-        if "RESTIC_REPOSITORY" in target_environment:
-            repository = target_environment.get("RESTIC_REPOSITORY")
-            repository_source = "target" if repository else "unconfigured"
-        elif "RESTIC_REPOSITORY" in profile_environment or "RESTIC_REPOSITORY" in profile_secret_refs:
-            repository = environment.get("RESTIC_REPOSITORY")
-            repository_source = "profile" if repository else "unconfigured"
-        else:
-            repository = environment.get("RESTIC_REPOSITORY") or self._settings_repository_for_target(target, settings)
-            repository_source = "settings" if repository else "unconfigured"
+        repository, repository_source = self._resolve_effective_repository(
+            target, environment, settings, compose_path=False
+        )
 
         repository_kind = self._repository_kind(repository) if repository else "unknown"
         backend_type = None
@@ -1471,6 +1616,7 @@ class ControlPlaneService:
     ) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        storage_context = self._storage_context(target, environment, resolved_files)
         defaults = dict(target.restore_defaults)
         environment.update({
             "RESTORE_MODE": "true",
@@ -1501,6 +1647,7 @@ class ControlPlaneService:
             "network_mode": target.runtime_network_mode,
             "resolved_files": resolved_files,
             "labels": target.labels,
+            "storage_context": storage_context,
         }
 
     def _resolve_runtime_dependencies(self, target: BackupTargetRecord):
@@ -1529,10 +1676,9 @@ class ControlPlaneService:
 
         if target.backup_strategy == "restic":
             settings = self.get_settings()
-            if settings and settings.restic_repository_base and "RESTIC_REPOSITORY" not in environment:
-                repository = self._settings_repository_for_target(target, settings)
-                if repository:
-                    environment["RESTIC_REPOSITORY"] = repository
+            repository, _ = self._resolve_effective_repository(target, environment, settings)
+            if repository:
+                environment["RESTIC_REPOSITORY"] = repository
             if "RESTIC_PASSWORD" not in environment:
                 password_secret_id = target.restic_password_secret_id
                 if not password_secret_id and settings:
@@ -2321,15 +2467,20 @@ class ControlPlaneService:
         if not target.volume_targets and "BACKUP_SOURCES" not in target.runtime_environment:
             warnings.append("No volume_targets or BACKUP_SOURCES configured")
         if target.backup_strategy == "restic":
-            has_repository = "RESTIC_REPOSITORY" in target.runtime_environment
-            has_secret_repo = False
             has_secret_password = False
             if target.storage_profile_id:
                 profile = self._require_storage_profile(target.storage_profile_id)
-                has_repository = has_repository or "RESTIC_REPOSITORY" in profile.environment
-                has_secret_repo = "RESTIC_REPOSITORY" in profile.secret_refs
                 has_secret_password = "RESTIC_PASSWORD" in profile.secret_refs or "RESTIC_PASSWORD" in profile.environment
-            if not (has_repository or has_secret_repo):
+            repository_resolution_error = None
+            try:
+                resolved_environment, _, _ = self._resolve_runtime_dependencies(target)
+                has_repository = bool(resolved_environment.get("RESTIC_REPOSITORY"))
+            except ValueError as exc:
+                repository_resolution_error = str(exc)
+                has_repository = False
+            if repository_resolution_error:
+                issues.append(repository_resolution_error)
+            elif not has_repository:
                 issues.append("RESTIC_REPOSITORY is not configured in target or storage profile")
             if "RESTIC_PASSWORD" not in target.runtime_environment and not has_secret_password:
                 issues.append("RESTIC_PASSWORD is not configured in target or storage profile")
@@ -2566,16 +2717,17 @@ class ControlPlaneService:
         return contract
 
     def _repository_fingerprint(self, target: BackupTargetRecord) -> str:
-        repository = (target.runtime_environment or {}).get("RESTIC_REPOSITORY")
-        if not repository and target.storage_profile_id:
-            profile = self.storage_profile_repository.get(target.storage_profile_id)
-            if profile:
-                repository = (profile.environment or {}).get("RESTIC_REPOSITORY")
-                if not repository:
-                    repository_secret_id = (profile.secret_refs or {}).get("RESTIC_REPOSITORY")
-                    if repository_secret_id:
-                        repository = f"secret-ref:{repository_secret_id}"
+        environment, _, _ = self._resolve_runtime_dependencies(target)
+        repository = environment.get("RESTIC_REPOSITORY")
         if not repository:
+            repository, _ = self._resolve_effective_repository(
+                target, environment, compose_path=False
+            )
+        if not repository and target.backup_strategy == "restic":
+            path_storage = self._normalize_path_storage(getattr(target, "path_storage", None))
+            if path_storage:
+                repository = f"target:{target.id}:path_storage:{path_storage}"
+        if not repository and target.backup_strategy != "restic":
             settings = self.get_settings()
             if settings and settings.restic_repository_base:
                 base = settings.restic_repository_base.strip("/")

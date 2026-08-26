@@ -1341,9 +1341,10 @@ docker compose up -d
                 <div class="field"><label for="targetWorkerId">Worker</label><select id="targetWorkerId" ${eligibleWorkers.length ? "" : "disabled"}>${workerOptions}</select></div>
                 <div class="field"><label for="targetComposeProject">Compose project</label><select id="targetComposeProject" ${eligibleWorkers.length ? "" : "disabled"}><option value="">-- Seleccionar worker --</option></select></div>
                <div class="field"><label for="targetBackupMode">Modo</label><select id="targetBackupMode"><option value="hot">hot</option><option value="cold">cold</option></select></div>
-               <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
-               <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
-               <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
+                <div class="field"><label for="targetBackupStrategy">Estrategia</label><select id="targetBackupStrategy"><option value="restic">restic</option><option value="tar">tar</option></select></div>
+                <div class="field"><label for="targetStorageProfileId">Storage profile</label><select id="targetStorageProfileId">${storageOptions}</select></div>
+                <div class="field"><label for="targetPathStorage">Ruta remota del target (opcional)</label><input id="targetPathStorage" placeholder="clientes/mi-target" /><div class="helper">Subruta POSIX relativa del repositorio restic. Si se configura, reemplaza el sufijo automatico del target; no aplica a tar ni a RCLONE_REMOTE.</div></div>
+                <div class="field"><label for="targetRetentionPolicyId">Retencion</label><select id="targetRetentionPolicyId">${retentionOptions}</select></div>
                <div class="field"><label for="targetCronExpression">Cron (opcional)</label><input id="targetCronExpression" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion cron de 5 campos. Vacio = usa el cron global; si tampoco existe, solo manual. Ej: <code>0 3 * * *</code> (diario 3am), <code>0 */6 * * *</code> (cada 6h).</div><div id="targetCronPreview" class="cron-preview"></div></div>
                ${hasDefaultPassword ? "" : `<div class="field"><label for="targetResticPasswordSecret">Password restic (secret) *</label><select id="targetResticPasswordSecret"><option value="">-- Seleccionar --</option>${passwordSecretOptions}</select><div class="helper">Obligatorio: no hay password default en Settings.</div></div>`}
              </div>
@@ -4494,9 +4495,10 @@ docker compose up -d
                 <div class="field"><label for="etName">Nombre</label><input id="etName" value="${escapeHtml(target.name)}" required /></div>
                 <div class="field"><label for="etWorkerId">Worker</label><select id="etWorkerId" ${eligibleWorkers.length || currentWorkerEligible ? "" : "disabled"}>${workerOptions || '<option value="">-- No hay workers online --</option>'}</select>${workerWarning}<div class="helper">Cambiar el worker solo reasigna el target; no copia volumenes ni inventario entre workers.</div></div>
                 <div class="field"><label for="etBackupMode">Modo</label><select id="etBackupMode"><option value="hot" ${target.backup_mode === "hot" ? "selected" : ""}>hot</option><option value="cold" ${target.backup_mode === "cold" ? "selected" : ""}>cold</option></select></div>
-                <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
-                <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
-                <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
+                 <div class="field"><label for="etBackupStrategy">Estrategia</label><select id="etBackupStrategy"><option value="restic" ${target.backup_strategy === "restic" ? "selected" : ""}>restic</option><option value="tar" ${target.backup_strategy === "tar" ? "selected" : ""}>tar</option></select></div>
+                 <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
+                 <div class="field"><label for="etPathStorage">Ruta remota del target (opcional)</label><input id="etPathStorage" value="${escapeHtml(target.path_storage || "")}" placeholder="clientes/mi-target" /><div class="helper">Subruta POSIX relativa del repositorio restic. Reemplaza el sufijo automatico del target y no cambia la configuracion del storage profile.</div></div>
+                 <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
                 <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion propia del target. Vacio = usa el cron global; si tampoco existe, solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
                 <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
               </div>
@@ -4547,10 +4549,11 @@ docker compose up -d
               worker_id: document.getElementById("etWorkerId").value,
               backup_mode: document.getElementById("etBackupMode").value,
               backup_strategy: document.getElementById("etBackupStrategy").value,
-              runtime_command: emptyToNull(document.getElementById("etRuntimeCommand").value),
-              runtime_environment: parseJsonField("etRuntimeEnvironment", "runtime environment"),
-              storage_profile_id: emptyToNull(document.getElementById("etStorageProfileId").value),
-              retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
+               runtime_command: emptyToNull(document.getElementById("etRuntimeCommand").value),
+               runtime_environment: parseJsonField("etRuntimeEnvironment", "runtime environment"),
+               storage_profile_id: emptyToNull(document.getElementById("etStorageProfileId").value),
+               path_storage: emptyToNull(document.getElementById("etPathStorage").value),
+               retention_policy_id: emptyToNull(document.getElementById("etRetentionPolicyId").value),
               restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
               restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
               cron_expression: emptyToNull(document.getElementById("etCronExpression").value),
@@ -5104,10 +5107,11 @@ docker compose up -d
             volume_targets: selectedVols.length ? selectedVols : null,
             backup_mode: document.getElementById("targetBackupMode").value,
             backup_strategy: backupStrategy,
-            runtime_command: emptyToNull(document.getElementById("targetRuntimeCommand").value),
-            runtime_environment: parseJsonField("targetRuntimeEnvironment", "runtime environment del target"),
-            storage_profile_id: emptyToNull(document.getElementById("targetStorageProfileId").value),
-            retention_policy_id: emptyToNull(document.getElementById("targetRetentionPolicyId").value),
+             runtime_command: emptyToNull(document.getElementById("targetRuntimeCommand").value),
+             runtime_environment: parseJsonField("targetRuntimeEnvironment", "runtime environment del target"),
+             storage_profile_id: emptyToNull(document.getElementById("targetStorageProfileId").value),
+             path_storage: emptyToNull(document.getElementById("targetPathStorage").value),
+             retention_policy_id: emptyToNull(document.getElementById("targetRetentionPolicyId").value),
             restic_password_secret_id: resticPasswordSecret,
             restore_defaults: parseJsonField("targetRestoreDefaults", "restore defaults del target"),
             cron_expression: emptyToNull(document.getElementById("targetCronExpression").value),
@@ -6349,11 +6353,11 @@ docker compose up -d
                 <div class="settings-card-sub">Ruta base del repositorio</div>
               </div>
             </div>
-            <div class="helper">Define la ruta base del repositorio. Para cada target se usara <code>{base}/{target_name}</code>. Si el target tiene su propio <code>RESTIC_REPOSITORY</code>, ese tiene prioridad.</div>
+             <div class="helper">Define la ruta base del repositorio. Para cada target se usara <code>{base}/{target_name}</code>, salvo que el target tenga una ruta remota personalizada. Si el target tiene su propio <code>RESTIC_REPOSITORY</code>, ese tiene prioridad.</div>
             <div class="field full" style="margin-top:12px;">
               <label for="settingsRepoBase">Ruta base del repositorio restic</label>
               <input id="settingsRepoBase" value="${escapeHtml(settings.restic_repository_base || "")}" placeholder="rclone:daniel.actsis:backup" />
-              <div class="helper">Para cada target se usara <code>{base}/{target_name}</code> como repositorio.</div>
+               <div class="helper">Para cada target se usara <code>{base}/{target_name}</code> como repositorio, salvo que configure una ruta remota propia en el target.</div>
               <div id="repoPreview" class="cron-preview" style="margin-top:8px;"></div>
               <div id="repoWarning" style="margin-top:6px;"></div>
             </div>

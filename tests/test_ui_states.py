@@ -147,6 +147,29 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn("no elegible", edit_source)
         self.assertIn("Error guardando target", edit_source)
 
+    def test_target_path_storage_control_loads_edit_value_and_is_sent_on_create_and_update(self):
+        targets = re.search(r"function renderTargets\(content\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(targets)
+        targets_source = targets.group(0)
+        for marker in (
+            'id="targetPathStorage"',
+            "Ruta remota del target (opcional)",
+        ):
+            self.assertIn(marker, targets_source)
+        self.assertIn(
+            'path_storage: emptyToNull(document.getElementById("targetPathStorage").value)',
+            self.source,
+        )
+        edit = re.search(r"function openEditTargetModal\(target\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(edit)
+        edit_source = edit.group(0)
+        for marker in (
+            'id="etPathStorage"',
+            'value="${escapeHtml(target.path_storage || "")}"',
+            'path_storage: emptyToNull(document.getElementById("etPathStorage").value)',
+        ):
+            self.assertIn(marker, edit_source)
+
     def test_blocked_targets_are_opaque_and_cannot_run_or_enable_on_ineligible_workers(self):
         for marker in (
             "target-execution-blocked",

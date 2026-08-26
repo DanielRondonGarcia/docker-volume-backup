@@ -602,6 +602,157 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 'hot' or 'cold'"):
             service.update_target("target-a", backup_mode="warm")
 
+    def test_path_storage_uses_profile_repository_over_conflicting_global_settings(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+        target.runtime_environment = {}
+        profile = StorageProfileRecord(
+            name="sftp-profile",
+            backend_type="rclone",
+            id="sftp-profile",
+            environment={"RESTIC_REPOSITORY": "rclone:sftp:/docker-backups/"},
+        )
+        service.storage_profile_repository.save(profile)
+        target.storage_profile_id = profile.id
+        target.path_storage = " targets//custom/ "
+        target.retention_policy_id = service.create_retention_policy("daily", keep_daily=7).id
+        service.target_repository.save(target)
+        service.settings_repository.save(SettingsRecord(restic_repository_base="rclone:global:settings"))
+
+        payloads = [
+            service._build_backup_payload(target),
+            service._build_snapshot_list_payload(target),
+            service._build_snapshot_read_payload(target, "abcdef12", "/", "browse"),
+            service._build_stats_payload(target),
+            service._build_retention_payload(target),
+            service._build_restore_payload(target, None, "/restore", True, False, None, None, None),
+        ]
+
+        expected = "rclone:sftp:/docker-backups/targets/custom"
+        self.assertTrue(all(payload["environment"]["RESTIC_REPOSITORY"] == expected for payload in payloads))
+        self.assertTrue(all(payload["storage_context"]["repository_display"] == expected for payload in payloads))
+        self.assertEqual(payloads[-1]["environment"]["RESTORE_TARGET_PATH"], "/restore")
+        self.assertNotEqual(payloads[-1]["environment"]["RESTORE_TARGET_PATH"], target.path_storage)
+        self.assertNotIn("global", json.dumps(payloads))
+        self.assertEqual(
+            service._append_repository_path("s3:https://example.invalid/bucket", "tenant/custom"),
+            "s3:https://example.invalid/bucket/tenant/custom",
+        )
+        self.assertEqual(service._append_repository_path("local:/repo/", "tenant"), "local:/repo/tenant")
+        self.assertEqual(service._append_repository_path("rclone:sftp:/", "tenant"), "rclone:sftp:/tenant")
+        with self.assertRaisesRegex(ValueError, "unsupported|format"):
+            service._append_repository_path("scp://host/repository", "tenant")
+
+        first_fingerprint = service._repository_fingerprint(target)
+        target.path_storage = "targets/other"
+        second_fingerprint = service._repository_fingerprint(target)
+        self.assertNotEqual(first_fingerprint, second_fingerprint)
+
+    def test_path_storage_replaces_only_the_global_target_suffix(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+        target.runtime_environment = {}
+        target.storage_profile_id = None
+        target.path_storage = "tenant//custom/"
+        service.settings_repository.save(SettingsRecord(restic_repository_base="backup"))
+
+        environment, _, _ = service._resolve_runtime_dependencies(target)
+
+        self.assertEqual(environment["RESTIC_REPOSITORY"], "backup/tenant/custom")
+        self.assertNotIn("target-a", environment["RESTIC_REPOSITORY"])
+
+        service.settings_repository.save(SettingsRecord())
+        target.path_storage = "tenant/one"
+        first_fingerprint = service._repository_fingerprint(target)
+        target.path_storage = "tenant/two"
+        second_fingerprint = service._repository_fingerprint(target)
+        self.assertNotEqual(first_fingerprint, second_fingerprint)
+
+    def test_path_storage_does_not_modify_legacy_tar_or_rclone_remote_environment(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+        target.backup_strategy = "tar"
+        target.runtime_environment = {
+            "RCLONE_REMOTE": "legacy:archive",
+            "RESTIC_REPOSITORY": "local:/legacy-repository",
+        }
+        target.path_storage = "tenant/custom"
+        service.settings_repository.save(SettingsRecord(restic_repository_base="backup"))
+
+        payload = service._build_backup_payload(target)
+
+        self.assertEqual(payload["environment"]["RCLONE_REMOTE"], "legacy:archive")
+        self.assertEqual(payload["environment"]["RESTIC_REPOSITORY"], "local:/legacy-repository")
+
+    def test_path_storage_does_not_turn_an_empty_profile_repository_into_global_fallback(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+        target.runtime_environment = {}
+        target.storage_profile_id = "profile-empty"
+        target.path_storage = "tenant/custom"
+        service.storage_profile_repository.save(
+            StorageProfileRecord(
+                name="empty-profile",
+                backend_type="rclone",
+                id="profile-empty",
+                environment={"RESTIC_REPOSITORY": ""},
+            )
+        )
+        service.settings_repository.save(SettingsRecord(restic_repository_base="backup"))
+
+        environment, _, _ = service._resolve_runtime_dependencies(target)
+        context = service._storage_context(target, environment, [])
+
+        self.assertEqual(environment["RESTIC_REPOSITORY"], "")
+        self.assertEqual(context["repository_source"], "unconfigured")
+        self.assertIsNone(context["repository_display"])
+
+    def test_path_storage_validation_rejects_unsafe_values_and_ambiguous_target_override(self):
+        service = self.make_service()
+        invalid_values = (
+            "",
+            "../backup",
+            "backup/../target",
+            "./backup",
+            "/absolute",
+            r"backup\\target",
+            "https://example.invalid/repository",
+            "s3:bucket/path",
+            "tenant?query",
+            "tenant#fragment",
+            "backup\x00target",
+            "backup\t target",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                service._normalize_path_storage(value)
+
+        self.assertEqual(service._normalize_path_storage(" backup//tenant/ "), "backup/tenant")
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            service.register_target(
+                "ambiguous-target",
+                "worker-a",
+                runtime_environment={"RESTIC_REPOSITORY": "local:/repo"},
+                path_storage="tenant/custom",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            service.update_target("target-a", path_storage="tenant/custom")
+
+        target = service.register_target("custom-target", "worker-a")
+        updated = service.update_target(target.id, path_storage="tenant/custom")
+        self.assertEqual(updated.path_storage, "tenant/custom")
+        cleared = service.update_target(target.id, path_storage=None)
+        self.assertIsNone(cleared.path_storage)
+
+        indexed = InMemoryIndexRepository()
+        indexed_service = self.make_service(index_repository=indexed)
+        indexed_target = indexed_service.target_repository.get("target-a")
+        indexed_target.runtime_environment = {}
+        indexed_service.target_repository.save(indexed_target)
+        indexed.upsert_status(IndexStatusRecord("target-a", "abcdef12", status="indexed"))
+        indexed_service.update_target("target-a", path_storage="tenant/custom")
+        self.assertEqual(indexed.list_by_target("target-a"), [])
+
     def test_snapshot_sync_persists_catalog_and_deduplicates_pending_job(self):
         service = self.make_service()
 
@@ -1151,6 +1302,53 @@ class ControlPlaneRouteTests(unittest.TestCase):
 
                 self.assertEqual(handler._write_json.call_args.args, (400, {"error": error}))
 
+    def test_target_create_route_forwards_path_storage(self):
+        handler = self.make_handler(
+            "/api/v1/targets",
+            '{"name":"target-c","worker_id":"worker-a","path_storage":"tenant/custom"}',
+        )
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.register_target.return_value = SimpleNamespace(id="target-c")
+        handler._control_plane_service = Mock(return_value=service)
+        handler._target_jsonable = Mock(return_value={"id": "target-c", "path_storage": "tenant/custom"})
+
+        handler.do_POST()
+
+        self.assertEqual(service.register_target.call_args.kwargs["path_storage"], "tenant/custom")
+        self.assertEqual(handler._write_json.call_args.args, (201, handler._target_jsonable.return_value))
+
+    def test_target_create_route_returns_clear_path_storage_validation_error(self):
+        handler = self.make_handler(
+            "/api/v1/targets",
+            '{"name":"target-c","worker_id":"worker-a","path_storage":"../tenant"}',
+        )
+        handler._require_auth.reset_mock()
+        handler._require_auth.return_value = {"role": ROLE_ADMIN}
+        service = Mock()
+        service.register_target.side_effect = ValueError("path_storage traversal is not allowed")
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        self.assertEqual(handler._write_json.call_args.args, (400, {"error": "path_storage traversal is not allowed"}))
+
+    def test_target_patch_route_forwards_null_path_storage_to_clear_it(self):
+        handler = self.make_handler("/api/v1/targets/target-a", '{"path_storage":null}')
+        service = Mock()
+        service.update_target.return_value = SimpleNamespace(id="target-a")
+        handler._control_plane_service = Mock(return_value=service)
+        handler._target_jsonable = Mock(return_value={"id": "target-a", "path_storage": None})
+        handler._live_service = Mock(return_value=None)
+        handler._live_lane = Mock(return_value=None)
+
+        handler.do_PATCH()
+
+        self.assertIn("path_storage", service.update_target.call_args.kwargs)
+        self.assertIsNone(service.update_target.call_args.kwargs["path_storage"])
+        self.assertEqual(handler._write_json.call_args.args, (200, handler._target_jsonable.return_value))
+
     def test_target_jsonable_distinguishes_revoked_and_deleted_workers(self):
         service = ControlPlaneDispatchTests().make_service()
         revoked_worker = service.worker_repository.get("worker-a")
@@ -1177,6 +1375,8 @@ class ControlPlaneRouteTests(unittest.TestCase):
         self.assertTrue(deleted_payload["execution_blocked"])
         self.assertEqual(deleted_payload["blocked_reason"], "worker_missing")
         self.assertEqual(deleted_payload["worker_id"], "worker-b")
+        deleted_target.path_storage = "tenant/custom"
+        self.assertEqual(handler._target_jsonable(deleted_target)["path_storage"], "tenant/custom")
 
     def test_admin_delete_worker_route_is_admin_only_and_returns_no_content(self):
         handler = self.make_handler("/api/v1/workers/worker-a", "")

@@ -86,6 +86,7 @@ class BackupTargetRecord:
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
+    path_storage: Optional[str] = None
 
 
 @dataclass

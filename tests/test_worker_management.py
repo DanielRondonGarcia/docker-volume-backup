@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -218,6 +219,89 @@ class WorkerManagementTests(unittest.TestCase):
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
             connection.close()
             self.assertIn("snapshot_explorer_listing_max_output_bytes", columns)
+
+    def test_sqlite_target_path_storage_migrates_as_nullable_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "control-plane.db")
+            old_target = BackupTargetRecord(name="legacy", worker_id="worker-a", id="legacy")
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE targets (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        worker_id TEXT NOT NULL,
+                        compose_project TEXT,
+                        volume_targets_json TEXT NOT NULL,
+                        backup_mode TEXT NOT NULL,
+                        backup_strategy TEXT NOT NULL,
+                        runtime_image TEXT,
+                        runtime_command TEXT,
+                        runtime_environment_json TEXT NOT NULL,
+                        runtime_volumes_json TEXT NOT NULL,
+                        runtime_network_mode TEXT,
+                        storage_profile_id TEXT,
+                        retention_policy_id TEXT,
+                        execution_policy_id TEXT,
+                        restic_password_secret_id TEXT,
+                        restore_defaults_json TEXT NOT NULL,
+                        labels_json TEXT NOT NULL,
+                        enabled INTEGER NOT NULL,
+                        live_access_enabled INTEGER NOT NULL DEFAULT 0,
+                        cron_expression TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO targets (
+                        id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
+                        runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
+                        storage_profile_id, retention_policy_id, execution_policy_id, restic_password_secret_id,
+                        restore_defaults_json, labels_json, enabled, live_access_enabled, cron_expression, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        old_target.id,
+                        old_target.name,
+                        old_target.worker_id,
+                        old_target.compose_project,
+                        json.dumps(old_target.volume_targets),
+                        old_target.backup_mode,
+                        old_target.backup_strategy,
+                        old_target.runtime_image,
+                        old_target.runtime_command,
+                        json.dumps(old_target.runtime_environment),
+                        json.dumps(old_target.runtime_volumes),
+                        old_target.runtime_network_mode,
+                        old_target.storage_profile_id,
+                        old_target.retention_policy_id,
+                        old_target.execution_policy_id,
+                        old_target.restic_password_secret_id,
+                        json.dumps(old_target.restore_defaults),
+                        json.dumps(old_target.labels),
+                        1,
+                        0,
+                        old_target.cron_expression,
+                        old_target.created_at.isoformat(),
+                        old_target.updated_at.isoformat(),
+                    ),
+                )
+            connection.close()
+
+            repository = SQLiteTargetRepository(database_path)
+            loaded_legacy = repository.get("legacy")
+            self.assertIsNone(loaded_legacy.path_storage)
+            with sqlite3.connect(database_path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(targets)")}
+            connection.close()
+            self.assertIn("path_storage", columns)
+
+            loaded_legacy.path_storage = "tenant/custom"
+            repository.save(loaded_legacy)
+            self.assertEqual(repository.get("legacy").path_storage, "tenant/custom")
 
     def test_worker_labels_reject_invalid_keys_and_allow_clear(self):
         service, _, _, _, _, _ = self.make_service()

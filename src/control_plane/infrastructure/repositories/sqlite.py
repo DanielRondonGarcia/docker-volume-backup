@@ -131,6 +131,7 @@ class SQLiteRepositoryBase:
                     runtime_volumes_json TEXT NOT NULL,
                     runtime_network_mode TEXT,
                     storage_profile_id TEXT,
+                    path_storage TEXT,
                     retention_policy_id TEXT,
                     execution_policy_id TEXT,
                     restic_password_secret_id TEXT,
@@ -271,6 +272,7 @@ class SQLiteRepositoryBase:
             )
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
             self._ensure_column(connection, "targets", "live_access_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "targets", "path_storage", "TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_submitted_at_id_desc "
                 "ON jobs (submitted_at DESC, id DESC)"
@@ -454,9 +456,12 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                 INSERT OR REPLACE INTO targets (
                     id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
                     runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
-                    storage_profile_id, retention_policy_id, execution_policy_id, restic_password_secret_id, restore_defaults_json, labels_json,
+                    storage_profile_id, path_storage, retention_policy_id, execution_policy_id, restic_password_secret_id, restore_defaults_json, labels_json,
                     enabled, live_access_enabled, cron_expression, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     target.id,
@@ -472,6 +477,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
                     json.dumps(target.runtime_volumes),
                     target.runtime_network_mode,
                     target.storage_profile_id,
+                    target.path_storage,
                     target.retention_policy_id,
                     target.execution_policy_id,
                     target.restic_password_secret_id,
@@ -517,6 +523,7 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
             runtime_volumes=_json_load(row["runtime_volumes_json"], {}),
             runtime_network_mode=row["runtime_network_mode"],
             storage_profile_id=row["storage_profile_id"],
+            path_storage=row["path_storage"] if "path_storage" in row.keys() else None,
             retention_policy_id=row["retention_policy_id"],
             execution_policy_id=row["execution_policy_id"],
             restic_password_secret_id=row["restic_password_secret_id"],
