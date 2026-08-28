@@ -278,6 +278,60 @@ class SnapshotBrowserTests(unittest.TestCase):
                 self.assertNotIn(password, safe_output)
                 self.assertNotIn(rclone_config, safe_output)
 
+    def test_restic_authentication_failure_is_classified_and_secret_safe_for_catalog_and_listing(self):
+        repository = "local:/sensitive/repository"
+        password = "restic-password-value"
+        key = "restic-encryption-key-value"
+        raw_error = f"Fatal: wrong password or no key found ({repository} {password} {key})"
+        redacted_error = "Fatal: wrong <redacted> or no key found"
+        runtime = Mock()
+        failure = {
+            "success": False,
+            "status_code": 1,
+            "error": raw_error,
+            "logs": redacted_error,
+            "stderr": "",
+            "snapshots": [],
+        }
+        runtime.run_runtime_job.return_value = failure
+        runtime.list_restic_snapshots.return_value = failure
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host"),
+            Mock(),
+            runtime,
+        )
+        payload = {
+            "environment": {
+                "RESTIC_REPOSITORY": repository,
+                "RESTIC_PASSWORD": password,
+                "RESTIC_KEY": key,
+            }
+        }
+
+        self.assertEqual(
+            service._classify_snapshot_runtime_error("snapshot.ls", payload, {"error": redacted_error}),
+            WorkerAgentService.RESTIC_AUTHENTICATION_ERROR,
+        )
+        for command in ("snapshots.list", "snapshot.ls"):
+            with self.subTest(command=command):
+                result = service.execute_job({"command": command, "payload": payload})
+
+                self.assertEqual(result.status, JobStatus.FAILED)
+                self.assertEqual(
+                    result.result_summary["error"],
+                    WorkerAgentService.RESTIC_AUTHENTICATION_ERROR,
+                )
+                self.assertEqual(
+                    result.result_summary["listing_error_code"],
+                    WorkerAgentService.RESTIC_AUTHENTICATION_ERROR_CODE,
+                )
+                self.assertEqual(result.log_lines, [WorkerAgentService.RESTIC_AUTHENTICATION_ERROR])
+                safe_output = "\n".join(result.log_lines) + repr(result.result_summary)
+                self.assertNotIn(repository, safe_output)
+                self.assertNotIn(password, safe_output)
+                self.assertNotIn(key, safe_output)
+                self.assertNotIn(raw_error, safe_output)
+
     def test_generic_snapshot_runtime_error_remains_sanitized_and_available(self):
         repository = "local:/sensitive/repository"
         password = "restic-password-value"

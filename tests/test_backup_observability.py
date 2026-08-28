@@ -107,6 +107,65 @@ class BackupObservabilityServiceTests(unittest.TestCase):
         self.assertEqual(context["repository_kind"], "rclone")
         self.assertEqual(context["rclone_config_source"], "profile")
 
+    def test_profile_only_rclone_file_supplies_backup_and_snapshot_repository(self):
+        service = self.make_service()
+        profile_content = "[profile-remote]\ntype = s3\nsecret_access_key = profile-secret\n"
+        global_content = "[global-remote]\ntype = s3\nsecret_access_key = global-secret\n"
+        profile_secret = service.create_secret("profile-rclone", "storage_profile", "file", profile_content)
+        global_secret = service.create_secret("global-rclone", "settings", "file", global_content)
+        profile = service.create_storage_profile(
+            "profile-only",
+            "rclone",
+            file_secret_refs={"/run/rclone-config/rclone.conf": profile_secret.id},
+        )
+        target = service.target_repository.get("target-a")
+        target.storage_profile_id = profile.id
+        service.target_repository.save(target)
+        service.settings_repository.save(
+            SettingsRecord(restic_repository_base="backup", rclone_conf_secret_id=global_secret.id)
+        )
+
+        payloads = [service._build_backup_payload(target), service._build_snapshot_list_payload(target)]
+        expected_repository = "rclone:profile-remote:backup/target-a"
+        for payload in payloads:
+            self.assertEqual(payload["environment"]["RESTIC_REPOSITORY"], expected_repository)
+            self.assertEqual(payload["environment"]["RCLONE_CONF_CONTENT"], profile_content)
+            self.assertEqual(payload["storage_context"]["repository_source"], "profile")
+            self.assertEqual(payload["storage_context"]["rclone_config_source"], "profile")
+            self.assertEqual(payload["storage_context"]["repository_display"], expected_repository)
+            self.assertNotIn("global-remote", json.dumps(payload["storage_context"]))
+            self.assertNotIn(global_content, json.dumps(payload["resolved_files"]))
+
+    def test_profile_rclone_remote_preserves_non_rclone_settings_repository(self):
+        service = self.make_service()
+        profile_content = "[profile-remote]\ntype = s3\nsecret_access_key = profile-secret\n"
+        global_content = "[global-remote]\ntype = s3\nsecret_access_key = global-secret\n"
+        profile_secret = service.create_secret("profile-rclone", "storage_profile", "file", profile_content)
+        global_secret = service.create_secret("global-rclone", "settings", "file", global_content)
+        profile = service.create_storage_profile(
+            "profile-s3-base",
+            "rclone",
+            file_secret_refs={"/run/rclone-config/rclone.conf": profile_secret.id},
+        )
+        target = service.target_repository.get("target-a")
+        target.storage_profile_id = profile.id
+        service.target_repository.save(target)
+        service.settings_repository.save(
+            SettingsRecord(
+                restic_repository_base="s3:https://example.invalid/global",
+                rclone_conf_secret_id=global_secret.id,
+            )
+        )
+
+        payloads = [service._build_backup_payload(target), service._build_snapshot_list_payload(target)]
+        expected_repository = "s3:https://example.invalid/global/target-a"
+        for payload in payloads:
+            self.assertEqual(payload["environment"]["RESTIC_REPOSITORY"], expected_repository)
+            self.assertEqual(payload["storage_context"]["repository_source"], "settings")
+            self.assertEqual(payload["storage_context"]["repository_kind"], "s3")
+            self.assertEqual(payload["storage_context"]["rclone_config_source"], "profile")
+            self.assertEqual(payload["storage_context"]["repository_display"], expected_repository)
+
     def test_public_job_view_omits_internal_payload_and_redacts_persisted_output(self):
         service = self.make_service()
         job = JobRecord(

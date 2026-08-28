@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 class DockerRuntimeAdapter:
     DEFAULT_RUNTIME_TIMEOUT_SECONDS = 1800.0
+    DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS = 6 * 60 * 60
+    MAX_RUNTIME_TIMEOUT_SECONDS = 24 * 60 * 60
     DEFAULT_CACHE_DIR = "/var/cache/restic-explorer"
     CACHE_MOUNT_PATH = "/root/.cache/restic"
     RUNTIME_TEMPORARY_LABEL = "docker-volume-backup.runtime.temporary"
@@ -60,6 +62,9 @@ class DockerRuntimeAdapter:
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else os.environ.get(
             "WORKER_RUNTIME_TIMEOUT_SECONDS", str(self.DEFAULT_RUNTIME_TIMEOUT_SECONDS)
         )
+        self.restore_timeout_seconds = os.environ.get(
+            "WORKER_RESTORE_RUNTIME_TIMEOUT_SECONDS", str(self.DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS)
+        )
         self.no_lock = self._env_flag("SNAPSHOT_EXPLORER_NO_LOCK")
         self.cache_dir = os.environ.get("SNAPSHOT_EXPLORER_CACHE_DIR") or None
         if docker is None:
@@ -79,13 +84,29 @@ class DockerRuntimeAdapter:
 
     @classmethod
     def _timeout_seconds(cls, value: Any) -> float:
+        if isinstance(value, bool):
+            raise ValueError("runtime timeout_seconds must be a finite positive number")
         try:
             timeout = float(value)
         except (TypeError, ValueError):
             raise ValueError("runtime timeout_seconds must be a finite positive number") from None
-        if not math.isfinite(timeout) or timeout <= 0 or timeout > 86400.0:
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > cls.MAX_RUNTIME_TIMEOUT_SECONDS:
             raise ValueError("runtime timeout_seconds is outside the permitted bounds")
         return timeout
+
+    @classmethod
+    def _is_restore_payload(cls, payload: Dict[str, Any], command: List[str]) -> bool:
+        environment = payload.get("environment") if isinstance(payload, dict) else None
+        restore_mode = environment.get("RESTORE_MODE") if isinstance(environment, dict) else None
+        if isinstance(restore_mode, str) and restore_mode.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        operation_index = 3 if len(command) >= 4 and command[:2] == ["restic", "--cache-dir"] else 1
+        return len(command) > operation_index and command[operation_index] == "restore"
+
+    def _default_runtime_timeout(self, payload: Dict[str, Any], command: List[str]) -> Any:
+        if self._is_restore_payload(payload, command):
+            return getattr(self, "restore_timeout_seconds", self.DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS)
+        return getattr(self, "timeout_seconds", self.DEFAULT_RUNTIME_TIMEOUT_SECONDS)
 
     @classmethod
     def _runtime_command_argv(cls, command: Any) -> List[str]:
@@ -984,7 +1005,8 @@ class DockerRuntimeAdapter:
         command = self._runtime_command_argv(payload.get("command"))
         self._validate_snapshot_scope(payload, command)
         command = self._apply_lock_policy(command, bool(getattr(self, "no_lock", False)))
-        timeout = self._timeout_seconds(payload.get("timeout_seconds", getattr(self, "timeout_seconds", self.DEFAULT_RUNTIME_TIMEOUT_SECONDS)))
+        timeout_value = payload["timeout_seconds"] if "timeout_seconds" in payload else self._default_runtime_timeout(payload, command)
+        timeout = self._timeout_seconds(timeout_value)
         network_mode = payload.get("network_mode") or ("none" if binary else None)
         if network_mode not in {None, "none", "bridge"}:
             raise ValueError("unsupported runtime network mode")

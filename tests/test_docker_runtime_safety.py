@@ -381,6 +381,76 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
         container.stop.assert_called_once_with(timeout=1)
         container.remove.assert_called_once_with(force=True)
 
+    def test_restore_uses_operation_timeout_without_changing_backup_default(self):
+        restore_container = self.container()
+        restore_runtime = self.runtime(restore_container)
+
+        restore_result = restore_runtime.run_runtime_job(
+            "runtime",
+            {
+                "command": "/root/backup.sh",
+                "environment": {"RESTORE_MODE": "true"},
+            },
+        )
+
+        self.assertTrue(restore_result["success"])
+        restore_container.wait.assert_called_once_with(
+            timeout=DockerRuntimeAdapter.DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS
+        )
+
+        backup_container = self.container()
+        backup_runtime = self.runtime(backup_container)
+        backup_result = backup_runtime.run_runtime_job("runtime", {"command": "/root/backup.sh"})
+
+        self.assertTrue(backup_result["success"])
+        backup_container.wait.assert_called_once_with(timeout=30.0)
+
+    def test_restore_timeout_can_be_overridden_but_remains_bounded(self):
+        runtime = self.runtime(self.container())
+        result = runtime.run_runtime_job(
+            "runtime",
+            {
+                "command": "/root/backup.sh",
+                "environment": {"RESTORE_MODE": "true"},
+                "timeout_seconds": 7200,
+            },
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(runtime.client.containers.run.return_value.wait.call_args.kwargs["timeout"], 7200.0)
+
+        for invalid in (True, 0, DockerRuntimeAdapter.MAX_RUNTIME_TIMEOUT_SECONDS + 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                runtime._prepare_runtime(
+                    {
+                        "command": "/root/backup.sh",
+                        "environment": {"RESTORE_MODE": "true"},
+                        "timeout_seconds": invalid,
+                    },
+                    binary=False,
+                )
+
+    def test_restore_timeout_keeps_cancellation_polling(self):
+        container = self.container()
+        container.wait.side_effect = TimeoutError("wait timed out")
+        runtime = self.runtime(container)
+        checks = iter((False, False, True))
+
+        result = runtime.run_runtime_job(
+            "runtime",
+            {
+                "command": "/root/backup.sh",
+                "environment": {"RESTORE_MODE": "true"},
+            },
+            cancel_check=lambda: next(checks),
+        )
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["canceled"])
+        self.assertEqual(result["status_code"], 130)
+        container.stop.assert_called_once_with(timeout=1)
+        container.remove.assert_called_once_with(force=True)
+
     def test_cancellation_stops_container_and_returns_canceled_without_leak(self):
         container = self.container()
         container.wait.side_effect = TimeoutError("wait timed out")

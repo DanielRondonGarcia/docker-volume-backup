@@ -182,7 +182,7 @@ class SchedulerDeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not eligible"):
             service.dispatch_job("worker-a", "backup.run", target_id=target.id)
 
-    def test_disabled_target_is_skipped_by_scheduler_and_manual_backup_dispatch(self):
+    def test_disabled_target_is_skipped_by_scheduler_but_manual_backup_dispatch_remains_available(self):
         service = self._service()
         target = BackupTargetRecord(name="target", worker_id="worker-a", enabled=False, cron_expression="* * * * *")
         service.target_repository.save(target)
@@ -191,8 +191,10 @@ class SchedulerDeploymentTests(unittest.TestCase):
         scheduler._tick()
 
         self.assertEqual(service.job_repository.list(), [])
+        manual_job = service.dispatch_backup_for_target(target.id)
+        self.assertEqual(manual_job.trigger, "manual")
         with self.assertRaisesRegex(ValueError, "disabled"):
-            service.dispatch_backup_for_target(target.id)
+            service.dispatch_backup_for_target(target.id, trigger="schedule")
 
     def test_compose_and_ci_defaults(self):
         worker_compose = (ROOT / "deploy/worker/docker-compose.yml").read_text()

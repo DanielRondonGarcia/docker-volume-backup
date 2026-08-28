@@ -146,6 +146,23 @@ details.form-section[open] > summary::after { transform: rotate(45deg); }
 details.form-section > .form-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 12px; }
 details.form-section[open] > .form-body { border-top: 1px solid var(--border); padding-top: 16px; }
 
+.retention-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); align-items: start; gap: 16px; width: 100%; }
+.retention-main { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
+.retention-guide { position: sticky; top: 16px; display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+.retention-guide-section,
+.retention-guide-summary { padding: 16px; border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); background: var(--card); box-shadow: var(--shadow-sm); }
+.retention-guide h3 { margin: 0 0 10px; font-size: 14px; }
+.retention-guide p { margin: 0 0 10px; color: var(--muted-foreground); font-size: 12px; line-height: 1.55; }
+.retention-guide p:last-child { margin-bottom: 0; }
+.retention-guide strong { color: var(--foreground); }
+.retention-guide-summary { border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
+.retention-guide-summary p { margin: 8px 0 0; color: var(--foreground); }
+.retention-policy-row { cursor: pointer; }
+.retention-policy-row:focus-visible { outline: 0; box-shadow: inset 0 0 0 2px var(--ring); }
+.retention-policy-row.is-selected td { background: color-mix(in srgb, var(--primary) 10%, var(--card)); }
+.retention-policy-select { padding: 0; border: 0; background: transparent; color: var(--primary); font: inherit; text-align: left; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.retention-policy-select:focus-visible { outline: 0; box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring); }
+
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .helper { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
 
@@ -598,6 +615,10 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
 .job-status-pill.failed { background: #fee2e2; color: #dc2626; }
 .job-status-pill.canceled { background: #f3f4f6; color: #6b7280; }
 .job-meta { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono); }
+.log-panel-title { flex: 1 1 auto; min-width: 0; }
+.job-detail-summary { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 0; width: 100%; }
+.job-detail-summary > .job-progress,
+.job-detail-summary > .job-storage-context { align-self: stretch; box-sizing: border-box; width: 100%; max-width: none; margin-bottom: 0; }
 .log-panel-header { position: relative; }
 .job-live-indicator {
   position: absolute;
@@ -633,6 +654,11 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
   .job-progress-fill { transition: none; }
   .job-progress-fill.indeterminate { animation: none; width: 100%; opacity: .65; }
   .job-live-indicator[data-state="connecting"], .job-live-indicator[data-state="live"] { animation: none; }
+}
+
+@media (max-width: 960px) {
+  .retention-layout { grid-template-columns: 1fr; }
+  .retention-guide { position: static; }
 }
 
 .log-container {

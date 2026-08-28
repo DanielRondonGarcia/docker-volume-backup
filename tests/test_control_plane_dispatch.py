@@ -341,6 +341,29 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         self.assertEqual(contract["listing_error_code"], "output_limit")
         self.assertTrue(contract["error"])
 
+    def test_snapshot_contract_allows_authentication_listing_error_code(self):
+        service = self.make_service()
+        response = service.dispatch_snapshot_read("target-a", "browse", "abcdef12")
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        service.update_job_status(
+            "worker-a",
+            claimed.id,
+            JobStatus.FAILED,
+            result_summary={
+                "entries": [],
+                "listing_mode": "direct",
+                "listing_complete": False,
+                "listing_error_code": "authentication",
+                "error": "Restic repository could not be unlocked.",
+            },
+            lease_token=claimed.lease_token,
+        )
+
+        contract = service.snapshot_job_contract(response["job_id"])
+
+        self.assertEqual(contract["listing_error_code"], "authentication")
+        self.assertEqual(contract["status"], JobStatus.FAILED)
+
     def test_interactive_fetch_prioritizes_explorer_jobs_and_search_is_bounded(self):
         service = self.make_service()
         service.dispatch_job("worker-a", "backup.run", target_id="target-a")
@@ -573,16 +596,21 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not eligible"):
             service.register_target("new-target", "worker-b")
 
-    def test_disabled_targets_cannot_be_dispatched_as_backups(self):
+    def test_disabled_targets_allow_manual_backups_but_reject_scheduled_dispatch(self):
         service = self.make_service()
         target = service.target_repository.get("target-a")
         target.enabled = False
         service.target_repository.save(target)
 
+        manual_target_job = service.dispatch_backup_for_target("target-a")
+        manual_direct_job = service.dispatch_job("worker-a", "backup.run", target_id="target-a")
+        self.assertEqual(manual_target_job.trigger, "manual")
+        self.assertEqual(manual_direct_job.trigger, "manual")
+
         with self.assertRaisesRegex(ValueError, "disabled"):
-            service.dispatch_backup_for_target("target-a")
+            service.dispatch_backup_for_target("target-a", trigger="schedule")
         with self.assertRaisesRegex(ValueError, "disabled"):
-            service.dispatch_job("worker-a", "backup.run", target_id="target-a")
+            service.dispatch_job("worker-a", "backup.run", target_id="target-a", trigger="scheduled")
 
     def test_manual_backup_mode_override_changes_payload_only(self):
         service = self.make_service()
@@ -601,6 +629,26 @@ class ControlPlaneDispatchTests(unittest.TestCase):
             service.register_target("invalid-mode", "worker-a", backup_mode="warm")
         with self.assertRaisesRegex(ValueError, "exactly 'hot' or 'cold'"):
             service.update_target("target-a", backup_mode="warm")
+
+    def test_restore_payload_selects_bounded_operation_timeout_without_affecting_backup(self):
+        service = self.make_service()
+        target = service.target_repository.get("target-a")
+
+        default_payload = service._build_restore_payload(target, None, "/restore", True, False, None, None, None)
+        self.assertEqual(
+            default_payload["timeout_seconds"],
+            service.DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS,
+        )
+        self.assertNotIn("timeout_seconds", service._build_backup_payload(target))
+
+        target.restore_defaults = {"timeout_seconds": 7200}
+        configured_payload = service._build_restore_payload(target, None, "/restore", True, False, None, None, None)
+        self.assertEqual(configured_payload["timeout_seconds"], 7200.0)
+
+        for invalid in (True, 0, service.MAX_RUNTIME_TIMEOUT_SECONDS + 1):
+            target.restore_defaults = {"timeout_seconds": invalid}
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                service._build_restore_payload(target, None, "/restore", True, False, None, None, None)
 
     def test_path_storage_uses_profile_repository_over_conflicting_global_settings(self):
         service = self.make_service()
@@ -1377,6 +1425,22 @@ class ControlPlaneRouteTests(unittest.TestCase):
         self.assertEqual(deleted_payload["worker_id"], "worker-b")
         deleted_target.path_storage = "tenant/custom"
         self.assertEqual(handler._target_jsonable(deleted_target)["path_storage"], "tenant/custom")
+
+    def test_target_jsonable_separates_inactive_scheduling_from_worker_execution_blocking(self):
+        service = ControlPlaneDispatchTests().make_service()
+        target = service.target_repository.get("target-a")
+        target.enabled = False
+        service.target_repository.save(target)
+
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler._control_plane_service = Mock(return_value=service)
+        handler._scheduler = Mock(return_value=None)
+
+        payload = handler._target_jsonable(target)
+
+        self.assertFalse(payload["execution_blocked"])
+        self.assertTrue(payload["scheduling_disabled"])
+        self.assertEqual(payload["blocked_reason"], "target_disabled")
 
     def test_admin_delete_worker_route_is_admin_only_and_returns_no_content(self):
         handler = self.make_handler("/api/v1/workers/worker-a", "")

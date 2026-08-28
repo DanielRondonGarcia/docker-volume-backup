@@ -323,8 +323,9 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             {
                 "worker_name": worker_name,
                 "worker_status": worker_status,
-                "execution_blocked": blocked_reason is not None,
+                "execution_blocked": blocked_reason not in (None, "target_disabled"),
                 "blocked_reason": blocked_reason,
+                "scheduling_disabled": not bool(target.enabled),
             }
         )
         scheduler = self._scheduler()

@@ -274,7 +274,7 @@
         pending: { cls: "warn", label: "Pendiente" },
       }[target.worker_status] || { cls: "muted", label: target.worker_status || "Sin estado" };
       const reasonLabels = {
-        target_disabled: "Target deshabilitado",
+        target_disabled: "Cron deshabilitado · acciones manuales disponibles",
         worker_revoked: "Worker revocado",
         worker_missing: "Worker eliminado",
         worker_offline: "Worker offline",
@@ -582,6 +582,7 @@
       const preservedTargetDropdown = view === "targets" && state.currentView === "targets"
         ? captureTargetDropdownState()
         : null;
+      if (state.currentView !== view && currentLogJobId) closeLogPanel();
       state.currentView = view;
       if (view !== "jobs") {
         stopJobsPolling();
@@ -600,10 +601,6 @@
       const renderer = viewRenderers[view];
       if (renderer) renderer(content);
       if (preservedTargetDropdown) restoreTargetDropdownState(preservedTargetDropdown);
-      if (view !== "targets" && currentLogJobId) {
-        const existingJob = (state.jobs || []).find(j => j.id === currentLogJobId);
-        reopenLogPanel(currentLogJobId, currentLogTargetId || (existingJob ? existingJob.target_id : null));
-      }
     }
 
     function route() {
@@ -1450,6 +1447,13 @@ docker compose up -d
       });
     }
 
+    function targetExecutionBlocked(target) {
+      if (!target) return true;
+      const workerStatus = String(target.worker_status || "").toLowerCase();
+      if (workerStatus && workerStatus !== "online") return true;
+      return Boolean(target.execution_blocked && target.blocked_reason !== "target_disabled");
+    }
+
     function renderTargetsTable(preservedDropdown = captureTargetDropdownState()) {
       const container = document.getElementById("targetsTableContainer");
       if (!container) return;
@@ -1574,16 +1578,29 @@ docker compose up -d
         const workerStatus = t.worker_status || (worker && worker.status) || "missing";
         const fallbackWorkerReason = { disabled: "worker_revoked", missing: "worker_missing" }[workerStatus] || "worker_offline";
         const blockedReason = t.blocked_reason || (!t.enabled ? "target_disabled" : workerStatus !== "online" ? fallbackWorkerReason : null);
-        const executionBlocked = Boolean(t.execution_blocked || blockedReason);
+        const schedulingDisabled = Boolean(t.scheduling_disabled ?? !t.enabled);
+        const executionBlocked = targetExecutionBlocked({ ...t, worker_status: workerStatus, blocked_reason: blockedReason });
         const workerIneligible = workerStatus !== "online";
         const enableBlocked = executionBlocked && blockedReason !== "target_disabled";
         const toggleDisabled = !canManageTargets || enableBlocked;
         const runDisabled = !canRunTargets || executionBlocked;
-        const targetStatusLabel = t.enabled && !executionBlocked ? "Si" : t.enabled ? "Bloqueado" : "No";
+        const targetStatusLabel = executionBlocked ? "Bloqueado" : schedulingDisabled ? "No (cron)" : "Si";
         const toggleTitle = workerIneligible
           ? "No se puede habilitar: el worker no es elegible"
-          : t.enabled ? "Deshabilitar backups de este target" : "Habilitar backups de este target";
-        const targetRow = `<tr class="${executionBlocked ? "target-execution-blocked" : ""}" title="${executionBlocked ? "Ejecucion bloqueada hasta resolver el estado del target o worker" : ""}">
+          : t.enabled
+            ? "Deshabilitar el cron de este target. Los backups manuales seguirán disponibles."
+            : "Target inactivo: el cron está deshabilitado, pero los backups manuales y el flujo de snapshots/restauración siguen disponibles.";
+        const runTitle = executionBlocked
+          ? "No se puede ejecutar: el worker no es elegible"
+          : schedulingDisabled
+            ? "Target inactivo: el cron está deshabilitado; este backup manual sí está disponible."
+            : "Ejecutar un backup manual";
+        const targetRowTitle = executionBlocked
+          ? "Ejecucion bloqueada hasta resolver el estado del worker"
+          : schedulingDisabled
+            ? "Target inactivo: cron deshabilitado; acciones manuales disponibles"
+            : "";
+        const targetRow = `<tr class="${executionBlocked ? "target-execution-blocked" : ""}" title="${escapeHtml(targetRowTitle)}">
            <td data-label="Nombre">${escapeHtml(t.name)}</td>
            <td data-label="Worker"><div class="target-worker-name">${escapeHtml(workerName)}</div>${fmtTargetWorkerState({ ...t, worker_status: workerStatus, blocked_reason: blockedReason })}</td>
            <td data-label="Compose project" class="mono target-compose-cell">${escapeHtml(t.compose_project || "—")}</td>
@@ -1602,7 +1619,7 @@ docker compose up -d
               <div class="dropdown">
                <button type="button" class="btn ghost xs dropdown-trigger" id="target-dropdown-trigger-${escapeHtml(t.id)}" data-dropdown="${escapeHtml(t.id)}" aria-haspopup="menu" aria-expanded="false" aria-controls="dd-${escapeHtml(t.id)}">Acciones ▾</button>
                <div class="dropdown-menu" id="dd-${escapeHtml(t.id)}" role="menu" aria-labelledby="target-dropdown-trigger-${escapeHtml(t.id)}">
-                   ${canRunTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
+                    ${canRunTargets ? `<button type="button" role="menuitem" class="dropdown-item" data-action="run" data-id="${escapeHtml(t.id)}" title="${escapeHtml(runTitle)}" ${runDisabled ? "disabled" : ""}>Ejecutar backup</button>` : ""}
                    ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="snapshots" data-id="${escapeHtml(t.id)}">Snapshots</button>` : ""}
                    ${t.backup_strategy === "restic" ? `<button type="button" role="menuitem" class="dropdown-item" data-action="target-stats" data-id="${escapeHtml(t.id)}">Ver stats</button>` : ""}
                     ${lastJob ? `<button type="button" role="menuitem" class="dropdown-item" data-action="logs" data-id="${escapeHtml(t.id)}" data-job="${escapeHtml(lastJob.id)}">Ver ultimos logs</button>` : ""}
@@ -2144,7 +2161,7 @@ docker compose up -d
 
     function openBackupRunModal(targetId, triggerButton) {
       const target = state.targets.find(item => String(item.id) === String(targetId));
-      if (!target || target.execution_blocked || !["admin", "operator"].includes(state.currentRole)) return;
+      if (targetExecutionBlocked(target) || !["admin", "operator"].includes(state.currentRole)) return;
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
       backupRunPreviousFocus = triggerButton || document.activeElement;
@@ -2621,6 +2638,7 @@ docker compose up -d
     const SNAPSHOT_CATALOG_REFRESH_DELAYS = [500, 1000, 2000, 3500, 5000, 7000];
     const SNAPSHOT_REFRESH_LABEL = "Refrescar lista de snapshots";
     const SNAPSHOT_REFRESH_BUSY_LABEL = "Sincronizando snapshots...";
+    const SNAPSHOT_AUTHENTICATION_ERROR_MESSAGE = "No se pudo desbloquear el repositorio Restic. Lo más probable es que la contraseña o clave de Restic sea incorrecta o que sea diferente de la usada para crear el repositorio. Verifica el secreto de Restic configurado para el target en Settings. No ejecutes restic init a menos que confirmes que el repositorio no existe.";
     const SNAPSHOT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
     const SNAPSHOT_MAX_BASE64_LENGTH = Math.ceil(SNAPSHOT_MAX_OUTPUT_BYTES * 4 / 3) + 4;
     const SNAPSHOT_STATE_LABELS = {
@@ -3834,8 +3852,10 @@ docker compose up -d
         const syncResult = await pollSnapshotJob(syncRequest, { ...syncJob, job_id: syncRequest.jobId });
         const syncStatus = snapshotStatus(syncResult);
         if (!["succeeded", "success"].includes(syncStatus)) {
-          const failure = new Error((syncResult && (syncResult.error || syncResult.result_summary && syncResult.result_summary.error)) || "El worker no pudo sincronizar el catalogo.");
-          failure.status = syncResult && syncResult.status_code;
+          const normalizedSyncResult = normalizeSnapshotContract(syncResult) || {};
+          const failure = new Error(normalizedSyncResult.error || "El worker no pudo sincronizar el catalogo.");
+          failure.status = normalizedSyncResult.status_code;
+          failure.listing_error_code = normalizedSyncResult.listing_error_code;
           failure.code = syncStatus === "failed" || syncStatus === "error" ? "snapshot-sync-failed" : "snapshot-sync-incomplete";
           throw failure;
         }
@@ -3846,9 +3866,12 @@ docker compose up -d
         if (isSnapshotAbortError(error) || syncRequest.controller.signal.aborted) return;
         const timeout = error && error.code === "snapshot-poll-timeout";
         const failed = error && ["snapshot-sync-failed", "snapshot-sync-incomplete"].includes(error.code);
+        const listingFailure = failed && error && error.listing_error_code
+          ? classifySnapshotListingFailure(error)
+          : null;
         const offline = !timeout && !failed && (!error || typeof error.status !== "number" || error.status === 0 || [400, 401, 404, 409, 502, 503, 504].includes(error.status));
-        state.catalogStatus = timeout ? "timeout" : offline ? "offline" : "error";
-        state.catalogError = String(error && error.message || error || "No se pudo sincronizar el catalogo.").slice(0, 300);
+        state.catalogStatus = listingFailure ? (listingFailure.kind === "timeout" ? "timeout" : "error") : timeout ? "timeout" : offline ? "offline" : "error";
+        state.catalogError = String(listingFailure ? listingFailure.message : error && error.message || error || "No se pudo sincronizar el catalogo.").slice(0, 300);
         renderSnapshotList();
         if (!state.currentSnapshot) {
           const workspace = document.getElementById("snapshotWorkspace");
@@ -3889,6 +3912,12 @@ docker compose up -d
       const code = String(normalized.listing_error_code || "").toLowerCase();
       const statusCode = Number(normalized.status_code);
       const text = String(normalized.error || "").toLowerCase();
+      if (code === "authentication" || /\bwrong\s+\S+\s+or\s+no\s+key\s+found\b/.test(text)) {
+        return {
+          kind: "error",
+          message: SNAPSHOT_AUTHENTICATION_ERROR_MESSAGE,
+        };
+      }
       if (code === "output_limit" || statusCode === 413 || /output|log|limit|exceed|too large|truncat/.test(text)) {
         return {
           kind: "output-limit",
@@ -4735,6 +4764,7 @@ docker compose up -d
                 <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
                 <span class="job-live-indicator" data-job-live-state data-state="connecting" role="status" aria-live="polite" aria-label="Conectando…" title="Conectando…"></span>
               </div>
+              <div class="job-detail-summary" data-job-detail-summary></div>
             </div>
             <button type="button" class="btn ghost xs" id="${closeId}" data-target-log-close aria-label="Cerrar logs de ${escapeHtml(targetLabel)}">Cerrar</button>
           </div>
@@ -4759,6 +4789,12 @@ docker compose up -d
       if (closeButton) closeButton.addEventListener("click", closeLogPanel);
     }
 
+    function renderJobDetailSummary(job, root) {
+      const summary = root ? root.querySelector("[data-job-detail-summary]") : null;
+      if (!summary) return;
+      summary.innerHTML = `${renderJobProgress(job)}${renderJobStorageContext(job)}`;
+    }
+
     function renderTargetJobLogsInto(job, root) {
       if (!root) return;
       const statusEl = root.querySelector("[data-target-log-status]");
@@ -4772,17 +4808,16 @@ docker compose up -d
         const meta = statusEl.querySelector(".job-meta");
         if (meta) meta.textContent = `Job: ${job.id}`;
       }
+      renderJobDetailSummary(job, root);
       const container = root.querySelector("[data-target-log-container]");
       if (!container) return;
       const lines = job.log_lines || [];
-      const progressMarkup = renderJobProgress(job);
-      const storageMarkup = renderJobStorageContext(job);
       if (!lines.length) {
         const terminal = isTerminalJobStatus(job.status);
-        container.innerHTML = `${progressMarkup}${storageMarkup}<div class="log-line info">${terminal ? "Sin logs disponibles para esta ejecucion." : "Esperando logs del worker..."}</div>`;
+        container.innerHTML = `<div class="log-line info">${terminal ? "Sin logs disponibles para esta ejecucion." : "Esperando logs del worker..."}</div>`;
         return;
       }
-      container.innerHTML = `${progressMarkup}${storageMarkup}${lines.map(line => {
+      container.innerHTML = `${lines.map(line => {
         const lower = line.toLowerCase();
         let cls = "info";
         if (lower.includes("error") || lower.includes("err:") || lower.includes("failed") || lower.includes("traceback") || lower.includes("exception")) cls = "error";
@@ -4850,6 +4885,7 @@ docker compose up -d
     function closeLogPanel() {
       if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
       stopTargetJobEvents();
+      targetLogLoadToken += 1;
       const targetId = currentLogTargetId;
       currentLogJobId = null;
       currentLogTargetId = null;
@@ -5237,6 +5273,7 @@ docker compose up -d
                 <span class="job-meta">Job: ${escapeHtml(jobId)}</span>
                 <span class="job-live-indicator" data-job-live-state data-state="connecting" role="status" aria-live="polite" aria-label="Conectando…" title="Conectando…"></span>
               </div>
+              <div class="job-detail-summary" data-job-detail-summary></div>
             </div>
             <button type="button" class="btn ghost xs" id="logAccordionClose" aria-label="Cerrar logs de ${escapeHtml(targetLabel)}">Cerrar</button>
           </div>
@@ -5345,14 +5382,13 @@ docker compose up -d
 
     function renderJobLogsInto(job, container) {
       if (!container) return;
+      renderJobDetailSummary(job, container.closest(".log-panel"));
       const lines = job.log_lines || [];
-      const progressMarkup = renderJobProgress(job);
-      const storageMarkup = renderJobStorageContext(job);
       if (lines.length === 0) {
-        container.innerHTML = `${progressMarkup}${storageMarkup}<div class="log-line info">Sin logs disponibles</div>`;
+        container.innerHTML = `<div class="log-line info">Sin logs disponibles</div>`;
         return;
       }
-      container.innerHTML = `${progressMarkup}${storageMarkup}${lines.map(l => {
+      container.innerHTML = `${lines.map(l => {
         const escaped = escapeHtml(l);
         if (/ERROR|FAILED|CRITICAL/i.test(l)) return `<div class="log-line error">${escaped}</div>`;
         if (/WARN/i.test(l)) return `<div class="log-line warn">${escaped}</div>`;
@@ -6026,27 +6062,133 @@ docker compose up -d
       }, "Eliminando...").catch(() => {});
     }
 
+    function retentionRuleValue(policy, key) {
+      const value = Number(policy && policy[key]);
+      return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    }
+
+    function retentionPolicySummary(policy) {
+      const clauses = [];
+      const keepLast = retentionRuleValue(policy, "keep_last");
+      const keepDaily = retentionRuleValue(policy, "keep_daily");
+      const keepWeekly = retentionRuleValue(policy, "keep_weekly");
+      const keepMonthly = retentionRuleValue(policy, "keep_monthly");
+      if (keepLast) clauses.push(`Conservará los últimos ${keepLast} snapshots disponibles`);
+      if (keepDaily) clauses.push(`cubrirá hasta ${keepDaily} días con snapshots disponibles`);
+      if (keepWeekly) clauses.push(`cubrirá hasta ${keepWeekly} semanas con snapshots disponibles`);
+      if (keepMonthly) clauses.push(`cubrirá hasta ${keepMonthly} meses con snapshots disponibles`);
+      return clauses.length
+        ? `${clauses.join("; ")}.`
+        : "No se ha configurado ninguna regla de conservación.";
+    }
+
+    function retentionPolicyPruneSummary(policy) {
+      return policy && policy.prune === false
+        ? "Prune está desactivado para esta política."
+        : "Con prune activo, la ejecución libera datos sin referencias.";
+    }
+
+    function retentionPolicyFromForm() {
+      const count = id => {
+        const value = Number.parseInt(document.getElementById(id)?.value, 10);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+      };
+      return {
+        keep_last: count("rpKeepLast"),
+        keep_daily: count("rpKeepDaily"),
+        keep_weekly: count("rpKeepWeekly"),
+        keep_monthly: count("rpKeepMonthly"),
+        prune: true,
+      };
+    }
+
+    function renderRetentionGuideSummary(policy, selected = false) {
+      const summary = document.getElementById("retentionPolicySummary");
+      if (!summary) return;
+      const title = selected
+        ? `Resumen de la política: ${policy.name || "sin nombre"}`
+        : "Resumen de la nueva política";
+      summary.innerHTML = `<strong>${escapeHtml(title)}</strong><p>${escapeHtml(retentionPolicySummary(policy))}</p><p class="helper">${escapeHtml(retentionPolicyPruneSummary(policy))}</p>`;
+    }
+
     function renderRetention(content) {
+      const policyRows = state.retentionPolicies.length
+        ? state.retentionPolicies.map(policy => `<tr class="retention-policy-row" data-retention-policy-id="${escapeHtml(policy.id)}" tabindex="0" aria-selected="false">
+            <td><button type="button" class="retention-policy-select" data-retention-policy-select="${escapeHtml(policy.id)}">${escapeHtml(policy.name)}</button></td>
+            <td class="mono">${escapeHtml(String(policy.keep_last ?? "—"))}</td>
+            <td class="mono">${escapeHtml(String(policy.keep_daily ?? "—"))}</td>
+            <td class="mono">${escapeHtml(String(policy.keep_weekly ?? "—"))}</td>
+            <td class="mono">${escapeHtml(String(policy.keep_monthly ?? "—"))}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" class="empty-state">Sin políticas de retención</td></tr>`;
       content.innerHTML = `
-        <div class="page-header"><div><h2>Retention Policies</h2><div class="subtitle">Politicas de retencion de backups</div></div></div>
-        <details class="form-section"><summary>Crear politica de retencion</summary><div class="form-body">
-          <form id="createRetentionForm">
-            <div class="form-grid">
-              <div class="field"><label for="rpName">Nombre</label><input id="rpName" required /></div>
-              <div class="field"><label for="rpKeepLast">Keep last</label><input id="rpKeepLast" type="number" value="7" /></div>
-              <div class="field"><label for="rpKeepDaily">Keep daily</label><input id="rpKeepDaily" type="number" value="7" /></div>
-              <div class="field"><label for="rpKeepWeekly">Keep weekly</label><input id="rpKeepWeekly" type="number" value="4" /></div>
-              <div class="field"><label for="rpKeepMonthly">Keep monthly</label><input id="rpKeepMonthly" type="number" value="6" /></div>
-            </div>
-            <div class="btn-row"><button type="submit" class="btn primary sm">Crear politica</button></div>
-          </form>
-        </div></details>
-        <div class="page-header"><div><h2>Politicas configuradas</h2></div></div>
-        <div class="table-wrap"><div class="sheet"><table class="table">
-          <thead><tr><th>Nombre</th><th>Keep last</th><th>Keep daily</th><th>Keep weekly</th><th>Keep monthly</th></tr></thead>
-          <tbody>${state.retentionPolicies.length ? state.retentionPolicies.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="mono">${escapeHtml(String(r.keep_last ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_daily ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_weekly ?? "—"))}</td><td class="mono">${escapeHtml(String(r.keep_monthly ?? "—"))}</td></tr>`).join("") : `<tr><td colspan="5" class="empty-state">Sin politicas de retencion</td></tr>`}</tbody>
-        </table></div></div>
+        <div class="page-header"><div><h2>Retention Policies</h2><div class="subtitle">Políticas de retención de backups</div></div></div>
+        <div class="retention-layout">
+          <div class="retention-main">
+            <details class="form-section"><summary>Crear política de retención</summary><div class="form-body">
+              <form id="createRetentionForm">
+                <div class="form-grid">
+                  <div class="field"><label for="rpName">Nombre</label><input id="rpName" required /></div>
+                  <div class="field"><label for="rpKeepLast">Keep last</label><input id="rpKeepLast" type="number" min="0" value="7" /></div>
+                  <div class="field"><label for="rpKeepDaily">Keep daily</label><input id="rpKeepDaily" type="number" min="0" value="7" /></div>
+                  <div class="field"><label for="rpKeepWeekly">Keep weekly</label><input id="rpKeepWeekly" type="number" min="0" value="4" /></div>
+                  <div class="field"><label for="rpKeepMonthly">Keep monthly</label><input id="rpKeepMonthly" type="number" min="0" value="6" /></div>
+                </div>
+                <div class="btn-row"><button type="submit" class="btn primary sm">Crear política</button></div>
+              </form>
+            </div></details>
+            <div class="page-header"><div><h2>Políticas configuradas</h2><div class="subtitle">Selecciona una fila para ver su resumen</div></div></div>
+            <div class="table-wrap"><div class="sheet"><table class="table retention-policy-table" aria-label="Políticas de retención configuradas">
+              <thead><tr><th>Nombre</th><th>Keep last</th><th>Keep daily</th><th>Keep weekly</th><th>Keep monthly</th></tr></thead>
+              <tbody>${policyRows}</tbody>
+            </table></div></div>
+          </div>
+          <aside class="retention-guide" aria-labelledby="retentionGuideTitle">
+            <section class="retention-guide-section">
+              <h3 id="retentionGuideTitle">Cómo funciona la retención</h3>
+              <p><strong>Keep last</strong> conserva las últimas snapshots que ya existen, sin importar su fecha.</p>
+              <p><strong>Keep daily</strong> conserva hasta una snapshot disponible por cada día dentro del límite indicado.</p>
+              <p><strong>Keep weekly</strong> y <strong>Keep monthly</strong> aplican el mismo criterio por semana y por mes.</p>
+              <p>Las reglas se combinan como una <strong>unión</strong>: se conserva una snapshot si cumple al menos una regla.</p>
+              <p>Estas reglas retienen snapshots existentes; no crean backups ni prometen snapshots para días o semanas sin backups.</p>
+              <p>Cuando la retención se ejecuta, <strong>prune</strong> libera datos sin referencias que ya no necesita ninguna snapshot retenida.</p>
+            </section>
+            <section class="retention-guide-summary" aria-live="polite">
+              <h3>Resumen seleccionado</h3>
+              <div id="retentionPolicySummary"></div>
+            </section>
+          </aside>
+        </div>
       `;
+      const draftInputs = ["rpKeepLast", "rpKeepDaily", "rpKeepWeekly", "rpKeepMonthly"];
+      const showDraftSummary = () => {
+        document.querySelectorAll(".retention-policy-row.is-selected").forEach(row => {
+          row.classList.remove("is-selected");
+          row.setAttribute("aria-selected", "false");
+        });
+        renderRetentionGuideSummary(retentionPolicyFromForm());
+      };
+      draftInputs.forEach(id => document.getElementById(id)?.addEventListener("input", showDraftSummary));
+      renderRetentionGuideSummary(retentionPolicyFromForm());
+
+      const selectRetentionPolicy = policyId => {
+        const policy = state.retentionPolicies.find(item => String(item.id) === String(policyId));
+        if (!policy) return;
+        document.querySelectorAll(".retention-policy-row").forEach(row => {
+          const selected = String(row.dataset.retentionPolicyId) === String(policy.id);
+          row.classList.toggle("is-selected", selected);
+          row.setAttribute("aria-selected", String(selected));
+        });
+        renderRetentionGuideSummary(policy, true);
+      };
+      document.querySelectorAll(".retention-policy-row").forEach(row => {
+        row.addEventListener("click", () => selectRetentionPolicy(row.dataset.retentionPolicyId));
+        row.addEventListener("keydown", event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          selectRetentionPolicy(row.dataset.retentionPolicyId);
+        });
+      });
       const form = document.getElementById("createRetentionForm");
       if (form) {
         form.addEventListener("submit", async (e) => {
@@ -6054,10 +6196,10 @@ docker compose up -d
           await withBtnLoading(e.submitter, async () => {
             await apiPost("/api/v1/retention-policies", {
               name: document.getElementById("rpName").value.trim(),
-              keep_last: parseInt(document.getElementById("rpKeepLast").value) || 0,
-              keep_daily: parseInt(document.getElementById("rpKeepDaily").value) || 0,
-              keep_weekly: parseInt(document.getElementById("rpKeepWeekly").value) || 0,
-              keep_monthly: parseInt(document.getElementById("rpKeepMonthly").value) || 0,
+              keep_last: retentionPolicyFromForm().keep_last,
+              keep_daily: retentionPolicyFromForm().keep_daily,
+              keep_weekly: retentionPolicyFromForm().keep_weekly,
+              keep_monthly: retentionPolicyFromForm().keep_monthly,
             });
             await refreshAll();
           }, "Creando...").catch(() => {});

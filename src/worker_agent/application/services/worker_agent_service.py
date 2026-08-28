@@ -205,6 +205,10 @@ class WorkerAgentService:
         "Restic repository is not initialized or RESTIC_REPOSITORY points to the wrong path. "
         "Verify the target repository configuration before running restic init."
     )
+    RESTIC_AUTHENTICATION_ERROR_CODE = "authentication"
+    RESTIC_AUTHENTICATION_ERROR = (
+        "Restic repository could not be unlocked. Verify the configured Restic password or key."
+    )
     UNCONFIGURED_RESTIC_REPOSITORY_ERROR = (
         "Restic repository is not configured. Set RESTIC_REPOSITORY on the target, storage profile, or Settings before running this job."
     )
@@ -834,6 +838,10 @@ class WorkerAgentService:
             for marker in ("unable to open config file", "repository", "does not exist")
         )
 
+    @staticmethod
+    def _is_restic_authentication_error(text: str) -> bool:
+        return re.search(r"\bwrong\s+\S+\s+or\s+no\s+key\s+found\b", text.casefold()) is not None
+
     def _classify_snapshot_runtime_error(
         self,
         command: str,
@@ -849,6 +857,8 @@ class WorkerAgentService:
         safe_text = "\n".join(safe_sources)[: self.MAX_LOG_CHARS]
         if self._is_missing_restic_repository_error(safe_text):
             return self.MISSING_RESTIC_REPOSITORY_ERROR
+        if self._is_restic_authentication_error(safe_text):
+            return self.RESTIC_AUTHENTICATION_ERROR
 
         for source in safe_sources:
             lines = [line.strip() for line in source.splitlines() if line.strip()]
@@ -873,6 +883,8 @@ class WorkerAgentService:
     @staticmethod
     def _snapshot_listing_error_code(status_code: Any, error: Any) -> str:
         text = str(error or "").casefold()
+        if "could not be unlocked" in text or "repository authentication" in text:
+            return WorkerAgentService.RESTIC_AUTHENTICATION_ERROR_CODE
         if "malformed" in text or "incomplete" in text or "tree json" in text:
             return "malformed_tree"
         if "entry limit" in text:
@@ -953,8 +965,9 @@ class WorkerAgentService:
             elif status != JobStatus.SUCCEEDED:
                 classified_error = self._classify_snapshot_runtime_error("snapshot.about", payload, summary)
                 error = (
-                    self.MISSING_RESTIC_REPOSITORY_ERROR
-                    if classified_error == self.MISSING_RESTIC_REPOSITORY_ERROR
+                    classified_error
+                    if classified_error
+                    in (self.MISSING_RESTIC_REPOSITORY_ERROR, self.RESTIC_AUTHENTICATION_ERROR)
                     else f"snapshot.about runtime exited with status code {summary.get('status_code', 'unavailable')}."
                 )
             stats: Dict[str, int] = {}
@@ -973,7 +986,7 @@ class WorkerAgentService:
             }
             if error:
                 value["error"] = error
-            if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+            if error in (self.MISSING_RESTIC_REPOSITORY_ERROR, self.RESTIC_AUTHENTICATION_ERROR):
                 direct_log_lines[:] = [error]
             else:
                 if error and not direct_log_lines:
@@ -1070,7 +1083,10 @@ class WorkerAgentService:
                 }
                 if error:
                     value["error"] = error
-                if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+                    value["listing_error_code"] = self._snapshot_listing_error_code(
+                        summary.get("status_code"), error
+                    )
+                if error in (self.MISSING_RESTIC_REPOSITORY_ERROR, self.RESTIC_AUTHENTICATION_ERROR):
                     direct_log_lines[:] = ([context_line] if context_line else []) + [error]
                 else:
                     direct_log_lines.extend(
@@ -1144,7 +1160,7 @@ class WorkerAgentService:
                 value["listing_error_code"] = listing_fields["listing_error_code"]
             if error:
                 value["error"] = error
-            if error == self.MISSING_RESTIC_REPOSITORY_ERROR:
+            if error in (self.MISSING_RESTIC_REPOSITORY_ERROR, self.RESTIC_AUTHENTICATION_ERROR):
                 direct_log_lines[:] = ([context_line] if context_line else []) + [error]
             else:
                 direct_log_lines.extend(
@@ -1184,6 +1200,8 @@ class WorkerAgentService:
             result_summary["progress"] = dict(progress_reporter.latest_progress)
         if command == "snapshots.list":
             result_summary["snapshots"] = value.get("snapshots", [])
+            if "listing_error_code" in value:
+                result_summary["listing_error_code"] = value["listing_error_code"]
         else:
             result_summary["entries"] = value.get("entries", [])
             if command == "snapshot.ls":

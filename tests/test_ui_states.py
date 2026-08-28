@@ -365,6 +365,8 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         view_source = view.group(0)
         for marker in ("preservedTargetDropdown", "captureTargetDropdownState()", "restoreTargetDropdownState(preservedTargetDropdown)"):
             self.assertIn(marker, view_source)
+        self.assertIn("if (state.currentView !== view && currentLogJobId) closeLogPanel();", view_source)
+        self.assertNotIn("reopenLogPanel(currentLogJobId", view_source)
 
         polling = re.search(r"function startTargetsPolling\(\) \{.*?\n    \}\n\n    function stopTargetsPolling", self.source, re.S)
         self.assertIsNotNone(polling)
@@ -456,6 +458,20 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             "El modo seleccionado aplica solo a esta ejecucion",
         ):
             self.assertIn(marker, self.source)
+
+    def test_inactive_targets_keep_manual_backup_and_snapshot_restore_actions(self):
+        for marker in (
+            "function targetExecutionBlocked(target)",
+            'target.blocked_reason !== "target_disabled"',
+            "const schedulingDisabled = Boolean(t.scheduling_disabled ?? !t.enabled);",
+            "const runDisabled = !canRunTargets || executionBlocked;",
+            "Target inactivo: el cron está deshabilitado",
+            "acciones manuales disponibles",
+            'data-action="snapshots"',
+            "if (targetExecutionBlocked(target) || ![\"admin\", \"operator\"].includes(state.currentRole)) return;",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertNotIn("const runDisabled = !canRunTargets || executionBlocked || !t.enabled;", self.source)
 
     def test_snapshot_explorer_is_race_safe_and_cancellable(self):
         for marker in (
@@ -633,6 +649,35 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.source)
 
+    def test_snapshot_authentication_failure_explains_secret_action_without_init_guidance(self):
+        for marker in (
+            "SNAPSHOT_AUTHENTICATION_ERROR_MESSAGE",
+            "No se pudo desbloquear el repositorio Restic.",
+            "contraseña o clave de Restic",
+            "diferente de la usada para crear el repositorio",
+            "secreto de Restic configurado para el target en Settings",
+            "No ejecutes restic init a menos que confirmes que el repositorio no existe.",
+            'code === "authentication"',
+            "wrong\\s+\\S+\\s+or\\s+no\\s+key\\s+found",
+            "failure.listing_error_code = normalizedSyncResult.listing_error_code;",
+            "classifySnapshotListingFailure(error)",
+            "retry: true",
+        ):
+            self.assertIn(marker, self.source)
+
+        classifier = re.search(r"function classifySnapshotListingFailure\(result\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(classifier)
+        classifier_source = classifier.group(0)
+        self.assertIn('code === "authentication"', classifier_source)
+        self.assertIn("SNAPSHOT_AUTHENTICATION_ERROR_MESSAGE", classifier_source)
+
+        refresh = re.search(r"async function refreshSnapshotCatalog\(\) \{.*?\n    \}\n\n    function showSnapshotOperationError", self.source, re.S)
+        self.assertIsNotNone(refresh)
+        refresh_source = refresh.group(0)
+        self.assertIn("normalizeSnapshotContract(syncResult)", refresh_source)
+        self.assertIn("listingFailure ?", refresh_source)
+        self.assertIn("renderSnapshotState(state.catalogStatus, state.catalogError, { retry: true })", refresh_source)
+
     def test_cold_browse_results_do_not_start_prefetch_jobs(self):
         browse = re.search(r"async function browseSnapshot\(.*?\n    \}\n\n    async function searchSnapshot", self.source, re.S)
         self.assertIsNotNone(browse)
@@ -738,6 +783,82 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
             self.assertIn(marker, self.source)
         self.assertIn(".job-progress-fill.indeterminate", self.css)
         self.assertIn("prefers-reduced-motion", self.css)
+
+    def test_job_detail_keeps_summary_in_header_outside_scrolling_log_list(self):
+        for marker in (
+            'class="job-detail-summary" data-job-detail-summary',
+            "function renderJobDetailSummary(job, root)",
+            "renderJobDetailSummary(job, root);",
+            'renderJobDetailSummary(job, container.closest(".log-panel"));',
+        ):
+            self.assertIn(marker, self.source)
+        for marker in (
+            ".job-detail-summary",
+            ".job-detail-summary > .job-progress",
+            ".job-detail-summary > .job-storage-context",
+            "align-items: stretch",
+            "width: 100%",
+            ".log-panel .log-container",
+        ):
+            self.assertIn(marker, self.css)
+
+        target_renderer = re.search(
+            r"function renderTargetJobLogsInto\(job, root\) \{.*?\n    \}",
+            self.source,
+            re.S,
+        )
+        accordion_renderer = re.search(
+            r"function renderJobLogsInto\(job, container\) \{.*?\n    \}",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(target_renderer)
+        self.assertIsNotNone(accordion_renderer)
+        for renderer in (target_renderer.group(0), accordion_renderer.group(0)):
+            self.assertIn("renderJobDetailSummary", renderer)
+            self.assertNotIn("renderJobProgress(job)", renderer)
+            self.assertNotIn("renderJobStorageContext(job)", renderer)
+
+        for markup in (
+            re.search(r"function targetLogPanelMarkup\(jobId, targetId\) \{.*?\n    \}", self.source, re.S),
+            re.search(r"contentDiv\.innerHTML = `.*?data-job-detail-summary.*?`;", self.source, re.S),
+        ):
+            self.assertIsNotNone(markup)
+            self.assertIn("data-job-detail-summary", markup.group(0))
+
+    def test_retention_guide_explains_union_prune_and_updates_draft_or_selected_policy_summary(self):
+        retention = re.search(r"function renderRetention\(content\) \{.*?\n    \}\n\n    function renderSecrets", self.source, re.S)
+        self.assertIsNotNone(retention)
+        retention_source = retention.group(0)
+        for marker in (
+            "retention-layout",
+            "retention-guide",
+            "Las reglas se combinan como una <strong>unión</strong>",
+            "no crean backups ni prometen snapshots",
+            "<strong>prune</strong> libera datos sin referencias",
+            "data-retention-policy-id",
+            "is-selected",
+            'addEventListener("input", showDraftSummary)',
+            "selectRetentionPolicy",
+        ):
+            self.assertIn(marker, retention_source)
+        for marker in (
+            "function retentionPolicySummary(policy)",
+            "Conservará los últimos",
+            "cubrirá hasta",
+            "snapshots disponibles",
+            "retentionPolicyFromForm",
+            "renderRetentionGuideSummary",
+        ):
+            self.assertIn(marker, self.source)
+        for marker in (
+            ".retention-layout",
+            "grid-template-columns: minmax(0, 1fr) minmax(260px, 340px)",
+            ".retention-guide { position: static; }",
+            "@media (max-width: 960px)",
+            ".retention-policy-row.is-selected",
+        ):
+            self.assertIn(marker, self.css)
 
     def test_log_polling_surfaces_bounded_fetch_failures_in_both_panels(self):
         for marker in (

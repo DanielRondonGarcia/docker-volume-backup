@@ -70,12 +70,23 @@ class ControlPlaneService:
     MAX_SEARCH_QUERY_LENGTH = 256
     MAX_SNAPSHOT_LISTING_DIAGNOSTIC_COUNT = MAX_SNAPSHOT_ENTRIES + 1
     MAX_SNAPSHOT_LISTING_OUTPUT_BYTES = 16 * 1024 * 1024
+    DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS = 6 * 60 * 60
+    MAX_RUNTIME_TIMEOUT_SECONDS = 24 * 60 * 60
     LIVE_REVISION_SCHEMA_VERSION = 1
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     SNAPSHOT_LISTING_MODES = frozenset({"tree", "ls", "direct"})
     SNAPSHOT_LISTING_ERROR_CODES = frozenset(
-        {"output_limit", "entry_limit", "timeout", "malformed_tree", "path_failure", "runtime_failure", "repository"}
+        {
+            "output_limit",
+            "entry_limit",
+            "timeout",
+            "malformed_tree",
+            "path_failure",
+            "runtime_failure",
+            "repository",
+            "authentication",
+        }
     )
     SNAPSHOT_ABOUT_STAT_FIELDS = frozenset({"total_size", "total_file_count", "snapshots_count"})
     MAX_SNAPSHOT_ABOUT_STAT = (1 << 63) - 1
@@ -93,6 +104,7 @@ class ControlPlaneService:
         {"backup.run", "retention.run", "forget", "prune", "restore.run", "restore.write", "write"}
     )
     CATALOG_MUTATING_COMMANDS = frozenset({"backup.run", "retention.run", "forget", "prune"})
+    SCHEDULED_BACKUP_TRIGGERS = frozenset({"schedule", "scheduled"})
     PROGRESS_FIELDS = frozenset(
         {
             "percent_done",
@@ -234,6 +246,18 @@ class ControlPlaneService:
         if mode not in ("hot", "cold"):
             raise ValueError("backup_mode must be exactly 'hot' or 'cold'")
         return mode
+
+    @classmethod
+    def _validate_restore_timeout(cls, value: Any) -> float:
+        if isinstance(value, bool):
+            raise ValueError("restore timeout_seconds must be a finite positive number")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("restore timeout_seconds must be a finite positive number") from None
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > cls.MAX_RUNTIME_TIMEOUT_SECONDS:
+            raise ValueError("restore timeout_seconds is outside the permitted bounds")
+        return timeout
 
     def revoke_worker(self, worker_id: str, version: Optional[str] = None) -> Dict[str, Any]:
         worker = self._require_worker(worker_id)
@@ -530,7 +554,11 @@ class ControlPlaneService:
             target = self._require_target(target_id)
             if target.worker_id != worker_id:
                 raise ValueError(f"target '{target_id}' is assigned to worker '{target.worker_id}'")
-            if command == "backup.run" and not target.enabled:
+            if (
+                command == "backup.run"
+                and not target.enabled
+                and str(trigger or "").strip().lower() in self.SCHEDULED_BACKUP_TRIGGERS
+            ):
                 raise ValueError(f"target '{target_id}' is disabled and cannot be dispatched")
         job = JobRecord(
             worker_id=worker_id,
@@ -550,7 +578,10 @@ class ControlPlaneService:
         backup_mode: Optional[str] = None,
     ) -> JobRecord:
         target = self._require_target(target_id)
-        if not target.enabled:
+        if (
+            not target.enabled
+            and str(trigger or "").strip().lower() in self.SCHEDULED_BACKUP_TRIGGERS
+        ):
             raise ValueError(f"target '{target_id}' is disabled and cannot be dispatched")
         payload = self._build_backup_payload(target, backup_mode=backup_mode)
         return self.dispatch_job(
@@ -877,11 +908,16 @@ class ControlPlaneService:
             return None
         return {"remote_name": remote_name, "rclone_content": rclone_content}
 
-    def _profile_rclone_remote(self, profile: StorageProfileRecord) -> Optional[Dict[str, str]]:
+    def _profile_rclone_remote(
+        self,
+        profile: StorageProfileRecord,
+        resolved_files: Optional[List[Dict[str, str]]] = None,
+    ) -> Optional[Dict[str, str]]:
         """Resolve a profile's rclone file secret into remote + content."""
         if (profile.backend_type or "").strip().lower() != "rclone":
             return None
-        resolved_files = self._resolve_file_secret_refs(profile.file_secret_refs or {})
+        if resolved_files is None:
+            resolved_files = self._resolve_file_secret_refs(profile.file_secret_refs or {})
         rclone_file = next(
             (
                 file_spec
@@ -893,7 +929,7 @@ class ControlPlaneService:
         )
         if not rclone_file:
             return None
-        remote_name = self._extract_rclone_remote_name(rclone_file["secret_id"])
+        remote_name = self._extract_rclone_remote_name_from_content(rclone_file.get("content"))
         if not remote_name:
             return None
         return {"remote_name": remote_name, "rclone_content": rclone_file["content"]}
@@ -1158,6 +1194,7 @@ class ControlPlaneService:
         target: BackupTargetRecord,
         settings: Optional[SettingsRecord],
         path_storage: Any = _TARGET_FIELD_UNSET,
+        rclone_remote_name: Optional[str] = None,
     ) -> Optional[str]:
         if target.backup_strategy != "restic" or not settings or not settings.restic_repository_base:
             return None
@@ -1168,8 +1205,17 @@ class ControlPlaneService:
         safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", target.name or target.id)
         safe_name = safe_name or "root"
         suffix = path_storage or safe_name
-        if re.match(r"^[a-z]+:", base, re.IGNORECASE):
+        rclone_base_match = re.fullmatch(
+            r"(?i)rclone:[A-Za-z0-9][A-Za-z0-9._-]*:(.*)",
+            base,
+        )
+        if rclone_remote_name and rclone_base_match:
+            repository_path = self._join_repository_path(rclone_base_match.group(1), suffix)
+            return f"rclone:{rclone_remote_name}:{repository_path}"
+        if re.match(r"^[a-z][a-z0-9+.-]*:", base, re.IGNORECASE):
             return f"{base}/{suffix}"
+        if rclone_remote_name:
+            return f"rclone:{rclone_remote_name}:{base}/{suffix}"
         if settings.rclone_conf_secret_id:
             remote_name = self._extract_rclone_remote_name(settings.rclone_conf_secret_id)
             if remote_name:
@@ -1182,6 +1228,7 @@ class ControlPlaneService:
         environment: Optional[Dict[str, str]] = None,
         settings: Optional[SettingsRecord] = None,
         compose_path: bool = True,
+        resolved_files: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[Optional[str], str]:
         """Return the exact repository and its precedence source for one target."""
         environment = environment if isinstance(environment, dict) else {}
@@ -1211,8 +1258,20 @@ class ControlPlaneService:
                 repository = self._append_repository_path(repository, path_storage)
             return repository, "profile" if repository else "unconfigured"
 
-        repository = self._settings_repository_for_target(target, settings, path_storage=path_storage)
-        return repository, "settings" if repository else "unconfigured"
+        profile_rclone = self._profile_rclone_remote(profile, resolved_files) if profile else None
+        profile_rclone_remote_name = profile_rclone["remote_name"] if profile_rclone else None
+        repository = self._settings_repository_for_target(
+            target,
+            settings,
+            path_storage=path_storage,
+            rclone_remote_name=profile_rclone_remote_name,
+        )
+        repository_source = (
+            "profile"
+            if profile_rclone_remote_name and repository and self._repository_kind(repository) == "rclone"
+            else "settings"
+        )
+        return repository, repository_source if repository else "unconfigured"
 
     def _storage_context(
         self,
@@ -1224,7 +1283,11 @@ class ControlPlaneService:
         profile = self.storage_profile_repository.get(target.storage_profile_id) if target.storage_profile_id else None
         settings = self.get_settings()
         repository, repository_source = self._resolve_effective_repository(
-            target, environment, settings, compose_path=False
+            target,
+            environment,
+            settings,
+            compose_path=False,
+            resolved_files=resolved_files,
         )
 
         repository_kind = self._repository_kind(repository) if repository else "unknown"
@@ -1636,6 +1699,12 @@ class ControlPlaneService:
         final_chown = chown or defaults.get("chown") or defaults.get("RESTORE_CHOWN")
         if final_chown:
             environment["RESTORE_CHOWN"] = final_chown
+        configured_timeout = defaults.get("timeout_seconds")
+        timeout_seconds = (
+            self.DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS
+            if configured_timeout is None
+            else self._validate_restore_timeout(configured_timeout)
+        )
 
         return {
             "target_id": target.id,
@@ -1648,6 +1717,7 @@ class ControlPlaneService:
             "resolved_files": resolved_files,
             "labels": target.labels,
             "storage_context": storage_context,
+            "timeout_seconds": timeout_seconds,
         }
 
     def _resolve_runtime_dependencies(self, target: BackupTargetRecord):
@@ -1676,7 +1746,12 @@ class ControlPlaneService:
 
         if target.backup_strategy == "restic":
             settings = self.get_settings()
-            repository, _ = self._resolve_effective_repository(target, environment, settings)
+            repository, _ = self._resolve_effective_repository(
+                target,
+                environment,
+                settings,
+                resolved_files=resolved_files,
+            )
             if repository:
                 environment["RESTIC_REPOSITORY"] = repository
             if "RESTIC_PASSWORD" not in environment:
@@ -2717,11 +2792,14 @@ class ControlPlaneService:
         return contract
 
     def _repository_fingerprint(self, target: BackupTargetRecord) -> str:
-        environment, _, _ = self._resolve_runtime_dependencies(target)
+        environment, _, resolved_files = self._resolve_runtime_dependencies(target)
         repository = environment.get("RESTIC_REPOSITORY")
         if not repository:
             repository, _ = self._resolve_effective_repository(
-                target, environment, compose_path=False
+                target,
+                environment,
+                compose_path=False,
+                resolved_files=resolved_files,
             )
         if not repository and target.backup_strategy == "restic":
             path_storage = self._normalize_path_storage(getattr(target, "path_storage", None))
@@ -3025,13 +3103,17 @@ class ControlPlaneService:
         if not re.search(r"(?m)^\s*type\s*=\s*\S+\s*$", content or ""):
             raise ValueError("rclone profile secret must include a type = ... entry")
 
+    @staticmethod
+    def _extract_rclone_remote_name_from_content(content: Any) -> Optional[str]:
+        section_headers = re.findall(r"(?m)^\s*\[([^\]\r\n]+)\]\s*$", content or "")
+        return section_headers[0] if section_headers else None
+
     def _extract_rclone_remote_name(self, secret_id: str) -> Optional[str]:
         secret = self.secret_repository.get(secret_id)
         if not secret:
             return None
         content = self.secret_codec.decrypt(secret.ciphertext)
-        section_headers = re.findall(r"(?m)^\s*\[([^\]\r\n]+)\]\s*$", content or "")
-        return section_headers[0] if section_headers else None
+        return self._extract_rclone_remote_name_from_content(content)
 
     def _sync_snapshots_from_result(self, target_id: str, worker_id: str, result_summary: Dict[str, Any]) -> None:
         raw_snapshots = result_summary.get("snapshots") or []
