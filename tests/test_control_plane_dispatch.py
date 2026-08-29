@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import threading
 import time
 import unittest
@@ -1260,6 +1261,53 @@ class ControlPlaneRouteTests(unittest.TestCase):
         handler._require_auth = Mock(return_value={"role": ROLE_VIEWER})
         handler._write_json = Mock(return_value=None)
         return handler
+
+    @staticmethod
+    def make_html_handler(path):
+        handler = object.__new__(ControlPlaneRequestHandler)
+        handler.path = path
+        handler.headers = {}
+        handler._require_auth = Mock(return_value={"role": ROLE_VIEWER})
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = io.BytesIO()
+        return handler
+
+    def test_html_routes_version_static_assets_with_app_version(self):
+        expected_common_assets = (
+            "/styles/tokens.css",
+            "/styles/components.css",
+            "/favicon.ico",
+        )
+        for path in ("/login", "/", "/change-password"):
+            with self.subTest(path=path), patch.dict(os.environ, {"APP_VERSION": "3.5.3"}, clear=False):
+                handler = self.make_html_handler(path)
+                if path == "/change-password":
+                    handler._current_session = Mock(return_value={"must_change_password": True})
+
+                handler._handle_get_request(head_only=False)
+
+                self.assertEqual(handler.send_response.call_args.args, (200,))
+                body = handler.wfile.getvalue().decode("utf-8")
+                expected_assets = expected_common_assets + (("/styles/app.css",) if path == "/" else ())
+                for asset_path in expected_assets:
+                    self.assertIn(f'{asset_path}?v=3.5.3"', body)
+                    self.assertNotIn(f'{asset_path}"', body)
+
+    def test_html_routes_fallback_to_dev_for_missing_or_unsafe_app_version(self):
+        for app_version in (None, "", "3.5.3&unsafe"):
+            with self.subTest(app_version=app_version):
+                environment = {} if app_version is None else {"APP_VERSION": app_version}
+                with patch.dict(os.environ, environment, clear=True):
+                    handler = self.make_html_handler("/login")
+
+                    handler._handle_get_request(head_only=False)
+
+                    body = handler.wfile.getvalue().decode("utf-8")
+                    self.assertIn('/styles/tokens.css?v=dev"', body)
+                    self.assertIn('/styles/components.css?v=dev"', body)
+                    self.assertIn('/favicon.ico?v=dev"', body)
 
     def test_browse_route_requires_viewer_role(self):
         handler = self.make_handler(

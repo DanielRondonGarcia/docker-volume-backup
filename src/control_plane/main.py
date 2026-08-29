@@ -69,6 +69,12 @@ from src.control_plane.infrastructure.security.worker_auth import WorkerAuthStat
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 UI_ROOT = Path(__file__).resolve().parent / "ui"
+UI_VERSIONED_ASSETS = (
+    "/styles/tokens.css",
+    "/styles/components.css",
+    "/styles/app.css",
+    "/favicon.ico",
+)
 JOB_EVENT_HEARTBEAT_SECONDS = 15
 LIVE_MOUNT_SOURCES_LIMIT = 64
 LIVE_MOUNT_FOLDER_LENGTH = 64
@@ -90,6 +96,13 @@ LIVE_WORKER_FAILURE_MESSAGES = {
     "invalid_source": "live source is invalid",
     "invalid_request": "live request is invalid",
 }
+
+
+def _safe_app_version() -> str:
+    value = (os.environ.get("APP_VERSION") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+        return value
+    return "dev"
 
 
 def _safe_live_log_value(value, fallback="unknown"):
@@ -1656,6 +1669,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
         if not file_path.exists():
             return self._write_json(404, {"error": "file not found"}, head_only=head_only)
         body = file_path.read_bytes()
+        if content_type == "text/html; charset=utf-8" and file_path.parent == UI_ROOT:
+            version = _safe_app_version()
+            for asset_path in UI_VERSIONED_ASSETS:
+                body = body.replace(
+                    f'="{asset_path}"'.encode("ascii"),
+                    f'="{asset_path}?v={version}"'.encode("ascii"),
+                )
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
