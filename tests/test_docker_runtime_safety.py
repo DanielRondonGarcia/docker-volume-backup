@@ -293,6 +293,114 @@ class DockerRuntimeSafetyTests(unittest.TestCase):
             "container-1",
         )
 
+    def test_collect_inventory_keeps_shared_named_sources_separate_and_marks_generated_mounts(self):
+        named_data = "discourse_discourse_data"
+        named_sidekiq = "discourse_discourse_sidekiq_data"
+        generated = "a" * 64
+
+        def make_volume(name, labels):
+            volume = Mock()
+            volume.name = name
+            volume.attrs = {"Labels": labels}
+            return volume
+
+        def make_container(container_id, name, service, mounts):
+            container = Mock()
+            container.id = container_id
+            container.name = name
+            container.status = "running"
+            container.labels = {
+                "com.docker.compose.project": "discourse",
+                "com.docker.compose.service": service,
+            }
+            container.attrs = {"Mounts": mounts}
+            container.image = Mock(tags=["bitnami/discourse:latest"])
+            return container
+
+        web = make_container(
+            "container-web",
+            "discourse-web-1",
+            "web",
+            [
+                {
+                    "Type": "volume",
+                    "Name": named_data,
+                    "Source": f"/var/lib/docker/volumes/{named_data}/_data",
+                    "Destination": "/bitnami/discourse",
+                    "RW": True,
+                },
+                {
+                    "Type": "volume",
+                    "Name": generated,
+                    "Source": f"/var/lib/docker/volumes/{generated}/_data",
+                    "Destination": "/docker-entrypoint-initdb.d",
+                    "RW": False,
+                },
+                {
+                    "Type": "bind",
+                    "Source": "/srv/discourse/config",
+                    "Destination": "/bitnami/config",
+                    "RW": True,
+                },
+            ],
+        )
+        sidekiq = make_container(
+            "container-sidekiq",
+            "discourse-sidekiq-1",
+            "sidekiq",
+            [
+                {
+                    "Type": "volume",
+                    "Name": named_sidekiq,
+                    "Source": f"/var/lib/docker/volumes/{named_sidekiq}/_data",
+                    "Destination": "/bitnami/discourse",
+                    "RW": True,
+                },
+            ],
+        )
+
+        runtime = DockerRuntimeAdapter.__new__(DockerRuntimeAdapter)
+        runtime.client = Mock()
+        runtime.client.containers.list.return_value = [web, sidekiq]
+        runtime.client.volumes.list.return_value = [
+            make_volume(
+                named_data,
+                {
+                    "com.docker.compose.project": "discourse",
+                    "com.docker.compose.volume": "discourse_data",
+                },
+            ),
+            make_volume(
+                named_sidekiq,
+                {
+                    "com.docker.compose.project": "discourse",
+                    "com.docker.compose.volume": "discourse_sidekiq_data",
+                },
+            ),
+            make_volume(generated, {}),
+        ]
+        runtime.client.networks.list.return_value = []
+        runtime.client.info.return_value = {}
+
+        inventory = runtime.collect_inventory()
+
+        project = inventory["compose_project_details"][0]
+        candidates = {candidate["source"]: candidate for candidate in project["volume_candidates"]}
+        self.assertEqual(
+            candidates[named_data]["bind"],
+            "/bitnami/discourse",
+        )
+        self.assertEqual(candidates[named_data]["name"], "discourse_data")
+        self.assertEqual(candidates[named_data]["services"], ["web"])
+        self.assertEqual(candidates[named_data]["containers"], ["discourse-web-1"])
+        self.assertEqual(candidates[named_sidekiq]["name"], "discourse_sidekiq_data")
+        self.assertEqual(candidates[named_sidekiq]["services"], ["sidekiq"])
+        self.assertFalse(candidates[named_data]["anonymous"])
+        self.assertTrue(candidates[generated]["anonymous"])
+        self.assertEqual(candidates[generated]["bind"], "/docker-entrypoint-initdb.d")
+        self.assertFalse(candidates["/srv/discourse/config"]["anonymous"])
+        self.assertEqual(candidates["/srv/discourse/config"]["mount_type"], "bind")
+
     def test_collect_inventory_propagates_unrelated_image_errors(self):
         class BrokenImage:
             @property

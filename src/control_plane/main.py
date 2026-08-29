@@ -790,6 +790,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     labels=body.get("labels") or {},
                     cron_expression=body.get("cron_expression"),
                     live_access_enabled=body.get("live_access_enabled", False),
+                    volume_sources=body.get("volume_sources"),
                 )
                 return self._write_json(201, self._target_jsonable(target))
 

@@ -170,6 +170,26 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, edit_source)
 
+    def test_target_volume_selector_uses_source_candidates_and_sends_source_identity(self):
+        for marker in (
+            "Array.isArray(project.volume_candidates)",
+            "candidate.anonymous !== true",
+            "data-source=\"${escapeHtml(candidate.source || \"\")}\"",
+            "Servicio:",
+            "Contenedor:",
+            "volume_sources: hasExplicitVolumeSources ? selectedSources : null",
+            "function getSelectedVolumeSources()",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertNotIn("Object.keys(runtimeVols).find(k => runtimeVols[k].bind === v)", self.source)
+
+        volume_cell = re.search(r"function renderVolumeTargetsCell\(target\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(volume_cell)
+        volume_cell_source = volume_cell.group(0)
+        self.assertIn("Object.entries(runtimeVols)", volume_cell_source)
+        self.assertIn(".filter(([_, v]) => v && v.bind === p)", volume_cell_source)
+        self.assertIn(".map(([name]) => name)", volume_cell_source)
+
     def test_blocked_targets_are_opaque_and_cannot_run_or_enable_on_ineligible_workers(self):
         for marker in (
             "target-execution-blocked",

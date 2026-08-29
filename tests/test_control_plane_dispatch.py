@@ -596,6 +596,111 @@ class ControlPlaneDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not eligible"):
             service.register_target("new-target", "worker-b")
 
+    def test_explicit_volume_sources_select_one_shared_bind_and_path_only_keeps_legacy_sources(self):
+        service = self.make_service()
+        service.sync_inventory(
+            "worker-a",
+            {
+                "compose_project_details": [
+                    {
+                        "name": "discourse",
+                        "volume_targets": ["/bitnami/discourse"],
+                        "runtime_volumes": {
+                            "discourse_data": {"bind": "/bitnami/discourse", "mode": "rw"},
+                            "discourse_sidekiq_data": {"bind": "/bitnami/discourse", "mode": "rw"},
+                        },
+                        "volume_candidates": [
+                            {
+                                "source": "discourse_data",
+                                "name": "discourse_data",
+                                "bind": "/bitnami/discourse",
+                                "mode": "rw",
+                                "mount_type": "volume",
+                                "anonymous": False,
+                                "services": ["web"],
+                                "containers": ["discourse-web-1"],
+                            },
+                            {
+                                "source": "discourse_sidekiq_data",
+                                "name": "discourse_sidekiq_data",
+                                "bind": "/bitnami/discourse",
+                                "mode": "rw",
+                                "mount_type": "volume",
+                                "anonymous": False,
+                                "services": ["sidekiq"],
+                                "containers": ["discourse-sidekiq-1"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+
+        selected = service.register_target(
+            "discourse-data-only",
+            "worker-a",
+            compose_project="discourse",
+            volume_targets=["/some/stale/path"],
+            volume_sources=["discourse_data"],
+            runtime_volumes={"unexpected": {"bind": "/unexpected", "mode": "rw"}},
+        )
+        self.assertEqual(selected.volume_targets, ["/bitnami/discourse"])
+        self.assertEqual(
+            selected.runtime_volumes,
+            {"discourse_data": {"bind": "/bitnami/discourse", "mode": "rw"}},
+        )
+
+        explicitly_empty = service.register_target(
+            "discourse-no-sources",
+            "worker-a",
+            compose_project="discourse",
+            volume_sources=[],
+        )
+        self.assertEqual(explicitly_empty.volume_targets, [])
+        self.assertEqual(explicitly_empty.runtime_volumes, {})
+
+        legacy = service.register_target(
+            "discourse-path-only",
+            "worker-a",
+            compose_project="discourse",
+            volume_targets=["/bitnami/discourse"],
+        )
+        self.assertEqual(
+            set(legacy.runtime_volumes),
+            {"discourse_data", "discourse_sidekiq_data"},
+        )
+
+    def test_explicit_volume_sources_reject_unknown_or_stale_sources(self):
+        service = self.make_service()
+        service.sync_inventory(
+            "worker-a",
+            {
+                "compose_project_details": [
+                    {
+                        "name": "discourse",
+                        "volume_candidates": [
+                            {
+                                "source": "discourse_data",
+                                "bind": "/bitnami/discourse",
+                                "mode": "rw",
+                            },
+                        ],
+                        "runtime_volumes": {
+                            "discourse_data": {"bind": "/bitnami/discourse", "mode": "rw"},
+                        },
+                    },
+                ],
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            service.register_target(
+                "stale-source",
+                "worker-a",
+                compose_project="discourse",
+                volume_sources=["discourse_data", "removed_volume"],
+            )
+
     def test_disabled_targets_allow_manual_backups_but_reject_scheduled_dispatch(self):
         service = self.make_service()
         target = service.target_repository.get("target-a")
@@ -1353,7 +1458,7 @@ class ControlPlaneRouteTests(unittest.TestCase):
     def test_target_create_route_forwards_path_storage(self):
         handler = self.make_handler(
             "/api/v1/targets",
-            '{"name":"target-c","worker_id":"worker-a","path_storage":"tenant/custom"}',
+            '{"name":"target-c","worker_id":"worker-a","path_storage":"tenant/custom","volume_sources":["discourse_data"]}',
         )
         handler._require_auth.reset_mock()
         handler._require_auth.return_value = {"role": ROLE_ADMIN}
@@ -1365,6 +1470,7 @@ class ControlPlaneRouteTests(unittest.TestCase):
         handler.do_POST()
 
         self.assertEqual(service.register_target.call_args.kwargs["path_storage"], "tenant/custom")
+        self.assertEqual(service.register_target.call_args.kwargs["volume_sources"], ["discourse_data"])
         self.assertEqual(handler._write_json.call_args.args, (201, handler._target_jsonable.return_value))
 
     def test_target_create_route_returns_clear_path_storage_validation_error(self):

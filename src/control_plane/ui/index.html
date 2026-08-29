@@ -1360,7 +1360,7 @@ docker compose up -d
                </div>
              </details>
               <div class="btn-row"><button type="submit" class="btn primary sm" id="createTargetSubmitBtn" ${eligibleWorkers.length ? "" : "disabled"}>Crear target</button></div>
-              <div class="helper">${eligibleWorkers.length ? "Selecciona los volumenes que quieres backupear. Si no marcas ninguno, se backupearan todos los del proyecto." : "No hay workers elegibles online. Registra un worker y espera su heartbeat antes de crear un target."}</div>
+              <div class="helper">${eligibleWorkers.length ? "Todos los volumenes aparecen seleccionados por defecto. En clientes legacy que no envian volume_sources, una seleccion vacia incluye todos los del proyecto." : "No hay workers elegibles online. Registra un worker y espera su heartbeat antes de crear un target."}</div>
            </form>
          </div></details>` : "";
       content.innerHTML = `
@@ -1666,17 +1666,19 @@ docker compose up -d
       if (!paths.length) return '<span style="color:var(--muted-foreground);">— (todos)</span>';
       const runtimeVols = target.runtime_volumes || {};
       const items = paths.map(p => {
-        const entry = Object.entries(runtimeVols).find(([_, v]) => v && v.bind === p);
-        const volName = entry ? entry[0] : null;
-        return { path: p, name: volName };
+        const names = Object.entries(runtimeVols)
+          .filter(([_, v]) => v && v.bind === p)
+          .map(([name]) => name);
+        return { path: p, names };
       });
       const maxVisible = 2;
+      const renderItem = (item) => `<div class="vol-cell">${item.names.map(name => `<span class="vol-name-pill">${escapeHtml(name)}</span>`).join(" ")}<code class="mono">${escapeHtml(item.path)}</code></div>`;
       if (items.length <= maxVisible) {
-        return items.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("");
+        return items.map(renderItem).join("");
       }
       const visible = items.slice(0, maxVisible);
       const hidden = items.slice(maxVisible);
-      return `${visible.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("")}<details class="vol-more"><summary>+${hidden.length} mas</summary>${hidden.map(it => `<div class="vol-cell">${it.name ? `<span class="vol-name-pill">${escapeHtml(it.name)}</span> ` : ""}<code class="mono">${escapeHtml(it.path)}</code></div>`).join("")}</details>`;
+      return `${visible.map(renderItem).join("")}<details class="vol-more"><summary>+${hidden.length} mas</summary>${hidden.map(renderItem).join("")}</details>`;
     }
 
     function getLastJobForTarget(targetId) {
@@ -5042,31 +5044,83 @@ docker compose up -d
 
     let volumeSelectionState = { stacks: {}, expanded: {} };
 
+    function getProjectVolumeCandidates(project) {
+      if (!project) return [];
+      if (Array.isArray(project.volume_candidates)) {
+        return project.volume_candidates
+          .filter(candidate => candidate && candidate.anonymous !== true && candidate.bind && candidate.source)
+          .map(candidate => ({
+            source: candidate.source,
+            name: candidate.name || candidate.source,
+            bind: candidate.bind,
+            mode: candidate.mode || "ro",
+            mount_type: candidate.mount_type || candidate.type || "volume",
+            services: Array.isArray(candidate.services) ? candidate.services : [],
+            containers: Array.isArray(candidate.containers) ? candidate.containers : [],
+          }));
+      }
+      const runtimeVols = project.runtime_volumes || {};
+      const runtimeCandidates = Object.entries(runtimeVols)
+        .filter(([source, spec]) => source && spec && spec.bind)
+        .map(([source, spec]) => ({
+          source,
+          name: source,
+          bind: spec.bind,
+          mode: spec.mode || "ro",
+          mount_type: "volume",
+          services: [],
+          containers: [],
+        }));
+      if (runtimeCandidates.length) return runtimeCandidates;
+      return (project.volume_targets || []).map(bind => ({
+        source: "",
+        name: "",
+        bind,
+        mode: "ro",
+        mount_type: "volume",
+        services: [],
+        containers: [],
+      }));
+    }
+
+    function volumeCandidateKey(candidate) {
+      return candidate.source || candidate.bind;
+    }
+
     function renderVolumeCheckboxes(project) {
       const container = document.getElementById("targetVolumeList");
       if (!container) return;
       if (!project) {
+        container.dataset.volumeSourceSelection = "false";
         container.innerHTML = `<div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div>`;
         return;
       }
-      const volumes = project.volume_targets || [];
-      const runtimeVols = project.runtime_volumes || {};
-      if (!volumes.length) {
+      const candidates = getProjectVolumeCandidates(project);
+      const hasSourceSelection = Array.isArray(project.volume_candidates) || candidates.some(candidate => Boolean(candidate.source));
+      container.dataset.volumeSourceSelection = hasSourceSelection ? "true" : "false";
+      if (!candidates.length) {
         container.innerHTML = `<div class="helper">Este proyecto no tiene volumenes de datos detectados.</div>`;
         return;
       }
       const stackKey = project.name;
       if (!volumeSelectionState.stacks[stackKey]) {
         volumeSelectionState.stacks[stackKey] = {};
-        volumes.forEach(v => { volumeSelectionState.stacks[stackKey][v] = true; });
       }
+      const selection = volumeSelectionState.stacks[stackKey];
+      const candidateKeys = new Set(candidates.map(volumeCandidateKey));
+      candidates.forEach(candidate => {
+        const key = volumeCandidateKey(candidate);
+        if (!(key in selection)) selection[key] = true;
+      });
+      Object.keys(selection).forEach(key => {
+        if (!candidateKeys.has(key)) delete selection[key];
+      });
       if (volumeSelectionState.expanded[stackKey] === undefined) {
         volumeSelectionState.expanded[stackKey] = true;
       }
       const isExpanded = volumeSelectionState.expanded[stackKey];
-      const selectedCount = Object.values(volumeSelectionState.stacks[stackKey]).filter(Boolean).length;
-      const totalCount = volumes.length;
-      const allSelected = selectedCount === totalCount;
+      const selectedCount = candidates.filter(candidate => selection[volumeCandidateKey(candidate)]).length;
+      const totalCount = candidates.length;
       container.innerHTML = `
         <div class="volume-group" data-stack="${escapeHtml(stackKey)}">
           <div class="volume-group-header" data-stack-toggle="${escapeHtml(stackKey)}">
@@ -5075,19 +5129,32 @@ docker compose up -d
               <div class="stack-meta">${selectedCount}/${totalCount} volumenes seleccionados</div>
             </div>
             <div class="stack-toggle">${isExpanded ? "▾" : "▸"}</div>
-          </div>
-          <div class="volume-group-body${isExpanded ? "" : " collapsed"}">
-            ${volumes.map(v => {
-              const volName = Object.keys(runtimeVols).find(k => runtimeVols[k].bind === v) || "";
-              const isSelected = volumeSelectionState.stacks[stackKey][v];
-              return `<div class="volume-card ${isSelected ? "selected" : ""}" data-volume="${escapeHtml(v)}" data-stack="${escapeHtml(stackKey)}">
-                <div class="vol-icon">📦</div>
-                <div class="vol-info">
-                  <div class="vol-path">${escapeHtml(v)}</div>
-                  ${volName ? `<div class="vol-name">${escapeHtml(volName)}</div>` : ""}
-                </div>
-                <div class="vol-check"></div>
-              </div>`;
+           </div>
+           <div class="volume-group-body${isExpanded ? "" : " collapsed"}">
+             ${candidates.map(candidate => {
+               const key = volumeCandidateKey(candidate);
+               const isSelected = selection[key];
+               const sourceName = candidate.name || candidate.source || "fuente";
+               const sourceDetail = candidate.source && candidate.source !== sourceName
+                 ? `<div class="helper mono">${escapeHtml(candidate.source)}</div>`
+                 : "";
+               const serviceContext = candidate.services.length
+                 ? `Servicio: ${candidate.services.map(service => escapeHtml(service)).join(", ")}`
+                 : "";
+               const containerContext = candidate.containers.length
+                 ? `Contenedor: ${candidate.containers.map(name => escapeHtml(name)).join(", ")}`
+                 : "";
+               const context = [serviceContext, containerContext].filter(Boolean).join(" · ");
+               return `<div class="volume-card ${isSelected ? "selected" : ""}" data-volume="${escapeHtml(candidate.bind)}" data-bind="${escapeHtml(candidate.bind)}" data-source="${escapeHtml(candidate.source || "")}" data-volume-key="${escapeHtml(key)}" data-stack="${escapeHtml(stackKey)}">
+                 <div class="vol-icon">📦</div>
+                 <div class="vol-info">
+                   <div class="vol-name">${escapeHtml(sourceName)}</div>
+                   <div class="vol-path">${escapeHtml(candidate.bind)}</div>
+                   ${sourceDetail}
+                   ${context ? `<div class="helper">${context}</div>` : ""}
+                 </div>
+                 <div class="vol-check"></div>
+               </div>`;
             }).join("")}
           </div>
         </div>
@@ -5100,25 +5167,32 @@ docker compose up -d
             volumeSelectionState.expanded[stackKey] = !volumeSelectionState.expanded[stackKey];
             renderVolumeCheckboxes(project);
           });
-        }
-        group.querySelectorAll(".volume-card").forEach(card => {
-          card.addEventListener("click", () => {
-            const vol = card.dataset.volume;
-            volumeSelectionState.stacks[stackKey][vol] = !volumeSelectionState.stacks[stackKey][vol];
-            renderVolumeCheckboxes(project);
-          });
-        });
+         }
+         group.querySelectorAll(".volume-card").forEach(card => {
+           card.addEventListener("click", () => {
+             const key = card.dataset.volumeKey || card.dataset.source || card.dataset.volume;
+             selection[key] = !selection[key];
+             renderVolumeCheckboxes(project);
+           });
+         });
       }
     }
 
-    function getSelectedVolumes() {
+    function getSelectedVolumeCandidates() {
       const container = document.getElementById("targetVolumeList");
       if (!container) return [];
-      const stackKey = container.querySelector(".volume-group")?.dataset.stack;
-      if (!stackKey || !volumeSelectionState.stacks[stackKey]) return [];
-      return Object.entries(volumeSelectionState.stacks[stackKey])
-        .filter(([_, selected]) => selected)
-        .map(([vol]) => vol);
+      return Array.from(container.querySelectorAll(".volume-card.selected")).map(card => ({
+        source: card.dataset.source || "",
+        bind: card.dataset.bind || card.dataset.volume || "",
+      }));
+    }
+
+    function getSelectedVolumes() {
+      return [...new Set(getSelectedVolumeCandidates().map(candidate => candidate.bind).filter(Boolean))];
+    }
+
+    function getSelectedVolumeSources() {
+      return [...new Set(getSelectedVolumeCandidates().map(candidate => candidate.source).filter(Boolean))];
     }
 
     function bindTargetForm() {
@@ -5127,9 +5201,12 @@ docker compose up -d
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const submitBtn = document.getElementById("createTargetSubmitBtn");
-        await withBtnLoading(submitBtn, async () => {
-          const selectedVols = getSelectedVolumes();
-          const backupStrategy = document.getElementById("targetBackupStrategy").value;
+         await withBtnLoading(submitBtn, async () => {
+           const selectedVols = getSelectedVolumes();
+           const selectedSources = getSelectedVolumeSources();
+           const volumeList = document.getElementById("targetVolumeList");
+           const hasExplicitVolumeSources = volumeList?.dataset.volumeSourceSelection === "true";
+           const backupStrategy = document.getElementById("targetBackupStrategy").value;
           const resticPasswordSecret = emptyToNull(document.getElementById("targetResticPasswordSecret")?.value || "");
           const hasDefault = !!(state.settings && state.settings.restic_password_secret_id);
           if (backupStrategy === "restic" && !hasDefault && !resticPasswordSecret) {
@@ -5138,10 +5215,11 @@ docker compose up -d
           }
           await apiPost("/api/v1/targets", {
             name: document.getElementById("targetName").value.trim(),
-            worker_id: document.getElementById("targetWorkerId").value,
-            compose_project: emptyToNull(document.getElementById("targetComposeProject").value),
-            volume_targets: selectedVols.length ? selectedVols : null,
-            backup_mode: document.getElementById("targetBackupMode").value,
+             worker_id: document.getElementById("targetWorkerId").value,
+             compose_project: emptyToNull(document.getElementById("targetComposeProject").value),
+             volume_targets: selectedVols.length ? selectedVols : null,
+             volume_sources: hasExplicitVolumeSources ? selectedSources : null,
+             backup_mode: document.getElementById("targetBackupMode").value,
             backup_strategy: backupStrategy,
              runtime_command: emptyToNull(document.getElementById("targetRuntimeCommand").value),
              runtime_environment: parseJsonField("targetRuntimeEnvironment", "runtime environment del target"),
@@ -5179,10 +5257,10 @@ docker compose up -d
         renderVolumeCheckboxes(projects[0]);
       }
       function renderProjectSummary(project) {
-        if (!project) { summary.textContent = "Selecciona un compose project."; return; }
-        const vols = (project.volume_targets || []).join(", ") || "sin volumenes";
-        const containers = (project.containers || []).map(c => escapeHtml(c.name)).join(", ") || "sin contenedores";
-        summary.innerHTML = `Proyecto <strong>${escapeHtml(project.name)}</strong> | Volumenes: ${escapeHtml(vols)} | Contenedores: ${containers}`;
+       if (!project) { summary.textContent = "Selecciona un compose project."; return; }
+       const vols = getProjectVolumeCandidates(project).map(candidate => candidate.name || candidate.source || candidate.bind).join(", ") || "sin volumenes";
+       const containers = (project.containers || []).map(c => escapeHtml(c.name)).join(", ") || "sin contenedores";
+       summary.innerHTML = `Proyecto <strong>${escapeHtml(project.name)}</strong> | Volumenes: ${escapeHtml(vols)} | Contenedores: ${containers}`;
       }
       workerSelect.addEventListener("change", refreshProjects);
       projectSelect.addEventListener("change", () => {

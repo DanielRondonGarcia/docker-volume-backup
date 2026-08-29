@@ -354,6 +354,7 @@ class ControlPlaneService:
         cron_expression: Optional[str] = None,
         live_access_enabled: bool = False,
         path_storage: Optional[str] = None,
+        volume_sources: Optional[List[str]] = None,
     ) -> BackupTargetRecord:
         backup_mode = self._validate_backup_mode(backup_mode)
         if not isinstance(live_access_enabled, bool):
@@ -373,7 +374,17 @@ class ControlPlaneService:
 
         client_volume_targets: List[str] = list(volume_targets or [])
         client_runtime_volumes: Dict[str, Dict[str, str]] = dict(runtime_volumes or {})
-        if compose_project:
+        if volume_sources is not None:
+            if not compose_project:
+                raise ValueError("volume_sources requires compose_project")
+            selected = self._resolve_volume_sources_from_worker_inventory(
+                worker_id,
+                compose_project,
+                volume_sources,
+            )
+            client_volume_targets = selected["volume_targets"]
+            client_runtime_volumes = selected["runtime_volumes"]
+        elif compose_project:
             derived = self._derive_volumes_from_worker_inventory(worker_id, compose_project)
             if client_volume_targets:
                 client_volume_set = set(client_volume_targets)
@@ -421,6 +432,84 @@ class ControlPlaneService:
         volume_targets = list(matching.get("volume_targets") or [])
         runtime_volumes = dict(matching.get("runtime_volumes") or {})
         return {"volume_targets": volume_targets, "runtime_volumes": runtime_volumes}
+
+    def _resolve_volume_sources_from_worker_inventory(
+        self,
+        worker_id: str,
+        compose_project: str,
+        volume_sources: List[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(volume_sources, list) or any(
+            not isinstance(source, str) or not source for source in volume_sources
+        ):
+            raise ValueError("volume_sources must be a list of non-empty strings")
+
+        snapshot = self.inventory_repository.get_by_worker(worker_id)
+        inventory = snapshot.inventory if snapshot is not None else {}
+        projects = inventory.get("compose_project_details") or []
+        matching = next((project for project in projects if project.get("name") == compose_project), None)
+        if matching is None:
+            raise ValueError(f"compose project '{compose_project}' is not present in worker inventory")
+
+        source_specs: Dict[str, Dict[str, str]] = {}
+        source_aliases: Dict[str, str] = {}
+        candidates = matching.get("volume_candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                source = candidate.get("source")
+                bind = candidate.get("bind")
+                if not isinstance(source, str) or not source or not isinstance(bind, str) or not bind:
+                    continue
+                spec = {"bind": bind, "mode": candidate.get("mode", "ro")}
+                existing = source_specs.get(source)
+                if existing is not None and existing != spec:
+                    raise ValueError(
+                        f"volume source '{source}' is ambiguous in compose project '{compose_project}'"
+                    )
+                source_specs[source] = spec
+                for alias in (candidate.get("name"), candidate.get("compose_volume")):
+                    if isinstance(alias, str) and alias and alias not in source_aliases:
+                        source_aliases[alias] = source
+        if not source_specs:
+            source_specs = {
+                source: {
+                    "bind": spec.get("bind"),
+                    "mode": spec.get("mode", "ro"),
+                }
+                for source, spec in (matching.get("runtime_volumes") or {}).items()
+                if isinstance(source, str) and source and isinstance(spec, dict) and spec.get("bind")
+            }
+
+        resolved_sources: List[str] = []
+        unknown_sources: List[str] = []
+        for requested_source in volume_sources:
+            source = requested_source if requested_source in source_specs else source_aliases.get(requested_source)
+            if source is None:
+                unknown_sources.append(requested_source)
+                continue
+            if source not in resolved_sources:
+                resolved_sources.append(source)
+        if unknown_sources:
+            unknown = ", ".join(unknown_sources)
+            raise ValueError(
+                f"unknown or stale volume source(s) for compose project '{compose_project}': {unknown}"
+            )
+
+        selected_runtime_volumes = {
+            source: dict(source_specs[source])
+            for source in resolved_sources
+        }
+        selected_volume_targets: List[str] = []
+        for spec in selected_runtime_volumes.values():
+            bind = spec.get("bind")
+            if bind and bind not in selected_volume_targets:
+                selected_volume_targets.append(bind)
+        return {
+            "volume_targets": selected_volume_targets,
+            "runtime_volumes": selected_runtime_volumes,
+        }
 
     def update_target(
         self,

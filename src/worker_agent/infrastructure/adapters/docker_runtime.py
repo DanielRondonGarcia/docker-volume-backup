@@ -1104,6 +1104,13 @@ class DockerRuntimeAdapter:
         volumes = self.client.volumes.list()
         networks = self.client.networks.list()
         compose_project_map: Dict[str, Dict[str, Any]] = {}
+        volume_candidate_maps: Dict[str, Dict[tuple[str, str], Dict[str, Any]]] = {}
+        volume_metadata = {
+            volume.name: {
+                "labels": volume.attrs.get("Labels") or {},
+            }
+            for volume in volumes
+        }
         container_items = []
 
         for container in containers:
@@ -1139,6 +1146,7 @@ class DockerRuntimeAdapter:
                     "volume_mounts": [],
                     "volume_targets": [],
                     "runtime_volumes": {},
+                    "volume_candidates": [],
                 },
             )
             project_item["containers"].append(
@@ -1164,6 +1172,20 @@ class DockerRuntimeAdapter:
                         "mode": runtime_volume["mode"],
                     },
                 )
+                candidate_key = (runtime_volume["source"], bind_path)
+                candidate_map = volume_candidate_maps.setdefault(compose_project, {})
+                candidate = candidate_map.get(candidate_key)
+                if candidate is None:
+                    source_metadata = volume_metadata.get(runtime_volume["source"], {})
+                    candidate = self._mount_to_volume_candidate(
+                        runtime_volume,
+                        source_metadata.get("labels") or {},
+                        compose_project,
+                    )
+                    candidate_map[candidate_key] = candidate
+                    project_item["volume_candidates"].append(candidate)
+                self._append_unique(candidate["services"], compose_service)
+                self._append_unique(candidate["containers"], container.name)
 
         compose_projects = sorted({
             container.labels.get("com.docker.compose.project")
@@ -1197,6 +1219,57 @@ class DockerRuntimeAdapter:
                 }
                 for network in networks
             ],
+        }
+
+    @staticmethod
+    def _append_unique(items: List[str], value: Any) -> None:
+        if isinstance(value, str) and value and value not in items:
+            items.append(value)
+
+    @staticmethod
+    def _volume_name(source: str) -> str:
+        normalized = (source or "").rstrip("/")
+        if normalized.endswith("/_data"):
+            normalized = normalized[: -len("/_data")]
+        return normalized.rsplit("/", 1)[-1]
+
+    @classmethod
+    def _is_generated_volume_name(cls, source: str) -> bool:
+        return bool(re.fullmatch(r"[0-9a-f]{32,64}", cls._volume_name(source), re.IGNORECASE))
+
+    @classmethod
+    def _mount_to_volume_candidate(
+        cls,
+        runtime_volume: Dict[str, Any],
+        volume_labels: Dict[str, Any],
+        compose_project: str,
+    ) -> Dict[str, Any]:
+        mount = runtime_volume["mount"]
+        mount_type = mount["type"]
+        source = runtime_volume["source"]
+        compose_volume = volume_labels.get("com.docker.compose.volume")
+        compose_volume_project = volume_labels.get("com.docker.compose.project")
+        has_compose_identity = bool(
+            compose_volume
+            and (not compose_volume_project or compose_volume_project == compose_project)
+        )
+        anonymous = mount_type == "volume" and (
+            bool(runtime_volume.get("anonymous"))
+            or cls._is_generated_volume_name(source)
+            or (not has_compose_identity and not mount.get("name"))
+        )
+        display_name = compose_volume if isinstance(compose_volume, str) and compose_volume else source
+        return {
+            "source": source,
+            "name": display_name,
+            "compose_volume": compose_volume,
+            "bind": runtime_volume["bind_path"],
+            "mode": runtime_volume["mode"],
+            "mount_type": mount_type,
+            "type": mount_type,
+            "anonymous": anonymous,
+            "services": [],
+            "containers": [],
         }
 
     _IGNORED_BIND_DESTINATIONS = {
@@ -1271,6 +1344,7 @@ class DockerRuntimeAdapter:
             "source": source,
             "bind_path": original_dest,
             "mode": mode,
+            "anonymous": mount.get("Anonymous") in (True, "true", "True"),
             "mount": {
                 "type": mount_type,
                 "source": source,
