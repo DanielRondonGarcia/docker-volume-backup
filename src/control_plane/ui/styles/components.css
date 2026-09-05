@@ -76,8 +76,9 @@
 .table th { background: var(--muted); color: var(--muted-foreground); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .table tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.table tbody tr.target-execution-blocked { opacity: .56; filter: saturate(.72); }
-.table tbody tr.target-execution-blocked:hover { opacity: .72; }
+/* Keep blocked rows visually distinct without creating a containing block for fixed action menus. */
+.table tbody tr.target-execution-blocked > td { background: color-mix(in srgb, var(--muted) 45%, var(--card)); }
+.table tbody tr.target-execution-blocked:hover > td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
 .table td.mono, .table td .mono { font-family: var(--font-mono); font-size: 12px; }
 .table.datatable .filter-row th { padding: 6px 8px; background: var(--card); border-bottom: 1px solid var(--border); }
 .table.datatable .filter-row th::before { display: none; }

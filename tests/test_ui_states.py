@@ -257,7 +257,7 @@ process.stdout.write(JSON.stringify({ bySource, byLegacyPath, byEmptyLegacy }));
         self.assertEqual(set(output["byLegacyPath"]), {"source-a", "source-b"})
         self.assertEqual(set(output["byEmptyLegacy"]), {"source-a", "source-b", "source-c"})
 
-    def test_blocked_targets_are_opaque_and_cannot_run_or_enable_on_ineligible_workers(self):
+    def test_blocked_targets_cannot_run_or_enable_on_ineligible_workers(self):
         for marker in (
             "target-execution-blocked",
             "execution_blocked",
@@ -273,6 +273,52 @@ process.stdout.write(JSON.stringify({ bySource, byLegacyPath, byEmptyLegacy }));
             "apiGet(\"/api/v1/targets\")",
         ):
             self.assertIn(marker, self.source)
+
+    def test_blocked_target_rows_do_not_capture_fixed_menus_and_keep_admin_delete_action(self):
+        blocked_styles = re.findall(
+            r"\.table tbody tr\.target-execution-blocked(?: > td|:hover > td) \{(.*?)\}",
+            self.css,
+            re.S,
+        )
+        self.assertEqual(len(blocked_styles), 2)
+        for style in blocked_styles:
+            self.assertIn("background:", style)
+            self.assertNotRegex(
+                style,
+                r"\b(?:filter|opacity|transform|perspective|contain|isolation|will-change)\s*:",
+            )
+
+        dropdown = re.search(r"\.dropdown-menu \{.*?\n\}", self.css, re.S)
+        self.assertIsNotNone(dropdown)
+        self.assertIn("position: fixed;", dropdown.group(0))
+        self.assertIn("z-index: 1000;", dropdown.group(0))
+
+        body = re.search(
+            r"function renderTargetsTableBody\(preservedDropdown = captureTargetDropdownState\(\)\) \{.*?\n    function renderVolumeTargetsCell",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(body)
+        body_source = body.group(0)
+        admin_actions = re.search(
+            r"\$\{canManageTargets \? `<button[^`]*data-action=\"edit\".*?data-action=\"delete\".*?` : \"\"\}",
+            body_source,
+            re.S,
+        )
+        self.assertIsNotNone(admin_actions)
+        self.assertNotIn("executionBlocked", admin_actions.group(0))
+        self.assertIn('data-name="${escapeHtml(t.name)}"', admin_actions.group(0))
+
+        actions = re.search(
+            r"function bindTargetActions\(\).*?\n    \}\n\n    function normalizeLiveBrowserPath",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(actions)
+        self.assertIn(
+            'else if (action === "delete") { openDeleteTargetModal(id, btn.dataset.name); }',
+            actions.group(0),
+        )
 
     def test_targets_table_has_fluid_desktop_columns_and_responsive_scroll_contract(self):
         table = re.search(r'<table class="table datatable targets-table">.*?</table>', self.source, re.S)
