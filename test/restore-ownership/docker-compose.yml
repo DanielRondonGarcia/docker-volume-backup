@@ -1,0 +1,43 @@
+services:
+  seed-n8n:
+    image: alpine:3.20
+    command: >-
+      sh -c "mkdir -p /n8n/.n8n /redis &&
+      printf 'disposable n8n config\n' > /n8n/.n8n/config &&
+      chmod 600 /n8n/.n8n/config && chown -R 0:0 /n8n /redis"
+    volumes:
+      - n8n_data:/n8n
+      - redis_data:/redis
+
+  verify-preserve:
+    image: alpine:3.20
+    profiles: [preserve]
+    depends_on:
+      seed-n8n:
+        condition: service_completed_successfully
+    command: >-
+      sh -c "test \"$$(stat -c '%a:%u:%g' /n8n/.n8n/config)\" = '600:0:0' &&
+      test \"$$(stat -c '%u:%g' /redis)\" = '0:0'"
+    volumes:
+      - n8n_data:/n8n:ro
+      - redis_data:/redis:ro
+
+  verify-map:
+    image: alpine:3.20
+    profiles: [map]
+    environment:
+      RESTORE_OWNERSHIP_JSON: '{"schema_version":1,"mode":"map","mappings":{"compose:restore-ownership:n8n_data":"1000:1000","compose:restore-ownership:redis_data":"2000:2000"},"confirmation":"confirmed"}'
+    depends_on:
+      seed-n8n:
+        condition: service_completed_successfully
+    command: >-
+      sh -c "chown 1000:1000 /n8n/.n8n/config && chown 2000:2000 /redis &&
+      test \"$$(stat -c '%u:%g' /n8n/.n8n/config)\" = '1000:1000' &&
+      test \"$$(stat -c '%u:%g' /redis)\" = '2000:2000'"
+    volumes:
+      - n8n_data:/n8n
+      - redis_data:/redis
+
+volumes:
+  n8n_data:
+  redis_data:

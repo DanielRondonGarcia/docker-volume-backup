@@ -87,6 +87,9 @@ class BackupTargetRecord:
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     path_storage: Optional[str] = None
+    runtime_type: str = "docker"
+    namespace: Optional[str] = None
+    pvc_names: List[str] = field(default_factory=list)
 
 
 @dataclass

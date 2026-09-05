@@ -303,6 +303,93 @@ class WorkerManagementTests(unittest.TestCase):
             repository.save(loaded_legacy)
             self.assertEqual(repository.get("legacy").path_storage, "tenant/custom")
 
+    def test_sqlite_target_runtime_fields_migrate_and_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(directory, "control-plane.db")
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE targets (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        worker_id TEXT NOT NULL,
+                        compose_project TEXT,
+                        volume_targets_json TEXT NOT NULL,
+                        backup_mode TEXT NOT NULL,
+                        backup_strategy TEXT NOT NULL,
+                        runtime_image TEXT,
+                        runtime_command TEXT,
+                        runtime_environment_json TEXT NOT NULL,
+                        runtime_volumes_json TEXT NOT NULL,
+                        runtime_network_mode TEXT,
+                        storage_profile_id TEXT,
+                        retention_policy_id TEXT,
+                        execution_policy_id TEXT,
+                        restic_password_secret_id TEXT,
+                        restore_defaults_json TEXT NOT NULL,
+                        labels_json TEXT NOT NULL,
+                        enabled INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                legacy = BackupTargetRecord(name="legacy", worker_id="worker-a", id="legacy")
+                connection.execute(
+                    """
+                    INSERT INTO targets (
+                        id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
+                        runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
+                        storage_profile_id, retention_policy_id, execution_policy_id, restic_password_secret_id,
+                        restore_defaults_json, labels_json, enabled, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        legacy.id,
+                        legacy.name,
+                        legacy.worker_id,
+                        legacy.compose_project,
+                        json.dumps(legacy.volume_targets),
+                        legacy.backup_mode,
+                        legacy.backup_strategy,
+                        legacy.runtime_image,
+                        legacy.runtime_command,
+                        json.dumps(legacy.runtime_environment),
+                        json.dumps(legacy.runtime_volumes),
+                        legacy.runtime_network_mode,
+                        legacy.storage_profile_id,
+                        legacy.retention_policy_id,
+                        legacy.execution_policy_id,
+                        legacy.restic_password_secret_id,
+                        json.dumps(legacy.restore_defaults),
+                        json.dumps(legacy.labels),
+                        1,
+                        legacy.created_at.isoformat(),
+                        legacy.updated_at.isoformat(),
+                    ),
+                )
+            connection.close()
+
+            repository = SQLiteTargetRepository(database_path)
+            loaded_legacy = repository.get("legacy")
+            self.assertEqual(loaded_legacy.runtime_type, "docker")
+            self.assertIsNone(loaded_legacy.namespace)
+            self.assertEqual(loaded_legacy.pvc_names, [])
+            with sqlite3.connect(database_path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(targets)")}
+            connection.close()
+            self.assertTrue({"runtime_type", "namespace", "pvc_names_json"}.issubset(columns))
+
+            loaded_legacy.runtime_type = "kubernetes"
+            loaded_legacy.namespace = "backups"
+            loaded_legacy.pvc_names = ["discourse-data", "discourse-config"]
+            repository.save(loaded_legacy)
+
+            loaded_kubernetes = repository.get("legacy")
+            self.assertEqual(loaded_kubernetes.runtime_type, "kubernetes")
+            self.assertEqual(loaded_kubernetes.namespace, "backups")
+            self.assertEqual(loaded_kubernetes.pvc_names, ["discourse-data", "discourse-config"])
+
     def test_worker_labels_reject_invalid_keys_and_allow_clear(self):
         service, _, _, _, _, _ = self.make_service()
 

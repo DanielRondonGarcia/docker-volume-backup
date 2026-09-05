@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.app.domain.restore_ownership import RestoreOwnershipPolicy
+
 @dataclass
 class BackupConfig:
     source_paths: List[str]
@@ -63,6 +68,8 @@ class RestoreConfig:
     local_archive_path: Optional[str] = None
     stop_label: Optional[str] = None
     custom_label: Optional[str] = None
+    restore_ownership: Optional["RestoreOwnershipPolicy"] = None
+    read_only_paths: tuple[str, ...] = ()
 
 @dataclass
 class RestoreCandidate:

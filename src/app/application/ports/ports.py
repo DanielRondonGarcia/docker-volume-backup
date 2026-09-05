@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Iterable, List, Optional
 from src.app.domain.models import BackupConfig, BackupResult, ContainerConfig, RestoreCandidate, RestoreConfig, RestoreResult
+from src.app.domain.restore_metadata import ResticMetadataEvidence
+from src.app.domain.restore_ownership import RestoreOwnershipPolicy
 
 class StoragePort(ABC):
     @abstractmethod
@@ -61,4 +63,22 @@ class BackupStrategy(ABC):
 class RestoreStrategy(ABC):
     @abstractmethod
     def restore(self, source_path: str, config: RestoreConfig) -> RestoreResult:
+        pass
+
+
+class RestoreOwnershipPort(ABC):
+    @abstractmethod
+    def resolve_policy(
+        self,
+        request: Any = None,
+        target_defaults: Any = None,
+        legacy_chown: Optional[str] = None,
+        volume_scopes: Optional[Iterable[Any]] = None,
+    ) -> RestoreOwnershipPolicy:
+        pass
+
+
+class ResticMetadataInspectorPort(ABC):
+    @abstractmethod
+    def inspect(self, snapshot: str, config: Any = None, scopes: Optional[Iterable[Any]] = None, policy: Any = None) -> ResticMetadataEvidence:
         pass

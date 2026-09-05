@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backup-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: docker-volume-backup-worker
+  namespace: backup-worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docker-volume-backup-worker
+  namespace: backup-worker
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docker-volume-backup-worker
+  namespace: backup-worker
+subjects:
+  - kind: ServiceAccount
+    name: docker-volume-backup-worker
+    namespace: backup-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: docker-volume-backup-worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: docker-volume-backup-worker-namespace-reader
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: docker-volume-backup-worker-namespace-reader
+subjects:
+  - kind: ServiceAccount
+    name: docker-volume-backup-worker
+    namespace: backup-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: docker-volume-backup-worker-namespace-reader
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-volume-backup-worker
+  namespace: backup-worker
+  labels:
+    app.kubernetes.io/name: docker-volume-backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docker-volume-backup-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docker-volume-backup-worker
+    spec:
+      serviceAccountName: docker-volume-backup-worker
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest
+          ports:
+            - name: health
+              containerPort: 8081
+          env:
+            - name: CONTROL_PLANE_URL
+              value: http://control-plane:8080
+            - name: WORKER_RUNTIME
+              value: kubernetes
+            - name: BACKUP_RUNTIME_IMAGE
+              value: ghcr.io/danielrondongarcia/docker-volume-backup:latest
+            - name: WORKER_HEALTH_HOST
+              value: 0.0.0.0
+            - name: WORKER_HEALTH_PORT
+              value: "8081"
+            - name: WORKER_RUN_ONCE
+              value: "false"
+            - name: WORKER_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WORKER_CREDENTIAL_FILE
+              value: /var/lib/docker-volume-backup/worker_credentials.json
+            - name: WORKER_JOB_RECOVERY_FILE
+              value: /var/lib/docker-volume-backup/worker_job_recovery.json
+            - name: SNAPSHOT_EXPLORER_CACHE_DIR
+              value: /var/cache/restic-explorer
+            - name: WORKER_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: docker-volume-backup-worker-enrollment
+                  key: token
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: worker-state
+              mountPath: /var/lib/docker-volume-backup
+            - name: restic-cache
+              mountPath: /var/cache/restic-explorer
+      volumes:
+        - name: worker-state
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: restic-cache
+          emptyDir:
+            sizeLimit: 256Mi

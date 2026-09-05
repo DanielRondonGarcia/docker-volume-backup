@@ -1,6 +1,8 @@
 FROM python:3.11-slim-bookworm AS app-base
 
-# Install system dependencies
+# Install system dependencies. Docker CLI installation is optional so the
+# Kubernetes worker image can use the same multi-architecture base without
+# carrying a Docker daemon client when it is not needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cron \
     curl \
@@ -11,8 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rclone \
     openssh-client \
     iputils-ping \
-    docker.io \
     && rm -rf /var/lib/apt/lists/*
+
+ARG INSTALL_DOCKER_CLI=true
+RUN if [ "${INSTALL_DOCKER_CLI}" = "true" ]; then \
+    apt-get update \
+    && apt-get install -y --no-install-recommends docker.io \
+    && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Install AWS CLI v2
 RUN if [ $(uname -m) = "aarch64" ] || [ $(uname -m) = "x86_64" ] ; then \

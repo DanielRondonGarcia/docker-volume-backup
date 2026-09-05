@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
+from src.worker_agent.infrastructure.adapters.kubernetes_runtime import KubernetesRuntimeAdapter
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import (
     ControlPlaneClient,
@@ -47,6 +48,8 @@ class WorkerHealthSnapshot:
     last_processed_jobs: int = 0
     run_once: bool = False
     poll_interval_seconds: float = 30.0
+    runtime_kind: str = "docker"
+    capabilities: list[str] = field(default_factory=lambda: ["docker"])
 
 
 class WorkerHealthState:
@@ -57,10 +60,18 @@ class WorkerHealthState:
             worker_name=worker_name,
         )
 
-    def set_runtime(self, run_once: bool, poll_interval_seconds: float):
+    def set_runtime(
+        self,
+        run_once: bool,
+        poll_interval_seconds: float,
+        runtime_kind: str = "docker",
+        capabilities: Optional[list[str]] = None,
+    ):
         with self._lock:
             self._snapshot.run_once = run_once
             self._snapshot.poll_interval_seconds = poll_interval_seconds
+            self._snapshot.runtime_kind = runtime_kind
+            self._snapshot.capabilities = list(capabilities or [runtime_kind])
 
     def record_control_plane_success(self, worker_id: str, processed_jobs: Optional[int] = None):
         with self._lock:
@@ -129,10 +140,48 @@ def _labels_from_env() -> dict:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        labels = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("WORKER_LABELS is not valid JSON; ignoring")
         return {}
+    if not isinstance(labels, dict):
+        logger.warning("WORKER_LABELS must be a JSON object; ignoring")
+        return {}
+    return labels
+
+
+_SUPPORTED_RUNTIME_KINDS = frozenset({"docker", "kubernetes"})
+
+
+def _worker_runtime_kind() -> str:
+    raw = (os.environ.get("WORKER_RUNTIME") or "docker").strip().lower()
+    if raw in _SUPPORTED_RUNTIME_KINDS:
+        return raw
+    logger.warning("WORKER_RUNTIME is unsupported; using Docker runtime")
+    return "docker"
+
+
+def _runtime_labels(labels: dict, runtime_kind: str) -> dict:
+    """Merge user labels without allowing them to spoof runtime identity."""
+    result = dict(labels)
+    result.update(
+        {
+            "runtime_kind": runtime_kind,
+            "runtime_type": runtime_kind,
+            "supported_runtimes": runtime_kind,
+            "capabilities": json.dumps([runtime_kind], separators=(",", ":")),
+        }
+    )
+    return result
+
+
+def _build_runtime(runtime_kind: str, config: WorkerAgentConfig):
+    if runtime_kind == "kubernetes":
+        return KubernetesRuntimeAdapter(
+            namespace=os.environ.get("WORKER_KUBERNETES_NAMESPACE") or None,
+            worker_id=config.worker_id,
+        )
+    return DockerRuntimeAdapter()
 
 
 def _resolve_live_helper_image() -> str:
@@ -312,12 +361,14 @@ def build_service() -> WorkerAgentService:
         worker_id=config.worker_id,
         enrollment_secret=config.enrollment_token,
     )
-    docker_runtime = DockerRuntimeAdapter()
+    runtime_kind = _worker_runtime_kind()
+    runtime = _build_runtime(runtime_kind, config)
+    config.labels = _runtime_labels(config.labels, runtime_kind)
     snapshot_cache = RedisSnapshotCache.from_env()
     return WorkerAgentService(
         config,
         client,
-        docker_runtime,
+        runtime,
         snapshot_cache=snapshot_cache,
         recovery_file=recovery_file,
     )
@@ -356,7 +407,15 @@ def main():
         control_plane_url=service.config.control_plane_url,
         worker_name=service.config.name,
     )
-    health_state.set_runtime(run_once=run_once, poll_interval_seconds=poll_interval)
+    runtime_kind = getattr(getattr(service, "runtime", None), "runtime_kind", "docker")
+    if runtime_kind not in _SUPPORTED_RUNTIME_KINDS:
+        runtime_kind = "docker"
+    health_state.set_runtime(
+        run_once=run_once,
+        poll_interval_seconds=poll_interval,
+        runtime_kind=runtime_kind,
+        capabilities=[runtime_kind],
+    )
     start_health_server(health_state)
     live_lane = start_live_lane(service, interactive_interval)
 

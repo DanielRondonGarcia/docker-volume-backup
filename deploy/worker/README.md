@@ -126,3 +126,93 @@ ese comando borra `demo_nginx_*`, `demo_postgres_data`, `demo_redis_data`,
 Si el Control Plane está en otro host o puerto, ajusta `CONTROL_PLANE_URL`, por
 ejemplo `http://192.168.1.10:18080`. El worker requiere acceso real a
 `/var/run/docker.sock` para descubrir contenedores y volúmenes.
+
+## Kubernetes worker deployment
+
+The Kubernetes worker uses the same published worker image as the Docker
+deployment, but selects the Kubernetes runtime explicitly. The first slice is
+namespace-scoped: one worker installation must operate in one target namespace,
+and the target must name one or more PVCs explicitly.
+
+### Requirements and architecture
+
+- Kubernetes 1.25 or newer is recommended, with permission to create Jobs and
+  to list namespaces, PVCs, Pods, Deployments, and StatefulSets as described by
+  `deploy/worker/k8s/worker.yaml`.
+- Published runtime and worker images are multi-architecture manifests for
+  `linux/amd64` and `linux/arm64`. The node architecture must match one of
+  those platforms; no privileged Docker-in-Docker setup is required.
+- The worker image includes the Kubernetes Python client. Docker remains the
+  default runtime for Compose, while Kubernetes installations set
+  `WORKER_RUNTIME=kubernetes`.
+- Replace the example image tags with the release version when pinning a
+  deployment. Keep `BACKUP_RUNTIME_IMAGE` pointed at the matching backup
+  runtime image, not the worker image.
+
+### ServiceAccount and least-privilege RBAC
+
+The manifest creates the `backup-worker` namespace, a dedicated
+`docker-volume-backup-worker` ServiceAccount, a namespace-limited Role and
+RoleBinding, and a read-only ClusterRole/ClusterRoleBinding for namespace
+listing. It does not grant cluster-admin access and it does not embed a bearer
+token or kubeconfig. Apply it with:
+
+```sh
+kubectl apply -f deploy/worker/k8s/worker.yaml
+```
+
+The Role is intentionally bound to the namespace where the worker runs. For a
+different application namespace, copy the manifest and change the namespace
+consistently on the Namespace, ServiceAccount, Role, RoleBinding, Deployment,
+and `WORKER_KUBERNETES_NAMESPACE` value; do not broaden the Role to the whole
+cluster. The selected PVCs and their Deployment/StatefulSet owners must be in
+that same namespace.
+
+### Enrollment and Secret mapping
+
+Create an enrollment token through the Control Plane's worker enrollment flow.
+Do not commit it or place it in a manifest. After applying the non-secret
+resources, create the namespace-local Secret from an environment variable:
+
+```sh
+export WORKER_ENROLLMENT_TOKEN='<token-from-control-plane>'
+kubectl -n backup-worker create secret generic docker-volume-backup-worker-enrollment \
+  --from-literal=token="$WORKER_ENROLLMENT_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n backup-worker rollout restart deployment/docker-volume-backup-worker
+```
+
+The Deployment maps only the Secret key into `WORKER_ENROLLMENT_TOKEN`.
+Backup and restore credentials are mapped separately by operation payloads to
+Kubernetes Secret references or read-only Secret files; literal values must
+not be sent to the Control Plane or written into Job manifests.
+
+### Runtime configuration and verification
+
+The ready-to-apply Deployment sets the Kubernetes runtime, the worker image,
+the backup runtime image, the in-cluster namespace, and the health probes. Set
+`CONTROL_PLANE_URL` to a URL reachable from the Pod and use the published
+version-matched images for production:
+
+```sh
+kubectl -n backup-worker set env deployment/docker-volume-backup-worker \
+  CONTROL_PLANE_URL='http://control-plane:8080' \
+  WORKER_RUNTIME=kubernetes \
+  BACKUP_RUNTIME_IMAGE='ghcr.io/danielrondongarcia/docker-volume-backup:1.2.3'
+kubectl -n backup-worker rollout status deployment/docker-volume-backup-worker
+kubectl -n backup-worker logs deployment/docker-volume-backup-worker --tail=50
+```
+
+After enrollment, verify the worker advertises `runtime_kind=kubernetes` and
+`capabilities=["kubernetes"]`, then use the Control Plane inventory to select
+one namespace and explicit PVC names. The adapter fails closed when RBAC
+denies inventory or a PVC is missing.
+
+### Explicit first-slice limitations
+
+This deployment does **not** provide live file browsing, CSI VolumeSnapshots,
+multi-namespace targets, Helm charts, Operators, or CRDs. Backup and restore
+use labelled Kubernetes Jobs, quiesce matching Deployments/StatefulSets, and
+restore their replica counts in a bounded `finally` path. A real-cluster smoke
+test is required for each target cluster; local manifest dry-runs and fake
+client tests do not prove cluster RBAC or storage behavior.

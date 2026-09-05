@@ -143,7 +143,7 @@
      .snapshot-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--muted-foreground); font-size: 12px; }
      .snapshot-status[hidden] { display: none !important; }
      .snapshot-status strong { color: var(--foreground); }
-    .snapshot-status[data-state="error"], .snapshot-status[data-state="deleted"], .snapshot-status[data-state="blocked"], .snapshot-status[data-state="oversized"] { border-color: color-mix(in srgb, var(--destructive) 48%, var(--border)); }
+     .snapshot-status[data-state="error"], .snapshot-status[data-state="failed"], .snapshot-status[data-state="deleted"], .snapshot-status[data-state="blocked"], .snapshot-status[data-state="oversized"] { border-color: color-mix(in srgb, var(--destructive) 48%, var(--border)); }
     .snapshot-status[data-state="stale"] { border-color: color-mix(in srgb, var(--warning, #d97706) 48%, var(--border)); }
     .snapshot-status[data-state="canceled"] { border-color: color-mix(in srgb, var(--muted-foreground) 48%, var(--border)); }
     .snapshot-status .btn { margin-left: auto; }
@@ -344,6 +344,21 @@
       const backend = context.backend_type || context.repository_kind || "unknown";
       const rclone = context.rclone_config_source && context.rclone_config_source !== "none" ? ` · rclone.conf: ${context.rclone_config_source}` : "";
       return `<div class="job-storage-context" role="status"><span><strong>Storage:</strong> ${escapeHtml(profile)} · ${escapeHtml(backend)}${escapeHtml(rclone)}</span><span><strong>Repositorio:</strong> <code>${escapeHtml(context.repository_display)}</code></span></div>`;
+    }
+
+    function renderRestoreOwnershipEvidence(job) {
+      const evidence = job?.result_summary?.restore_ownership;
+      if (!evidence || typeof evidence !== "object") return "";
+      const text = (value, fallback = "Not available") => escapeHtml(value === undefined || value === null || value === "" ? fallback : Array.isArray(value) ? value.join(", ") : String(value));
+      const status = String(evidence.status || "unknown").toLowerCase();
+      const state = ["succeeded", "failed", "blocked"].includes(status) ? status : "blocked";
+      const policy = evidence.policy || {}, metadata = evidence.metadata || {}, capability = evidence.capability || {};
+      const normalization = evidence.normalization || {}, restart = evidence.restart || {};
+      const volumes = (Array.isArray(metadata.volumes) ? metadata.volumes : []).slice(0, 8);
+      const files = (Array.isArray(metadata.samples) ? metadata.samples : Array.isArray(metadata.files) ? metadata.files : []).slice(0, 8);
+      const volumeText = volumes.map(item => `${item.volume_key || item.key || "volume"}: ${item.classification || item.owner || "not reported"}`).join(" · ");
+      const fileText = files.map(item => `${item.path || "file"} ${item.mode || ""} ${item.uid ?? "?"}:${item.gid ?? "?"} ${item.size ?? "?"}B ${item.mtime || ""}`).join(" · ");
+      return `<section class="snapshot-status restore-ownership-evidence" data-state="${escapeHtml(state)}" data-restore-ownership-status="${escapeHtml(status)}"><strong>Restore ownership: ${text(status)}</strong><span>Category: ${text(evidence.category)}</span>${evidence.error || evidence.detail ? `<span>${text(evidence.error || evidence.detail)}</span>` : ""}<div><b>Policy:</b> ${text(policy.mode)} · confirmation ${text(policy.confirmation)} · mappings ${text(JSON.stringify(policy.mappings || {}), "{}")}</div><div><b>Restic metadata:</b> snapshot ${text(metadata.snapshot)} · classification ${text(metadata.classification)} · backup creator (${text(metadata.creator_label, "backup_creator")}, not target identity): ${text(metadata.creator)} · file owners (${text(metadata.owner_label, "file_owner")}): ${text(metadata.owners)} · restored metadata proven: ${text(metadata.restored_metadata_proven, "false")}</div><div><b>Volumes:</b> ${text(volumeText)}</div><div><b>Files:</b> ${text(fileText)}</div><div><b>Capability:</b> ${text(capability.state || capability.category)} · <b>Normalization:</b> ${text(normalization.state || normalization.category)} · <b>Destructive:</b> ${text(evidence.destructive_state)} · <b>Restart:</b> ${text(restart.state)}</div></section>`;
     }
 
     function jobPhaseLabel(phase) {
@@ -4379,37 +4394,242 @@ docker compose up -d
       }
     }
 
+    function getRestoreOwnershipVolumeCandidates(target) {
+      const runtimeVolumes = target?.runtime_volumes;
+      const validKey = /^compose:[A-Za-z0-9][A-Za-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+      if (!runtimeVolumes || typeof runtimeVolumes !== "object" || Array.isArray(runtimeVolumes)) return [];
+      const selectedPaths = new Set(Array.isArray(target.volume_targets) ? target.volume_targets.filter(path => typeof path === "string") : []);
+      return Object.entries(runtimeVolumes)
+        .map(([source, spec]) => {
+          const bind = spec && typeof spec === "object" ? spec.bind : "";
+          const key = spec && typeof spec === "object" ? (spec.stable_key || spec.volume_key || "") : "";
+          const name = spec && typeof spec === "object" && spec.name
+            ? spec.name
+            : (spec && typeof spec === "object" && spec.compose_volume ? spec.compose_volume : (key.split(":")[2] || source));
+          return { name, bind, key };
+        })
+        .filter(candidate => validKey.test(candidate.key) && (!selectedPaths.size || (typeof candidate.bind === "string" && candidate.bind && selectedPaths.has(candidate.bind))))
+        .sort((left, right) => left.key.localeCompare(right.key));
+    }
+
     function openRestoreFromSnapshotModal(snapshotId, dateStr) {
       const state = snapshotBrowserState;
       if (!state || !state.target || !snapshotId) return;
       invalidateSnapshotRequest(false);
       const overlay = state.overlay;
+      const volumeCandidates = getRestoreOwnershipVolumeCandidates(state.target);
+      const ownershipEditorId = volumeCandidates.length ? "rsOwnershipManual" : "rsOwnershipAdvanced";
+      const mappingEditor = volumeCandidates.length
+        ? `<div id="rsOwnershipManual" class="restore-ownership-manual" hidden aria-hidden="true">
+             <div class="helper">Los volúmenes restaurados se detectaron automáticamente. Escribe un valor UID:GID numérico solo en los que quieras cambiar; deja los demás vacíos para conservar su configuración.</div>
+             <div class="restore-mapping-list">
+               ${volumeCandidates.map((candidate, index) => `<div class="restore-mapping-row">
+                 <label class="restore-mapping-label" for="rsMapping${index}">
+                   <span>${escapeHtml(candidate.name)}</span>
+                   ${candidate.bind ? `<span class="helper">Ruta restaurada: ${escapeHtml(candidate.bind)}</span>` : ""}
+                  </label>
+                  <div class="restore-mapping-input">
+                    <input id="rsMapping${index}" name="restore_ownership_mapping_${index}" type="text" data-restore-mapping data-mapping-key="${escapeHtml(candidate.key)}" data-mapping-label="${escapeHtml(candidate.name)}" placeholder="1000:1000…" autocomplete="off" inputmode="numeric" pattern="[0-9]+:[0-9]+" spellcheck="false" aria-describedby="rsMappingHint${index} rsMappingError${index}" />
+                    <span id="rsMappingHint${index}" class="restore-mapping-hint">Formato: UID:GID</span>
+                    <div id="rsMappingError${index}" class="form-error" role="alert" hidden></div>
+                  </div>
+               </div>`).join("")}
+             </div>
+           </div>`
+        : `<details id="rsOwnershipAdvanced" class="restore-advanced">
+             <summary>Configuración avanzada</summary>
+             <div class="restore-advanced-body">
+               <p class="helper">Este target no expone claves estables de volúmenes. Por seguridad, no generaremos claves a partir de rutas del host ni nombres no verificables. Si necesitas aplicar permisos manuales, usa la solicitud técnica existente.</p>
+               <div class="field">
+                 <label for="rsOwnershipJson">Solicitud de permisos (JSON)</label>
+                 <textarea id="rsOwnershipJson" name="restore_ownership" rows="4" autocomplete="off" spellcheck="false" translate="no">{"schema_version":1,"mode":"preserve","mappings":{}}</textarea>
+                 <div class="helper">Usa una clave con el formato <code translate="no">compose:proyecto:volumen</code>. La clave combina el nombre del proyecto Compose y el nombre del volumen; no uses rutas del host. Ejemplo: <code translate="no">compose:mi-proyecto:datos</code>.</div>
+               </div>
+             </div>
+           </details>`;
       overlay.innerHTML = `
-        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restoreSnapshotTitle" style="max-width:520px;">
-          <div class="modal-header"><h3 id="restoreSnapshotTitle">Restaurar desde snapshot</h3><button type="button" class="close" id="rsClose" aria-label="Cerrar restauracion">&times;</button></div>
+        <div class="modal restore-snapshot-modal" role="dialog" aria-modal="true" aria-labelledby="restoreSnapshotTitle" tabindex="-1">
+          <div class="modal-header"><h3 id="restoreSnapshotTitle">Restaurar snapshot</h3><button type="button" class="close" id="rsClose" aria-label="Cerrar restauración">&times;</button></div>
           <div class="modal-body">
-            <div class="restore-snap-info"><div class="field-row"><div class="field"><label>Target</label><div class="info-value">${escapeHtml(state.target.name)}</div></div><div class="field"><label>Snapshot</label><div class="info-value mono">${escapeHtml(snapshotId)}</div></div></div>${dateStr ? `<div class="field"><label>Fecha del snapshot</label><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}</div>
-            <div class="field"><label for="rsOverwrite">Sobrescribir existentes</label><select id="rsOverwrite"><option value="false">No sobrescribir archivos existentes</option><option value="true">Sobrescribir archivos existentes</option></select></div>
-            <div class="field"><label for="rsMode">Modo de restauracion</label><select id="rsMode"><option value="cold">Cold restore (apagar servicios asociados)</option><option value="hot">Hot restore (sin apagar servicios)</option></select><div class="helper" style="margin-top:4px;">Cold restore detiene los contenedores del target antes de restaurar y los reinicia al terminar. Hot restore restaura sin detener nada.</div></div>
-            <div class="restore-warning"><strong>Atencion:</strong> La restauracion reemplazara los datos del volumen con el contenido del snapshot. Asegurate de entender el impacto antes de continuar.</div>
+            <div class="restore-snap-info" aria-label="Resumen del snapshot"><div class="field-row"><div class="field"><div class="field-label">Target</div><div class="info-value">${escapeHtml(state.target.name)}</div></div><div class="field"><div class="field-label">Snapshot</div><div class="info-value mono" translate="no">${escapeHtml(snapshotId)}</div></div></div>${dateStr ? `<div class="field"><div class="field-label">Fecha del snapshot</div><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}</div>
+            <form id="rsForm" class="restore-snapshot-form">
+              <fieldset class="restore-snapshot-group restore-destructive-group">
+                <legend>Archivos existentes</legend>
+                <div class="field"><label for="rsOverwrite">Durante la restauración</label><select id="rsOverwrite" name="restore_overwrite" autocomplete="off"><option value="false">Conservar archivos existentes</option><option value="true">Reemplazar archivos existentes</option></select><div class="helper">Reemplazar puede eliminar cambios hechos después del snapshot.</div></div>
+              </fieldset>
+              <fieldset class="restore-snapshot-group">
+                <legend>Servicios durante la restauración</legend>
+                <div class="field"><label for="rsMode">Qué hacer con los servicios</label><select id="rsMode" name="restore_mode" autocomplete="off"><option value="cold">Detener servicios antes de restaurar</option><option value="hot">Mantener servicios activos</option></select><div class="helper">Puedes detener los servicios asociados para evitar escrituras durante la restauración, o mantenerlos activos si el entorno lo permite.</div></div>
+              </fieldset>
+              <fieldset class="restore-snapshot-group restore-ownership-group">
+                <legend>Permisos de archivos</legend>
+                <label class="restore-choice" for="rsOwnershipPreserve"><input id="rsOwnershipPreserve" name="restore_ownership_mode" type="radio" value="preserve" checked aria-controls="${ownershipEditorId}" /><span><strong>Conservar permisos del backup</strong><small>Opción recomendada. Conserva los permisos disponibles cuando el formato y el sistema lo permiten; no copia automáticamente identidades del backup.</small></span></label>
+                <label class="restore-choice" for="rsOwnershipMap"><input id="rsOwnershipMap" name="restore_ownership_mode" type="radio" value="map" aria-controls="${ownershipEditorId}" aria-expanded="false" /><span><strong>Aplicar permisos manuales</strong><small>Usa valores UID:GID numéricos definidos por ti. No se infieren ni se copian desde el backup.</small></span></label>
+                ${mappingEditor}
+              </fieldset>
+              <div id="rsOwnershipStatus" class="snapshot-status restore-snapshot-status" data-state="blocked" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">Para continuar, valida la configuración y confirma que aceptas reemplazar los datos.</div>
+              <label class="restore-snapshot-confirmation" for="rsOwnershipConfirm"><input id="rsOwnershipConfirm" name="restore_confirmation" type="checkbox" aria-describedby="rsOwnershipStatus rsRestoreWarning" /><span>Confirmo que revisé las opciones y acepto reemplazar los datos del target.</span></label>
+              <div id="rsRestoreWarning" class="restore-warning" role="alert"><strong>Acción destructiva:</strong> esta restauración reemplaza los datos del target y puede sobrescribir archivos existentes. Verifica el target antes de continuar.</div>
+            </form>
           </div>
-          <div class="modal-footer"><button type="button" class="btn" id="rsCancel">Cancelar</button><button type="button" class="btn primary" id="rsConfirm">Restaurar</button></div>
+           <div class="modal-footer"><button type="button" class="btn" id="rsCancel">Cancelar</button><button type="submit" form="rsForm" class="btn primary" id="rsConfirm" aria-describedby="rsOwnershipStatus rsRestoreWarning" disabled>Restaurar snapshot</button></div>
         </div>`;
+      const modeInputs = Array.from(overlay.querySelectorAll('input[name="restore_ownership_mode"]'));
+       const mappingInputs = Array.from(overlay.querySelectorAll("[data-restore-mapping]"));
+       const advancedInput = overlay.querySelector("#rsOwnershipJson");
+       const ownershipStatus = overlay.querySelector("#rsOwnershipStatus");
+       const confirmation = overlay.querySelector("#rsOwnershipConfirm");
+       const restoreButton = overlay.querySelector("#rsConfirm");
+      const selectedOwnershipMode = () => modeInputs.find(input => input.checked)?.value || "preserve";
+      const clearMappingErrors = () => mappingInputs.forEach(input => {
+        input.removeAttribute("aria-invalid");
+        const error = document.getElementById(`${input.id}Error`);
+        if (error) { error.hidden = true; error.textContent = ""; }
+      });
+      const setMappingError = (input, message) => {
+        input.setAttribute("aria-invalid", "true");
+        const error = document.getElementById(`${input.id}Error`);
+        if (error) { error.hidden = false; error.textContent = message; }
+      };
+      const readOwnership = () => {
+        const mode = selectedOwnershipMode();
+        const mappings = {};
+        if (advancedInput) advancedInput.removeAttribute("aria-invalid");
+        clearMappingErrors();
+        if (mappingInputs.length) {
+          const invalidInputs = [];
+          mappingInputs.forEach(input => {
+            const value = input.value.trim();
+            if (!value) return;
+            if (!/^\d+:\d+$/.test(value)) invalidInputs.push(input);
+            else mappings[input.dataset.mappingKey] = value;
+          });
+          invalidInputs.forEach(input => setMappingError(input, "Usa solo números en formato UID:GID, por ejemplo 1000:1000."));
+          if (invalidInputs.length) throw new Error("Revisa los valores UID:GID marcados.");
+        } else if (advancedInput) {
+          let value;
+           try {
+             value = JSON.parse(advancedInput.value || "{}");
+           } catch (error) {
+             throw new Error("Corrige la sintaxis del JSON y vuelve a validar la configuración.");
+           }
+          const requestedMode = value && value.mode ? value.mode : mode;
+          const rawMappings = value && value.mappings === undefined ? {} : value && value.mappings;
+          if (!value || Array.isArray(value) || value.schema_version !== 1 || requestedMode !== mode || !rawMappings || Array.isArray(rawMappings) || typeof rawMappings !== "object") {
+            throw new Error("La configuración avanzada debe usar schema_version 1, coincidir con la opción elegida y contener un objeto de mappings.");
+          }
+          const invalidMapping = Object.entries(rawMappings).find(([key, owner]) => !/^compose:[A-Za-z0-9][A-Za-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(key) || typeof owner !== "string" || !/^\d+:\d+$/.test(owner));
+          if (invalidMapping) throw new Error("Cada mapping debe usar una clave compose:proyecto:volumen y un valor UID:GID numérico.");
+          Object.assign(mappings, rawMappings);
+        }
+        if (mode === "preserve" && Object.keys(mappings).length) throw new Error("La opción de conservar permisos no admite mappings.");
+        if (mode === "map" && !Object.keys(mappings).length) throw new Error("Escribe al menos un valor UID:GID para aplicar permisos manuales.");
+        return { schema_version: 1, mode, mappings };
+      };
+       const setOwnershipStatus = (stateName, message) => {
+         if (!ownershipStatus) return;
+         ownershipStatus.dataset.state = stateName;
+         ownershipStatus.textContent = message;
+       };
+       const syncRestoreButton = policy => {
+         const ready = Boolean(policy) && Boolean(confirmation?.checked);
+         if (restoreButton) restoreButton.disabled = !ready;
+         return ready;
+       };
+       const preview = () => {
+         try {
+           const policy = readOwnership();
+           const ready = syncRestoreButton(policy);
+           const mappingCount = Object.keys(policy.mappings).length;
+           setOwnershipStatus(ready ? "ready" : "blocked", ready
+             ? policy.mode === "preserve"
+               ? "Configuración válida. Se conservarán los permisos del backup."
+               : `Configuración válida. Se aplicarán permisos manuales a ${mappingCount === 1 ? "1 volumen" : `${mappingCount} volúmenes`}.`
+             : "Para continuar, valida la configuración y confirma que aceptas reemplazar los datos.");
+           return policy;
+         } catch (error) {
+           syncRestoreButton(null);
+           if (advancedInput && !mappingInputs.length) advancedInput.setAttribute("aria-invalid", "true");
+           setOwnershipStatus("blocked", error.message);
+           return null;
+        }
+      };
+      const syncAdvancedOwnershipMode = () => {
+        if (!advancedInput) return;
+        try {
+          const value = JSON.parse(advancedInput.value || "{}");
+          if (!value || Array.isArray(value) || typeof value !== "object") return;
+          value.schema_version = 1;
+          value.mode = selectedOwnershipMode();
+          if (!value.mappings || typeof value.mappings !== "object" || Array.isArray(value.mappings)) value.mappings = {};
+          advancedInput.value = JSON.stringify(value, null, 2);
+        } catch (error) {
+          // Keep malformed advanced input untouched so validation can explain how to fix it.
+        }
+      };
+      const updateOwnershipEditor = () => {
+        const manual = document.getElementById("rsOwnershipManual");
+        const isManual = selectedOwnershipMode() === "map";
+        if (manual) {
+          manual.hidden = !isManual;
+          manual.setAttribute("aria-hidden", String(!isManual));
+        }
+        const advanced = document.getElementById("rsOwnershipAdvanced");
+        if (advanced) advanced.open = isManual;
+        const mapInput = document.getElementById("rsOwnershipMap");
+        if (mapInput) mapInput.setAttribute("aria-expanded", String(isManual));
+        syncAdvancedOwnershipMode();
+        preview();
+      };
+       modeInputs.forEach(input => input.addEventListener("change", updateOwnershipEditor));
+       mappingInputs.forEach(input => input.addEventListener("input", preview));
+       if (advancedInput) advancedInput.addEventListener("input", preview);
+       if (confirmation) confirmation.addEventListener("change", preview);
       const backToExplorer = () => renderSnapshotModalFrame();
       document.getElementById("rsClose").addEventListener("click", backToExplorer);
       document.getElementById("rsCancel").addEventListener("click", backToExplorer);
-      document.getElementById("rsConfirm").addEventListener("click", event => withBtnLoading(event.currentTarget, async () => {
+      document.getElementById("rsForm").addEventListener("submit", event => {
+        event.preventDefault();
+        const policy = preview();
+        if (!policy) {
+          const firstInvalid = overlay.querySelector('[aria-invalid="true"]');
+          if (firstInvalid) firstInvalid.focus();
+          else if (ownershipStatus) ownershipStatus.focus();
+          return;
+        }
+         confirmation.removeAttribute("aria-invalid");
+         if (!confirmation.checked) {
+           confirmation.setAttribute("aria-invalid", "true");
+           syncRestoreButton(policy);
+           setOwnershipStatus("blocked", "La configuración es válida, pero debes confirmar que aceptas reemplazar los datos para continuar.");
+           confirmation.focus();
+           return;
+         }
+         if (!restoreButton || restoreButton.disabled) {
+           setOwnershipStatus("blocked", "Valida la configuración y confirma que aceptas reemplazar los datos para continuar.");
+           return;
+         }
+        policy.confirmation = "confirmed";
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
         const stopContainers = document.getElementById("rsMode").value === "cold";
-        const job = await apiPost(`/api/v1/targets/${encodeURIComponent(state.target.id)}/restore/run`, {
+        const request = {
           requested_by: "ui",
           snapshot_id: snapshotId,
           force_overwrite: forceOverwrite,
           stop_containers: stopContainers,
+          restore_ownership: policy,
+        };
+        const values = Object.values(policy.mappings);
+        if (policy.mode === "map" && values.length === 1) request.chown = values[0];
+        void withBtnLoading(event.submitter || document.getElementById("rsConfirm"), async () => {
+          const job = await apiPost(`/api/v1/targets/${encodeURIComponent(state.target.id)}/restore/run`, request);
+          closeSnapshotsModal();
+          openLogPanel(job.id, state.target.id);
+        }, "Restaurando…").catch(error => {
+          setOwnershipStatus("blocked", `No se pudo iniciar la restauración: ${error.message}`);
         });
-        closeSnapshotsModal();
-        openLogPanel(job.id, state.target.id);
-      }, "Restaurando...").catch(() => {}));
+      });
+      updateOwnershipEditor();
       const cancel = document.getElementById("rsCancel");
       if (cancel && document.contains(cancel)) cancel.focus();
     }
@@ -4515,14 +4735,20 @@ docker compose up -d
       const storageOptions = state.storageProfiles.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.storage_profile_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
       const retentionOptions = state.retentionPolicies.map(r => `<option value="${escapeHtml(r.id)}" ${r.id === target.retention_policy_id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
       overlay.innerHTML = `
-        <div class="modal">
-          <div class="modal-header">
-            <h3>Editar target</h3>
-            <button class="close" id="modalClose">&times;</button>
-          </div>
-          <div class="modal-body">
-            <form id="editTargetForm">
-              <div class="form-grid">
+         <div class="modal edit-target-modal" role="dialog" aria-modal="true" aria-labelledby="editTargetModalTitle">
+           <div class="modal-header">
+             <h3 id="editTargetModalTitle">Editar target</h3>
+              <button class="close" id="modalClose" aria-label="Cerrar">&times;</button>
+           </div>
+           <div class="modal-body edit-target-modal-body">
+             <form id="editTargetForm" class="edit-target-form">
+               <div class="edit-target-layout">
+                 <section class="edit-target-settings" aria-labelledby="editTargetSettingsTitle">
+                   <div class="edit-target-panel-heading">
+                     <h4 id="editTargetSettingsTitle">Configuración general</h4>
+                     <p class="helper">Ajusta la ejecución, almacenamiento y retención de este target.</p>
+                   </div>
+                   <div class="form-grid">
                 <div class="field"><label for="etName">Nombre</label><input id="etName" value="${escapeHtml(target.name)}" required /></div>
                 <div class="field"><label for="etWorkerId">Worker</label><select id="etWorkerId" ${eligibleWorkers.length || currentWorkerEligible ? "" : "disabled"}>${workerOptions || '<option value="">-- No hay workers online --</option>'}</select>${workerWarning}<div class="helper">Cambiar el worker solo reasigna el target; no copia volumenes ni inventario entre workers.</div></div>
                 <div class="field"><label for="etBackupMode">Modo</label><select id="etBackupMode"><option value="hot" ${target.backup_mode === "hot" ? "selected" : ""}>hot</option><option value="cold" ${target.backup_mode === "cold" ? "selected" : ""}>cold</option></select></div>
@@ -4530,10 +4756,18 @@ docker compose up -d
                  <div class="field"><label for="etStorageProfileId">Storage profile</label><select id="etStorageProfileId"><option value="">-- Ninguno --</option>${storageOptions}</select></div>
                  <div class="field"><label for="etPathStorage">Ruta remota del target (opcional)</label><input id="etPathStorage" value="${escapeHtml(target.path_storage || "")}" placeholder="clientes/mi-target" /><div class="helper">Subruta POSIX relativa del repositorio restic. Reemplaza el sufijo automatico del target y no cambia la configuracion del storage profile.</div></div>
                  <div class="field"><label for="etRetentionPolicyId">Retencion</label><select id="etRetentionPolicyId"><option value="">-- Ninguna --</option>${retentionOptions}</select></div>
-                <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion propia del target. Vacio = usa el cron global; si tampoco existe, solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
-                <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
-              </div>
-              <details class="sub-section">
+               <div class="field"><label for="etCronExpression">Cron (opcional)</label><input id="etCronExpression" value="${escapeHtml(target.cron_expression || "")}" placeholder="0 3 * * * (diario 3am)" /><div class="helper">Expresion propia del target. Vacio = usa el cron global; si tampoco existe, solo manual.</div><div id="etCronPreview" class="cron-preview"></div></div>
+               <div class="field"><label for="etResticPasswordSecret">Password restic (secret)</label><select id="etResticPasswordSecret"><option value="">-- Usar default de Settings --</option>${state.secrets.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === target.restic_password_secret_id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></div>
+                   </div>
+                 </section>
+                 <section class="edit-target-volume-panel" aria-labelledby="editTargetVolumeLabel">
+                 <div class="volume-selector-heading"><span id="editTargetVolumeLabel" class="field-label">Volúmenes incluidos en el backup</span><span id="editTargetVolumeSummary" class="volume-selection-count" aria-live="polite"></span></div>
+                 <div class="helper">Proyecto Compose: <strong>${escapeHtml(target.compose_project || "no configurado")}</strong></div>
+                 <div id="editTargetVolumeStatus" class="helper" role="status" aria-live="polite">Cargando inventario del worker…</div>
+                 <div id="editTargetVolumeList" class="volume-list" role="group" aria-labelledby="editTargetVolumeLabel" aria-describedby="editTargetVolumeStatus"><div class="helper">Cargando volúmenes disponibles…</div></div>
+                 </section>
+               </div>
+               <details class="sub-section edit-target-advanced">
                 <summary>Opciones avanzadas</summary>
                 <div class="form-grid" style="margin-top:8px">
                   <div class="field"><label for="etRuntimeCommand">Comando de backup (opcional)</label><input id="etRuntimeCommand" value="${escapeHtml(target.runtime_command || "")}" placeholder="Por defecto: /root/backup.sh" /></div>
@@ -4541,14 +4775,14 @@ docker compose up -d
                   <div class="field full"><label for="etRestoreDefaults">Restore defaults JSON (opcional)</label><textarea id="etRestoreDefaults">${escapeHtml(JSON.stringify(target.restore_defaults || {}, null, 2))}</textarea></div>
                 </div>
               </details>
-              <div id="etError" class="form-error" style="display:none;"></div>
-              <div class="btn-row">
-                <button type="submit" class="btn primary sm" id="etSubmit" ${currentWorkerEligible ? "" : "disabled"}>Guardar cambios</button>
-                <button type="button" class="btn ghost sm" id="etCancel">Cancelar</button>
-              </div>
-            </form>
-          </div>
-        </div>
+               <div id="etError" class="form-error edit-target-form-error" style="display:none;"></div>
+             </form>
+           </div>
+           <div class="modal-footer edit-target-footer">
+             <button type="submit" class="btn primary sm" id="etSubmit" form="editTargetForm" ${currentWorkerEligible ? "" : "disabled"}>Guardar cambios</button>
+             <button type="button" class="btn ghost sm" id="etCancel">Cancelar</button>
+           </div>
+         </div>
       `;
       overlay.classList.add("active");
       document.getElementById("modalClose").addEventListener("click", closeTargetModal);
@@ -4557,6 +4791,70 @@ docker compose up -d
       const editWorkerSelect = document.getElementById("etWorkerId");
       const editSubmit = document.getElementById("etSubmit");
       const editError = document.getElementById("etError");
+      const editVolumeState = { stacks: {}, expanded: {} };
+      let editVolumeSelectionReady = false;
+      let editVolumeRequestId = 0;
+      const editVolumeStatus = document.getElementById("editTargetVolumeStatus");
+      const editVolumeList = document.getElementById("editTargetVolumeList");
+      const setEditVolumeStatus = (message, warning = false) => {
+        if (!editVolumeStatus) return;
+        editVolumeStatus.textContent = message;
+        editVolumeStatus.className = warning ? "helper volume-inline-warning-text" : "helper";
+      };
+      const loadEditVolumeSelection = async () => {
+        const requestId = ++editVolumeRequestId;
+        editVolumeSelectionReady = false;
+        const workerId = editWorkerSelect && editWorkerSelect.value;
+        const composeProject = target.compose_project;
+        editVolumeState.stacks = {};
+        editVolumeState.expanded = {};
+        if (editVolumeList) editVolumeList.innerHTML = '<div class="helper">Cargando volúmenes disponibles…</div>';
+        if (!workerId) {
+          setEditVolumeStatus("Selecciona un worker para consultar sus volúmenes.", true);
+          return;
+        }
+        if (!composeProject) {
+          setEditVolumeStatus("Este target no tiene un Compose project; no hay volúmenes seleccionables desde el inventario.", true);
+          if (editVolumeList) editVolumeList.innerHTML = '<div class="helper">No hay un Compose project configurado para este target.</div>';
+          return;
+        }
+        const snapshot = await fetchWorkerInventory(workerId);
+        if (requestId !== editVolumeRequestId || !document.getElementById("editTargetVolumeList")) return;
+        if (!snapshot || !snapshot.inventory) {
+          setEditVolumeStatus("No se pudo cargar el inventario del worker. La selección actual se conservará si guardas otros cambios.", true);
+          if (editVolumeList) editVolumeList.innerHTML = '<div class="helper">Inventario no disponible.</div>';
+          return;
+        }
+        if (!snapshot.inventory.docker_available) {
+          setEditVolumeStatus("El worker no tiene acceso al daemon de Docker. La selección actual se conservará.", true);
+          if (editVolumeList) editVolumeList.innerHTML = '<div class="helper">No se pueden consultar volúmenes sin acceso a Docker.</div>';
+          return;
+        }
+        const project = getWorkerComposeProjects(workerId).find(item => item.name === composeProject);
+        if (!project) {
+          setEditVolumeStatus(`El proyecto Compose "${composeProject}" no está presente en el inventario actual. La selección existente se conservará.`, true);
+          if (editVolumeList) editVolumeList.innerHTML = '<div class="helper">Proyecto Compose no disponible en este worker.</div>';
+          return;
+        }
+        const candidates = getProjectVolumeCandidates(project);
+        renderVolumeCheckboxes(project, {
+          containerId: "editTargetVolumeList",
+          selectionState: editVolumeState,
+          initialSelectedKeys: getTargetVolumeSelectionKeys(target, candidates),
+          summaryId: "editTargetVolumeSummary",
+          noProjectMessage: "Selecciona un Compose project para ver los volúmenes disponibles.",
+          emptyMessage: "No hay volúmenes seguros y seleccionables en este proyecto.",
+        });
+        editVolumeSelectionReady = candidates.length > 0
+          && document.getElementById("editTargetVolumeList")?.dataset.volumeSourceSelection === "true"
+          && candidates.some(candidate => Boolean(candidate.source));
+        setEditVolumeStatus(
+          editVolumeSelectionReady
+            ? `Inventario actualizado para ${composeProject}. Puedes ajustar los volúmenes incluidos.`
+            : "El inventario no ofrece fuentes estables para editar esta selección; se conservarán los volúmenes actuales.",
+          !editVolumeSelectionReady,
+        );
+      };
       const updateEditWorkerEligibility = () => {
         const selectedWorker = (state.workers || []).find(w => String(w.id) === String(editWorkerSelect && editWorkerSelect.value));
         const eligible = Boolean(selectedWorker && selectedWorker.status === "online");
@@ -4569,13 +4867,17 @@ docker compose up -d
           editError.style.display = "none";
         }
       };
-      if (editWorkerSelect) editWorkerSelect.addEventListener("change", updateEditWorkerEligibility);
+      if (editWorkerSelect) editWorkerSelect.addEventListener("change", () => {
+        updateEditWorkerEligibility();
+        void loadEditVolumeSelection();
+      });
       updateEditWorkerEligibility();
+      void loadEditVolumeSelection();
       document.getElementById("editTargetForm").addEventListener("submit", async (e) => {
         e.preventDefault();
         try {
           await withBtnLoading(e.submitter, async () => {
-            await apiPatch(`/api/v1/targets/${target.id}`, {
+            const targetUpdate = {
               name: document.getElementById("etName").value.trim(),
               worker_id: document.getElementById("etWorkerId").value,
               backup_mode: document.getElementById("etBackupMode").value,
@@ -4588,10 +4890,14 @@ docker compose up -d
               restic_password_secret_id: emptyToNull(document.getElementById("etResticPasswordSecret").value),
               restore_defaults: parseJsonField("etRestoreDefaults", "restore defaults"),
               cron_expression: emptyToNull(document.getElementById("etCronExpression").value),
-            });
+            };
+            if (editVolumeSelectionReady) {
+              targetUpdate.volume_sources = getSelectedVolumeSourcesFor("editTargetVolumeList");
+            }
+            await apiPatch(`/api/v1/targets/${target.id}`, targetUpdate);
             closeTargetModal();
             await refreshAll();
-          }, "Guardando...");
+          }, "Guardando…");
         } catch (error) {
           if (editError) {
             editError.textContent = `Error guardando target: ${error.message}`;
@@ -4794,7 +5100,7 @@ docker compose up -d
     function renderJobDetailSummary(job, root) {
       const summary = root ? root.querySelector("[data-job-detail-summary]") : null;
       if (!summary) return;
-      summary.innerHTML = `${renderJobProgress(job)}${renderJobStorageContext(job)}`;
+      summary.innerHTML = `${renderJobProgress(job)}${renderJobStorageContext(job)}${renderRestoreOwnershipEvidence(job)}`;
     }
 
     function renderTargetJobLogsInto(job, root) {
@@ -5044,11 +5350,47 @@ docker compose up -d
 
     let volumeSelectionState = { stacks: {}, expanded: {} };
 
+    function volumeCandidateIsUnsafe(candidate) {
+      if (!candidate || typeof candidate !== "object") return true;
+      const mountType = String(candidate.mount_type || candidate.type || "").toLowerCase();
+      if (["secret", "config"].includes(mountType)) return true;
+      const values = [candidate.bind, candidate.source]
+        .filter(value => typeof value === "string" && value)
+        .map(value => value.replace(/\/+$/, "") || "/");
+      return values.some(value => (
+        ["/var/run/docker.sock", "/run/docker.sock", "/run/secrets", "/run/rclone-config"].includes(value)
+        || value.startsWith("/run/secrets/")
+        || value.startsWith("/run/rclone-config/")
+        || value.endsWith(".sock")
+        || value.endsWith(".socket")
+      ));
+    }
+
+    function getProjectVolumeCandidateIssues(project) {
+      if (!project) return 0;
+      if (Array.isArray(project.volume_candidates)) {
+        return project.volume_candidates.filter(candidate => (
+          !candidate
+          || candidate.anonymous === true
+          || !candidate.bind
+          || !candidate.source
+          || volumeCandidateIsUnsafe(candidate)
+        )).length;
+      }
+      const runtimeVols = project.runtime_volumes || {};
+      if (Object.keys(runtimeVols).length) {
+        return Object.entries(runtimeVols).filter(([source, spec]) => (
+          !source || !spec || !spec.bind || volumeCandidateIsUnsafe({ source, bind: spec.bind })
+        )).length;
+      }
+      return 0;
+    }
+
     function getProjectVolumeCandidates(project) {
       if (!project) return [];
       if (Array.isArray(project.volume_candidates)) {
         return project.volume_candidates
-          .filter(candidate => candidate && candidate.anonymous !== true && candidate.bind && candidate.source)
+          .filter(candidate => candidate && candidate.anonymous !== true && candidate.bind && candidate.source && !volumeCandidateIsUnsafe(candidate))
           .map(candidate => ({
             source: candidate.source,
             name: candidate.name || candidate.source,
@@ -5061,7 +5403,7 @@ docker compose up -d
       }
       const runtimeVols = project.runtime_volumes || {};
       const runtimeCandidates = Object.entries(runtimeVols)
-        .filter(([source, spec]) => source && spec && spec.bind)
+        .filter(([source, spec]) => source && spec && spec.bind && !volumeCandidateIsUnsafe({ source, bind: spec.bind }))
         .map(([source, spec]) => ({
           source,
           name: source,
@@ -5072,7 +5414,7 @@ docker compose up -d
           containers: [],
         }));
       if (runtimeCandidates.length) return runtimeCandidates;
-      return (project.volume_targets || []).map(bind => ({
+      return (project.volume_targets || []).filter(bind => !volumeCandidateIsUnsafe({ bind })).map(bind => ({
         source: "",
         name: "",
         bind,
@@ -5087,26 +5429,40 @@ docker compose up -d
       return candidate.source || candidate.bind;
     }
 
-    function renderVolumeCheckboxes(project) {
-      const container = document.getElementById("targetVolumeList");
+    function renderVolumeCheckboxes(project, options = {}) {
+      const containerId = options.containerId || "targetVolumeList";
+      const selectionState = options.selectionState || volumeSelectionState;
+      const initialSelectedKeys = options.initialSelectedKeys ? new Set(options.initialSelectedKeys) : null;
+      const summary = options.summaryId ? document.getElementById(options.summaryId) : null;
+      const container = document.getElementById(containerId);
       if (!container) return;
       if (!project) {
         container.dataset.volumeSourceSelection = "false";
-        container.innerHTML = `<div class="helper">Selecciona un compose project para ver los volumenes disponibles.</div>`;
+        container.innerHTML = `<div class="helper">${escapeHtml(options.noProjectMessage || "Selecciona un compose project para ver los volumenes disponibles.")}</div>`;
+        if (summary) summary.textContent = "";
         return;
       }
       const candidates = getProjectVolumeCandidates(project);
       const hasSourceSelection = Array.isArray(project.volume_candidates) || candidates.some(candidate => Boolean(candidate.source));
       container.dataset.volumeSourceSelection = hasSourceSelection ? "true" : "false";
+      const candidateIssues = getProjectVolumeCandidateIssues(project);
+      const warning = candidateIssues
+        ? `<div class="volume-inline-warning" role="status">Se ocultaron ${candidateIssues} montajes anónimos, protegidos o incompletos porque no se pueden incluir de forma segura.</div>`
+        : "";
       if (!candidates.length) {
-        container.innerHTML = `<div class="helper">Este proyecto no tiene volumenes de datos detectados.</div>`;
+        container.innerHTML = `${warning}<div class="helper">${escapeHtml(options.emptyMessage || "Este proyecto no tiene volúmenes de datos seleccionables.")}</div>`;
+        if (summary) summary.textContent = "0/0 volúmenes seleccionados";
         return;
       }
       const stackKey = project.name;
-      if (!volumeSelectionState.stacks[stackKey]) {
-        volumeSelectionState.stacks[stackKey] = {};
+      if (!selectionState.stacks[stackKey]) {
+        selectionState.stacks[stackKey] = {};
+        candidates.forEach(candidate => {
+          const key = volumeCandidateKey(candidate);
+          selectionState.stacks[stackKey][key] = initialSelectedKeys ? initialSelectedKeys.has(key) : true;
+        });
       }
-      const selection = volumeSelectionState.stacks[stackKey];
+      const selection = selectionState.stacks[stackKey];
       const candidateKeys = new Set(candidates.map(volumeCandidateKey));
       candidates.forEach(candidate => {
         const key = volumeCandidateKey(candidate);
@@ -5115,22 +5471,25 @@ docker compose up -d
       Object.keys(selection).forEach(key => {
         if (!candidateKeys.has(key)) delete selection[key];
       });
-      if (volumeSelectionState.expanded[stackKey] === undefined) {
-        volumeSelectionState.expanded[stackKey] = true;
+      if (selectionState.expanded[stackKey] === undefined) {
+        selectionState.expanded[stackKey] = true;
       }
-      const isExpanded = volumeSelectionState.expanded[stackKey];
+      const isExpanded = selectionState.expanded[stackKey];
       const selectedCount = candidates.filter(candidate => selection[volumeCandidateKey(candidate)]).length;
       const totalCount = candidates.length;
+      const bodyId = `${containerId}Body`;
+      if (summary) summary.textContent = `${selectedCount}/${totalCount} volúmenes seleccionados`;
       container.innerHTML = `
+        ${warning}
         <div class="volume-group" data-stack="${escapeHtml(stackKey)}">
-          <div class="volume-group-header" data-stack-toggle="${escapeHtml(stackKey)}">
-            <div>
-              <div class="stack-name">${escapeHtml(stackKey)}</div>
-              <div class="stack-meta">${selectedCount}/${totalCount} volumenes seleccionados</div>
-            </div>
-            <div class="stack-toggle">${isExpanded ? "▾" : "▸"}</div>
-           </div>
-           <div class="volume-group-body${isExpanded ? "" : " collapsed"}">
+           <button type="button" class="volume-group-header" data-stack-toggle="${escapeHtml(stackKey)}" aria-expanded="${String(isExpanded)}" aria-controls="${bodyId}">
+             <div>
+               <div class="stack-name">${escapeHtml(stackKey)}</div>
+               <div class="stack-meta">${selectedCount}/${totalCount} volúmenes seleccionados</div>
+             </div>
+                  <div class="stack-toggle" aria-hidden="true">${isExpanded ? "▾" : "▸"}</div>
+           </button>
+           <div id="${bodyId}" class="volume-group-body${isExpanded ? "" : " collapsed"}">
              ${candidates.map(candidate => {
                const key = volumeCandidateKey(candidate);
                const isSelected = selection[key];
@@ -5144,42 +5503,45 @@ docker compose up -d
                const containerContext = candidate.containers.length
                  ? `Contenedor: ${candidate.containers.map(name => escapeHtml(name)).join(", ")}`
                  : "";
-               const context = [serviceContext, containerContext].filter(Boolean).join(" · ");
-               return `<div class="volume-card ${isSelected ? "selected" : ""}" data-volume="${escapeHtml(candidate.bind)}" data-bind="${escapeHtml(candidate.bind)}" data-source="${escapeHtml(candidate.source || "")}" data-volume-key="${escapeHtml(key)}" data-stack="${escapeHtml(stackKey)}">
-                 <div class="vol-icon">📦</div>
-                 <div class="vol-info">
-                   <div class="vol-name">${escapeHtml(sourceName)}</div>
-                   <div class="vol-path">${escapeHtml(candidate.bind)}</div>
-                   ${sourceDetail}
-                   ${context ? `<div class="helper">${context}</div>` : ""}
-                 </div>
-                 <div class="vol-check"></div>
-               </div>`;
-            }).join("")}
-          </div>
-        </div>
-      `;
+                const modeContext = `Modo: ${escapeHtml(candidate.mode || "ro")}`;
+                const typeContext = `Tipo: ${escapeHtml(candidate.mount_type || "volume")}`;
+                const context = [modeContext, typeContext, serviceContext, containerContext].filter(Boolean).join(" · ");
+                return `<label class="volume-card ${isSelected ? "selected" : ""}" data-volume="${escapeHtml(candidate.bind)}" data-bind="${escapeHtml(candidate.bind)}" data-source="${escapeHtml(candidate.source || "")}" data-volume-key="${escapeHtml(key)}" data-stack="${escapeHtml(stackKey)}">
+                  <input type="checkbox" class="volume-checkbox" name="volume_sources" data-volume-key="${escapeHtml(key)}" ${isSelected ? "checked" : ""} aria-label="Incluir ${escapeHtml(sourceName)} en el backup" />
+                  <div class="vol-icon">📦</div>
+                  <div class="vol-info">
+                    <div class="vol-name">${escapeHtml(sourceName)}</div>
+                    <div class="vol-path">${escapeHtml(candidate.bind)}</div>
+                    ${sourceDetail}
+                    <div class="helper">${context}</div>
+                  </div>
+                  <div class="vol-check"></div>
+                </label>`;
+             }).join("")}
+           </div>
+         </div>
+       `;
       const group = container.querySelector(".volume-group");
       if (group) {
         const header = group.querySelector(".volume-group-header");
         if (header) {
           header.addEventListener("click", () => {
-            volumeSelectionState.expanded[stackKey] = !volumeSelectionState.expanded[stackKey];
-            renderVolumeCheckboxes(project);
+            selectionState.expanded[stackKey] = !selectionState.expanded[stackKey];
+            renderVolumeCheckboxes(project, options);
           });
-         }
-         group.querySelectorAll(".volume-card").forEach(card => {
-           card.addEventListener("click", () => {
-             const key = card.dataset.volumeKey || card.dataset.source || card.dataset.volume;
-             selection[key] = !selection[key];
-             renderVolumeCheckboxes(project);
-           });
-         });
+        }
+        group.querySelectorAll(".volume-checkbox").forEach(input => {
+          input.addEventListener("change", () => {
+            const key = input.dataset.volumeKey || input.closest(".volume-card")?.dataset.volume;
+            selection[key] = input.checked;
+            renderVolumeCheckboxes(project, options);
+          });
+        });
       }
     }
 
-    function getSelectedVolumeCandidates() {
-      const container = document.getElementById("targetVolumeList");
+    function getSelectedVolumeCandidatesFor(containerId) {
+      const container = document.getElementById(containerId);
       if (!container) return [];
       return Array.from(container.querySelectorAll(".volume-card.selected")).map(card => ({
         source: card.dataset.source || "",
@@ -5187,12 +5549,55 @@ docker compose up -d
       }));
     }
 
+    function getSelectedVolumeCandidates() {
+      return getSelectedVolumeCandidatesFor("targetVolumeList");
+    }
+
+    function getSelectedVolumesFor(containerId) {
+      return [...new Set(getSelectedVolumeCandidatesFor(containerId).map(candidate => candidate.bind).filter(Boolean))];
+    }
+
     function getSelectedVolumes() {
-      return [...new Set(getSelectedVolumeCandidates().map(candidate => candidate.bind).filter(Boolean))];
+      return getSelectedVolumesFor("targetVolumeList");
+    }
+
+    function getSelectedVolumeSourcesFor(containerId) {
+      return [...new Set(getSelectedVolumeCandidatesFor(containerId).map(candidate => candidate.source).filter(Boolean))];
     }
 
     function getSelectedVolumeSources() {
-      return [...new Set(getSelectedVolumeCandidates().map(candidate => candidate.source).filter(Boolean))];
+      return getSelectedVolumeSourcesFor("targetVolumeList");
+    }
+
+    function getTargetVolumeSelectionKeys(target, candidates) {
+      const runtimeVolumes = target && target.runtime_volumes && typeof target.runtime_volumes === "object"
+        ? target.runtime_volumes
+        : {};
+      const runtimeEntries = Object.entries(runtimeVolumes).filter(([, spec]) => spec && typeof spec === "object");
+      const runtimeSources = new Set(runtimeEntries.map(([source]) => source));
+      const bindCounts = new Map();
+      candidates.forEach(candidate => bindCounts.set(candidate.bind, (bindCounts.get(candidate.bind) || 0) + 1));
+      const selected = new Set();
+      runtimeEntries.forEach(([source, spec]) => {
+        candidates.forEach(candidate => {
+          if (candidate.source === source) {
+            selected.add(volumeCandidateKey(candidate));
+          } else if (!runtimeSources.has(candidate.source) && spec.bind === candidate.bind && bindCounts.get(candidate.bind) === 1) {
+            selected.add(volumeCandidateKey(candidate));
+          }
+        });
+      });
+      if (runtimeEntries.length) return selected;
+
+      const targetPaths = Array.isArray(target && target.volume_targets)
+        ? target.volume_targets.filter(path => typeof path === "string")
+        : [];
+      if (targetPaths.length) {
+        return new Set(candidates.filter(candidate => targetPaths.includes(candidate.bind)).map(volumeCandidateKey));
+      }
+
+      // Empty volume_targets/runtime_volumes is the legacy "use the worker default" contract.
+      return new Set(candidates.map(volumeCandidateKey));
     }
 
     function bindTargetForm() {

@@ -151,6 +151,42 @@ def _secret_to_public(secret):
     return payload
 
 
+_KUBERNETES_CREDENTIAL_FIELDS = {
+    "bearer_token",
+    "cluster_credentials",
+    "cluster_token",
+    "kube_config",
+    "kubeconfig",
+    "kubernetes_bearer_token",
+    "kubernetes_credentials",
+    "kubernetes_token",
+}
+
+
+def _reject_kubernetes_target_credentials(body):
+    if not isinstance(body, dict):
+        return
+    for key in body:
+        normalized = str(key).strip().lower().replace("-", "_")
+        if normalized in _KUBERNETES_CREDENTIAL_FIELDS or "bearer_token" in normalized or (
+            "kube" in normalized and any(marker in normalized for marker in ("token", "config", "credential"))
+        ):
+            raise ValueError("Kubernetes bearer tokens and kubeconfigs must not be provided")
+    runtime_type = str(body.get("runtime_type") or "").strip().lower()
+    if runtime_type != "kubernetes":
+        return
+    for key in ("runtime_environment", "runtime_volumes", "restore_defaults"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            for nested_key in value:
+                normalized = str(nested_key).strip().lower().replace("-", "_")
+                if normalized in _KUBERNETES_CREDENTIAL_FIELDS or (
+                    "kube" in normalized
+                    and any(marker in normalized for marker in ("token", "config", "credential"))
+                ):
+                    raise ValueError("Kubernetes bearer tokens and kubeconfigs must not be provided")
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -318,6 +354,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def _target_jsonable(self, target):
         payload = _to_jsonable(target)
         service = self._control_plane_service()
+        payload["runtime_volumes"] = _to_jsonable(service._target_runtime_volumes_for_view(target))
         worker = service.worker_repository.get(target.worker_id)
         if worker is None:
             worker_name = None
@@ -783,9 +820,13 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/targets":
                 if not self._require_auth(ROLE_ADMIN, api_mode=True):
                     return
+                _reject_kubernetes_target_credentials(body)
                 target = self._control_plane_service().register_target(
                     name=body.get("name") or "target",
                     worker_id=body["worker_id"],
+                    runtime_type=body.get("runtime_type"),
+                    namespace=body.get("namespace"),
+                    pvc_names=body.get("pvc_names"),
                     compose_project=body.get("compose_project"),
                     volume_targets=body.get("volume_targets"),
                     backup_mode=body.get("backup_mode") or "hot",
@@ -1023,7 +1064,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     log_lines=body.get("log_lines"),
                     lease_token=body.get("lease_token"),
                 )
-                return self._write_json(200, _to_jsonable(job))
+                return self._write_json(200, self._control_plane_service().public_job_view(job))
 
             if (
                 len(parts) == 7
@@ -1145,12 +1186,15 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
             body = self._read_json_body() or {}
             parts = self._path_parts(path)
             if len(parts) == 4 and parts[:3] == ["api", "v1", "targets"]:
+                _reject_kubernetes_target_credentials(body)
                 target_update = dict(
                     target_id=parts[3],
+                    runtime_type=body.get("runtime_type"),
                     name=body.get("name"),
                     worker_id=body.get("worker_id"),
                     compose_project=body.get("compose_project"),
                     volume_targets=body.get("volume_targets"),
+                    volume_sources=body.get("volume_sources"),
                     backup_mode=body.get("backup_mode"),
                     backup_strategy=body.get("backup_strategy"),
                     runtime_image=body.get("runtime_image"),
@@ -1167,6 +1211,10 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 )
                 if "path_storage" in body:
                     target_update["path_storage"] = body.get("path_storage")
+                if "namespace" in body:
+                    target_update["namespace"] = body.get("namespace")
+                if "pvc_names" in body:
+                    target_update["pvc_names"] = body.get("pvc_names")
                 target = self._control_plane_service().update_target(**target_update)
                 if self._live_service() is not None:
                     self._live_service().invalidate_target(parts[3], "configuration_changed")

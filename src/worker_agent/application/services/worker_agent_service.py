@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 from src.control_plane.domain.models import JobStatus
 from src.worker_agent.domain.models import WorkerAgentConfig, WorkerJobExecutionResult
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
+from src.worker_agent.application.ports.runtime_port import RuntimePort
 from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource, LiveRuntimeError
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
@@ -221,7 +222,7 @@ class WorkerAgentService:
         self,
         config: WorkerAgentConfig,
         control_plane_client: ControlPlaneClient,
-        docker_runtime: DockerRuntimeAdapter,
+        docker_runtime: RuntimePort,
         snapshot_cache: Optional[RedisSnapshotCache] = None,
         recovery_file: Optional[str] = None,
         recovery_journal: Optional[WorkerJobRecoveryJournal] = None,
@@ -229,6 +230,9 @@ class WorkerAgentService:
     ):
         self.config = config
         self.control_plane_client = control_plane_client
+        self.runtime = docker_runtime
+        # Keep the legacy attribute for callers that still use Docker-specific
+        # live-file helpers while all job dispatch goes through RuntimePort.
         self.docker_runtime = docker_runtime
         self.snapshot_cache = snapshot_cache
         self.recovery_journal = recovery_journal or (
@@ -238,6 +242,8 @@ class WorkerAgentService:
 
     def ensure_registered(self) -> str:
         if self.config.worker_id and self.control_plane_client.credential_store and self.control_plane_client.credential_store.load():
+            if hasattr(self.runtime, "worker_id"):
+                self.runtime.worker_id = self.config.worker_id
             return self.config.worker_id
         response = self.control_plane_client.register_worker(
             name=self.config.name,
@@ -247,13 +253,15 @@ class WorkerAgentService:
             worker_id=self.config.worker_id,
         )
         self.config.worker_id = response["worker_id"]
+        if hasattr(self.runtime, "worker_id"):
+            self.runtime.worker_id = self.config.worker_id
         return self.config.worker_id
 
     def cleanup_orphaned_runtime_containers(self) -> Dict[str, Any]:
-        result = self.docker_runtime.cleanup_orphaned_runtime_containers(
+        result = self.runtime.cleanup_orphaned_runtime_jobs(
             recover_callback=self._recover_orphaned_runtime_container
         )
-        client = getattr(self.docker_runtime, "client", None)
+        client = getattr(self.runtime, "client", None)
         if client is not None:
             try:
                 result["live_helpers"] = self.live_sessions.cleanup_orphaned(client)
@@ -276,9 +284,9 @@ class WorkerAgentService:
             normalized_source = source.rstrip("/") or "/"
             if DockerRuntimeAdapter._is_ignored_bind_source(normalized_source) or normalized_source in {"/var/lib/docker", "/var/lib/docker/volumes"}:
                 raise ValueError("live mount source is unsafe")
-            return LiveFileSource("bind", source, getattr(self.docker_runtime, "client", None), helper_image, folder=folder)
+            return LiveFileSource("bind", source, getattr(self.runtime, "client", None), helper_image, folder=folder)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", source): raise ValueError("live mount source is invalid")
-        client = getattr(self.docker_runtime, "client", None)
+        client = getattr(self.runtime, "client", None)
         volumes = getattr(client, "volumes", None)
         volume = volumes.get(source) if volumes and callable(getattr(volumes, "get", None)) else None
         if volume is None: raise ValueError("live mount source is unavailable")
@@ -952,7 +960,7 @@ class WorkerAgentService:
 
         def compute() -> Dict[str, Any]:
             summary = self._invoke_runtime(
-                self.docker_runtime.get_restic_snapshot_stats,
+                self.runtime.get_restic_snapshot_stats,
                 image,
                 payload,
                 cancel_check,
@@ -1062,7 +1070,7 @@ class WorkerAgentService:
         def compute() -> Dict[str, Any]:
             if command == "snapshots.list":
                 summary = self._invoke_runtime(
-                    self.docker_runtime.list_restic_snapshots,
+                    self.runtime.list_restic_snapshots,
                     image,
                     payload,
                     cancel_check,
@@ -1101,7 +1109,7 @@ class WorkerAgentService:
                 return value
 
             summary = self._invoke_runtime(
-                self.docker_runtime.run_runtime_job,
+                self.runtime.run_runtime_job,
                 image,
                 payload,
                 cancel_check,
@@ -1320,7 +1328,7 @@ class WorkerAgentService:
         argv = ["rclone", "about", remote, "--json"]
         about_payload = {**payload, "command": argv}
         image = payload.get("image") or self.config.backup_runtime_image
-        summary = self._invoke_runtime(self.docker_runtime.run_runtime_job, image, about_payload, cancel_check)
+        summary = self._invoke_runtime(self.runtime.run_runtime_job, image, about_payload, cancel_check)
         logs = summary.get("logs", "")
         safe_logs = self._safe_job_text(payload, logs)
 
@@ -1518,7 +1526,7 @@ class WorkerAgentService:
 
     def sync_inventory(self):
         worker_id = self.ensure_registered()
-        inventory = self.docker_runtime.collect_inventory()
+        inventory = self.runtime.collect_inventory()
         return self.control_plane_client.sync_inventory(worker_id, inventory)
 
     def poll_once(self, interactive: bool = False):
@@ -1554,7 +1562,7 @@ class WorkerAgentService:
 
         try:
             if command == "inventory.refresh":
-                inventory = self.docker_runtime.collect_inventory()
+                inventory = self.runtime.collect_inventory()
                 self.control_plane_client.sync_inventory(self.config.worker_id, inventory)
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED,
@@ -1563,7 +1571,7 @@ class WorkerAgentService:
                 )
 
             if command == "worker.self_check":
-                summary = self.docker_runtime.self_check()
+                summary = self.runtime.self_check()
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED,
                     result_summary=summary,
@@ -1571,7 +1579,7 @@ class WorkerAgentService:
                 )
 
             if command == "containers.stop":
-                summary = self.docker_runtime.stop_containers(payload.get("container_ids") or [])
+                summary = self.runtime.stop_containers(payload.get("container_ids") or [])
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if not summary["errors"] else JobStatus.FAILED,
                     result_summary=summary,
@@ -1579,7 +1587,7 @@ class WorkerAgentService:
                 )
 
             if command == "containers.start":
-                summary = self.docker_runtime.start_containers(payload.get("container_ids") or [])
+                summary = self.runtime.start_containers(payload.get("container_ids") or [])
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if not summary["errors"] else JobStatus.FAILED,
                     result_summary=summary,
@@ -1587,7 +1595,7 @@ class WorkerAgentService:
                 )
 
             if command == "containers.restart":
-                summary = self.docker_runtime.restart_containers(payload.get("container_ids") or [])
+                summary = self.runtime.restart_containers(payload.get("container_ids") or [])
                 return WorkerJobExecutionResult(
                     status=JobStatus.SUCCEEDED if not summary["errors"] else JobStatus.FAILED,
                     result_summary=summary,
@@ -1610,7 +1618,7 @@ class WorkerAgentService:
                     )
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self._invoke_runtime(
-                    self.docker_runtime.run_runtime_job,
+                    self.runtime.run_runtime_job,
                     image,
                     payload,
                     cancel_check,
@@ -1646,7 +1654,7 @@ class WorkerAgentService:
 
             if command == "snapshot.dump":
                 image = payload.get("image") or self.config.backup_runtime_image
-                summary = self._invoke_runtime(self.docker_runtime.run_runtime_job_binary, image, payload, cancel_check)
+                summary = self._invoke_runtime(self.runtime.run_runtime_job_binary, image, payload, cancel_check)
                 stdout_bytes = summary.get("stdout_bytes", b"")
                 b64_content = base64.b64encode(stdout_bytes).decode("ascii") if stdout_bytes else ""
                 return WorkerJobExecutionResult(
@@ -1663,7 +1671,7 @@ class WorkerAgentService:
             if command == "stats.get":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self._invoke_runtime(
-                    self.docker_runtime.get_restic_stats,
+                    self.runtime.get_restic_stats,
                     image,
                     payload,
                     cancel_check,
@@ -1686,7 +1694,7 @@ class WorkerAgentService:
             if command == "retention.run":
                 image = payload.get("image") or self.config.backup_runtime_image
                 summary = self._invoke_runtime(
-                    self.docker_runtime.run_runtime_job,
+                    self.runtime.run_runtime_job,
                     image,
                     payload,
                     cancel_check,
@@ -1704,8 +1712,9 @@ class WorkerAgentService:
 
             if command in ("restore.dry_run", "restore.run"):
                 image = payload.get("image") or self.config.backup_runtime_image
+                payload = {**payload, "_restore_result_transport": True}
                 summary = self._invoke_runtime(
-                    self.docker_runtime.run_runtime_job,
+                    self.runtime.run_runtime_job,
                     image,
                     payload,
                     cancel_check,
@@ -1714,11 +1723,19 @@ class WorkerAgentService:
                 status = self._runtime_status(summary)
                 safe_error = self._safe_job_text(payload, summary.get("error", ""))
                 safe_stderr = self._safe_job_text(payload, summary.get("stderr", ""))
+                ownership = summary.get("restore_ownership")
+                if ownership is not None and (not isinstance(ownership, dict) or ownership.get("status") not in {"succeeded", "failed", "blocked"}):
+                    ownership = {"schema_version": 1, "status": "failed", "category": "result_unavailable", "error": "restore result is malformed", "partial": True, "destructive_state": "unknown"}
+                if isinstance(ownership, dict):
+                    status = JobStatus.FAILED if ownership.get("status") != "succeeded" else status
+                    safe_error = safe_error or self._safe_job_text(payload, ownership.get("error", ""))
                 restore_summary = {
                     "status_code": summary.get("status_code"),
                     "target_id": payload.get("target_id"),
                     "dry_run": command == "restore.dry_run",
                 }
+                if isinstance(ownership, dict):
+                    restore_summary["restore_ownership"] = ownership
                 if safe_error:
                     restore_summary["error"] = safe_error
                 if safe_stderr:

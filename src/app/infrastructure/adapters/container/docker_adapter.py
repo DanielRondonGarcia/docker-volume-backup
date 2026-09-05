@@ -30,16 +30,23 @@ class DockerAdapter(ContainerPort):
         return stopped
 
     def start_containers(self, container_ids: List[str]) -> None:
-        if not self.client: return
+        if not container_ids:
+            return
+        if not self.client:
+            raise RuntimeError("Docker client unavailable while restarting cold-restore containers")
+        errors = []
         for cid in container_ids:
             try:
                 container = self.client.containers.get(cid)
                 logger.info(f"Starting container {cid}")
                 container.start()
             except docker.errors.NotFound:
-                pass
+                errors.append(f"{cid}: container not found")
             except Exception as e:
                 logger.error(f"Error starting container {cid}: {e}")
+                errors.append(f"{cid}: {e}")
+        if errors:
+            raise RuntimeError("Cold-restore container restart failed: " + "; ".join(errors))
 
     def exec_command(self, container_id: str, command: str) -> None:
         if not self.client: return

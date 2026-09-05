@@ -203,6 +203,12 @@ jobs:
           push: true
           tags: ${{ steps.meta_worker.outputs.tags }}
           labels: ${{ steps.meta_worker.outputs.labels }}
-          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
+          # The published worker image supports both WORKER_RUNTIME=docker
+          # and WORKER_RUNTIME=kubernetes. Keep Docker CLI available for the
+          # existing Docker/Compose deployment while the Kubernetes client is
+          # supplied by requirements.txt.
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.new_version }}
+            INSTALL_DOCKER_CLI=true
           cache-from: type=gha
           cache-to: type=gha,mode=max

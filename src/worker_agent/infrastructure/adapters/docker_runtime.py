@@ -1,8 +1,6 @@
-import hashlib
 import json
 import math
 import os
-import posixpath
 import re
 import shutil
 import tempfile
@@ -12,6 +10,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import logging
 
+from src.worker_agent.application.policies.runtime_command_policy import RuntimeCommandPolicy
+from src.worker_agent.application.ports.runtime_port import RuntimePort
+
 try:
     import docker
 except ModuleNotFoundError:
@@ -20,7 +21,8 @@ except ModuleNotFoundError:
 logger = logging.getLogger(__name__)
 
 
-class DockerRuntimeAdapter:
+class DockerRuntimeAdapter(RuntimePort):
+    runtime_kind = "docker"
     DEFAULT_RUNTIME_TIMEOUT_SECONDS = 1800.0
     DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS = 6 * 60 * 60
     MAX_RUNTIME_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -40,6 +42,9 @@ class DockerRuntimeAdapter:
     MAX_TARGET_STATS_FIELDS = 64
     MAX_RECOVERY_LOG_BYTES = 512 * 1024
     MAX_SNAPSHOT_PATH_LENGTH = 4096
+    RESTORE_RESULT_MOUNT_PATH = "/run/restore-result"
+    RESTORE_RESULT_FILENAME = "restore-result.json"
+    MAX_RESTORE_RESULT_BYTES = 64 * 1024
     _SHELL_METACHARACTERS = frozenset(";|&`$><\\\"'\n\r\x00(){}[]*?!")
     _SECRET_ENV_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL")
     _READ_ONLY_OPERATIONS = frozenset({"snapshots", "ls", "cat", "dump", "find", "stats"})
@@ -110,219 +115,51 @@ class DockerRuntimeAdapter:
 
     @classmethod
     def _runtime_command_argv(cls, command: Any) -> List[str]:
-        if command is None or command == "":
-            argv = ["/root/backup.sh"]
-        elif isinstance(command, (list, tuple)) and command and all(isinstance(item, str) for item in command):
-            argv = list(command)
-        elif isinstance(command, str):
-            if any(character in command for character in cls._SHELL_METACHARACTERS):
-                raise ValueError("runtime command contains shell metacharacters")
-            argv = command.split()
-        else:
-            raise ValueError("runtime command must be a supported string or argv list")
-
-        if any(not item or any(character in item for character in cls._SHELL_METACHARACTERS) for item in argv):
-            raise ValueError("runtime command contains shell metacharacters")
-
-        explicit_no_lock = "--no-lock" in argv
-        if explicit_no_lock:
-            argv = [item for item in argv if item != "--no-lock"]
-            if not cls._is_read_only_argv(argv):
-                raise ValueError("runtime write command cannot disable locks")
-
-        if tuple(argv) == ("/root/backup.sh",):
-            return argv
-        if not argv:
-            raise ValueError("unsupported runtime executable")
-        if argv[0] == "rclone":
-            if len(argv) != 4 or argv[1] != "about" or argv[3] != "--json":
-                raise ValueError("unsupported rclone command")
-            argv = ["rclone", "about", cls._validated_rclone_remote(argv[2]), "--json"]
-            return argv
-        if argv[0] != "restic":
-            raise ValueError("unsupported runtime executable")
-
-        operation = argv[1] if len(argv) > 1 else ""
-        if operation == "snapshots" and argv == ["restic", "snapshots", "--json"]:
-            return argv
-        if operation == "stats" and argv == ["restic", "stats", "--mode", "raw-data", "--json"]:
-            return argv
-        if operation == "stats" and argv == ["restic", "stats", "--mode", "blobs-per-file", "--json"]:
-            return argv
-        if (
-            operation == "stats"
-            and len(argv) == 6
-            and argv[2:5] == ["--mode", "restore-size", "--json"]
-        ):
-            cls.validate_snapshot_id(argv[5])
-            return argv
-        if operation == "cat" and len(argv) == 4 and argv[2] == "tree":
-            snapshot_id, path = cls._snapshot_tree_arguments(argv[3])
-            argv[3] = snapshot_id if path == "/" else f"{snapshot_id}:{path}"
-            return argv
-        if operation == "ls" and len(argv) in (4, 5) and argv[2] == "--json":
-            cls.validate_snapshot_id(argv[3])
-            if len(argv) == 5:
-                argv[4] = cls.normalize_snapshot_path(argv[4])
-            return argv
-        if operation == "find" and len(argv) in (4, 5) and argv[2] == "--json":
-            cls.validate_snapshot_id(argv[3])
-            if len(argv) == 5:
-                argv[4] = cls.normalize_snapshot_path(argv[4])
-            return argv
-        if operation == "dump":
-            if len(argv) == 4:
-                cls.validate_snapshot_id(argv[2])
-                argv[3] = cls.normalize_snapshot_path(argv[3])
-                return argv
-            if len(argv) == 6 and argv[2] in {"-a", "--archive"} and argv[3] == "zip":
-                cls.validate_snapshot_id(argv[4])
-                argv[5] = cls.normalize_snapshot_path(argv[5])
-                return argv
-        if operation == "forget" and len(argv) >= 3:
-            index = 2
-            while index < len(argv):
-                if argv[index] == "--prune":
-                    index += 1
-                elif (
-                    argv[index]
-                    in {"--keep-last", "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"}
-                    and index + 1 < len(argv)
-                    and argv[index + 1].isdigit()
-                ):
-                    index += 2
-                else:
-                    raise ValueError("unsupported or unbounded restic retention command")
-            return argv
-        if operation == "prune" and len(argv) == 2:
-            return argv
-        raise ValueError("unsupported runtime command")
+        return RuntimeCommandPolicy.validate(command)
 
     @classmethod
     def _is_read_only_argv(cls, argv: List[str]) -> bool:
-        return bool(len(argv) > 1 and argv[0] == "restic" and argv[1] in cls._READ_ONLY_OPERATIONS)
+        return RuntimeCommandPolicy.is_read_only(argv)
 
     @classmethod
     def _apply_lock_policy(cls, argv: List[str], no_lock: bool) -> List[str]:
-        if not no_lock or not cls._is_read_only_argv(argv) or "--no-lock" in argv:
-            return argv
-        return [*argv, "--no-lock"]
+        return RuntimeCommandPolicy.apply_lock_policy(argv, no_lock)
 
     @classmethod
     def validate_snapshot_id(cls, value: Any) -> str:
-        if not isinstance(value, str) or not cls._SNAPSHOT_ID_PATTERN.fullmatch(value):
-            raise ValueError("invalid snapshot ID")
-        return value
+        return RuntimeCommandPolicy.validate_snapshot_id(value)
 
     @classmethod
     def normalize_snapshot_path(cls, value: Any) -> str:
-        if value is None or value == "":
-            return "/"
-        if not isinstance(value, str):
-            raise ValueError("snapshot path must be a POSIX string")
-        if len(value) > cls.MAX_SNAPSHOT_PATH_LENGTH or "\x00" in value:
-            raise ValueError("snapshot path is invalid")
-        if "\\" in value or any(ord(character) < 32 for character in value):
-            raise ValueError("snapshot path must use POSIX separators")
-        if not value.startswith("/") or value.startswith("//"):
-            raise ValueError("snapshot path must be absolute within the snapshot")
-        parts = value.split("/")
-        if ".." in parts:
-            raise ValueError("snapshot path traversal is not allowed")
-        normalized = posixpath.normpath(value)
-        if normalized == ".":
-            return "/"
-        return normalized
+        return RuntimeCommandPolicy.normalize_snapshot_path(value)
 
     @classmethod
     def _snapshot_tree_arguments(cls, value: Any) -> tuple[str, str]:
-        if not isinstance(value, str) or not value:
-            raise ValueError("invalid snapshot tree target")
-        snapshot_id, separator, raw_path = value.partition(":")
-        cls.validate_snapshot_id(snapshot_id)
-        if not separator:
-            return snapshot_id, "/"
-        path = cls.normalize_snapshot_path(raw_path)
-        if path == "/":
-            raise ValueError("snapshot tree target must use the snapshot ID for the root")
-        return snapshot_id, path
+        return RuntimeCommandPolicy.snapshot_tree_arguments(value)
 
     @staticmethod
     def _safe_runtime_token(value: Any, path: Any = False) -> bool:
-        if not isinstance(value, str) or not value or ".." in value.split("/"):
-            return False
-        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:+-"
-        return (not path or value.startswith("/")) and all(character in allowed + ("/" if path else "") for character in value)
+        return RuntimeCommandPolicy.safe_runtime_token(value, path)
 
     @classmethod
     def _validated_rclone_remote(cls, value: Any) -> str:
-        if not isinstance(value, str) or not cls._RCLONE_REMOTE_PATTERN.fullmatch(value):
-            raise ValueError("invalid rclone remote")
-        return value
+        return RuntimeCommandPolicy.validated_rclone_remote(value)
 
     @classmethod
     def repository_fingerprint(cls, repository: Any) -> str:
-        if not isinstance(repository, str) or not repository or "\x00" in repository:
-            raise ValueError("repository fingerprint requires a non-empty repository")
-        return hashlib.sha256(repository.encode("utf-8")).hexdigest()
+        return RuntimeCommandPolicy.repository_fingerprint(repository)
 
     @classmethod
     def _validate_target_scope(cls, payload: Dict[str, Any]) -> None:
-        target_id = payload.get("target_id")
-        if target_id is not None and not cls._SAFE_TARGET_PATTERN.fullmatch(str(target_id)):
-            raise ValueError("invalid target ID")
-
-        snapshot_target_id = payload.get("snapshot_target_id")
-        snapshot_metadata = payload.get("snapshot") or payload.get("snapshot_record")
-        if isinstance(snapshot_metadata, dict):
-            snapshot_target_id = snapshot_target_id or snapshot_metadata.get("target_id")
-        if snapshot_target_id is not None and not cls._SAFE_TARGET_PATTERN.fullmatch(str(snapshot_target_id)):
-            raise ValueError("invalid snapshot target ID")
-        if target_id is not None and snapshot_target_id is not None and str(target_id) != str(snapshot_target_id):
-            raise ValueError("snapshot belongs to a different target")
+        RuntimeCommandPolicy.validate_target_scope(payload)
 
     @classmethod
     def _snapshot_arguments(cls, argv: List[str]) -> tuple[str | None, str | None]:
-        argv = [item for item in argv if item != "--no-lock"]
-        if len(argv) < 2 or argv[0] != "restic":
-            return None, None
-        operation_index = 3 if len(argv) >= 4 and argv[1] == "--cache-dir" else 1
-        if len(argv) <= operation_index:
-            return None, None
-        operation = argv[operation_index]
-        if operation in {"ls", "find"}:
-            if len(argv) not in {operation_index + 3, operation_index + 4}:
-                return None, None
-            return argv[operation_index + 2], argv[operation_index + 3] if len(argv) == operation_index + 4 else "/"
-        if operation == "cat" and len(argv) == operation_index + 3 and argv[operation_index + 1] == "tree":
-            return cls._snapshot_tree_arguments(argv[operation_index + 2])
-        if operation == "dump":
-            if len(argv) == operation_index + 3:
-                return argv[operation_index + 1], argv[operation_index + 2]
-            if len(argv) == operation_index + 5:
-                return argv[operation_index + 3], argv[operation_index + 4]
-        if (
-            operation == "stats"
-            and len(argv) == operation_index + 5
-            and argv[operation_index + 1 : operation_index + 4] == ["--mode", "restore-size", "--json"]
-        ):
-            return argv[operation_index + 4], "/"
-        return None, None
+        return RuntimeCommandPolicy.snapshot_arguments(argv)
 
     @classmethod
     def _validate_snapshot_scope(cls, payload: Dict[str, Any], argv: List[str]) -> None:
-        cls._validate_target_scope(payload)
-        snapshot_id, path = cls._snapshot_arguments(argv)
-        if snapshot_id is None:
-            return
-        cls.validate_snapshot_id(snapshot_id)
-        normalized_path = cls.normalize_snapshot_path(path)
-        requested_snapshot_id = payload.get("snapshot_id")
-        if requested_snapshot_id is not None and str(requested_snapshot_id) != snapshot_id:
-            raise ValueError("snapshot ID does not match the request")
-        requested_path = payload.get("path")
-        if requested_path is not None and cls.normalize_snapshot_path(requested_path) != normalized_path:
-            raise ValueError("snapshot path does not match the request")
+        RuntimeCommandPolicy.validate_snapshot_scope(payload, argv)
 
     def _validate_runtime_volumes(self, volumes: Any) -> Dict[str, Dict[str, str]]:
         if not isinstance(volumes, dict):
@@ -640,6 +477,9 @@ class DockerRuntimeAdapter:
             "fallback_used": fallback_used,
         }
 
+    def cleanup_orphaned_runtime_jobs(self, recover_callback: Callable[[Any, Dict[str, Any]], str] | None = None) -> Dict[str, Any]:
+        return self.cleanup_orphaned_runtime_containers(recover_callback=recover_callback)
+
     def cleanup_orphaned_runtime_containers(self, recover_callback: Callable[[Any, Dict[str, Any]], str] | None = None) -> Dict[str, Any]:
         summary: Dict[str, Any] = {
             "inspected": 0,
@@ -784,6 +624,32 @@ class DockerRuntimeAdapter:
     def _bounded_bytes(value: Any, limit: int) -> tuple[bytes, bool]:
         raw = value if isinstance(value, bytes) else str(value or "").encode("utf-8", errors="replace")
         return raw[:limit], len(raw) > limit
+
+    @classmethod
+    def _restore_result_unavailable(cls, detail: str) -> Dict[str, Any]:
+        detail = cls._redact_text(detail, set())[:512]
+        return {"schema_version": 1, "status": "failed", "category": "result_unavailable", "error": detail, "detail": detail, "partial": True, "destructive_state": "unknown"}
+
+    @classmethod
+    def _read_restore_result(cls, path: str, secrets: set[str]) -> tuple[Dict[str, Any], Optional[str]]:
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read(cls.MAX_RESTORE_RESULT_BYTES + 1)
+        except OSError:
+            return cls._restore_result_unavailable("restore result is missing"), "restore result is missing"
+        if len(raw) > cls.MAX_RESTORE_RESULT_BYTES:
+            return cls._restore_result_unavailable("restore result exceeded the permitted limit"), "restore result exceeded the permitted limit"
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return cls._restore_result_unavailable("restore result is malformed"), "restore result is malformed"
+        sections = ("policy", "metadata", "capability", "normalization", "restart")
+        if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("status") not in {"succeeded", "failed", "blocked"} or ("partial" in value and not isinstance(value["partial"], bool)) or ("destructive_state" in value and value["destructive_state"] not in {"none", "partial", "complete", "unknown"}) or any(key in value and not isinstance(value[key], dict) for key in sections):
+            return cls._restore_result_unavailable("restore result is malformed"), "restore result is malformed"
+        allowed = {key: value[key] for key in ("schema_version", "status", "category", "error", "detail", "partial", "destructive_state", *sections) if key in value}
+        for key in ("category", "error", "detail"):
+            if isinstance(allowed.get(key), str): allowed[key] = cls._redact_text(allowed[key], secrets)[:2048]
+        return allowed, None
 
     @staticmethod
     def _capture_binary_output(container: Any) -> tuple[Any, Any]:
@@ -1002,9 +868,9 @@ class DockerRuntimeAdapter:
     def _prepare_runtime(self, payload: Dict[str, Any], binary: bool):
         environment = dict(payload.get("environment") or {})
         volumes = self._validate_runtime_volumes(payload.get("volumes") or {})
-        command = self._runtime_command_argv(payload.get("command"))
-        self._validate_snapshot_scope(payload, command)
-        command = self._apply_lock_policy(command, bool(getattr(self, "no_lock", False)))
+        command = RuntimeCommandPolicy.validate(payload.get("command"))
+        RuntimeCommandPolicy.validate_snapshot_scope(payload, command)
+        command = RuntimeCommandPolicy.apply_lock_policy(command, bool(getattr(self, "no_lock", False)))
         timeout_value = payload["timeout_seconds"] if "timeout_seconds" in payload else self._default_runtime_timeout(payload, command)
         timeout = self._timeout_seconds(timeout_value)
         network_mode = payload.get("network_mode") or ("none" if binary else None)
@@ -1417,8 +1283,13 @@ class DockerRuntimeAdapter:
         container_exited = False
         stream_state = None
         stream_thread = None
+        restore_result_path = None
         try:
             environment, volumes, command, network_mode, timeout, temp_dirs = self._prepare_runtime(payload, binary=False)
+            if payload.get("_restore_result_transport") and self._is_restore_payload(payload, command):
+                result_dir = tempfile.mkdtemp(prefix="worker-restore-result-", dir=tempfile.gettempdir())
+                os.chmod(result_dir, 0o700); temp_dirs.append(result_dir)
+                restore_result_path = os.path.join(result_dir, self.RESTORE_RESULT_FILENAME); environment["RESTORE_RESULT_FILE"] = f"{self.RESTORE_RESULT_MOUNT_PATH}/{self.RESTORE_RESULT_FILENAME}"; volumes[result_dir] = {"bind": self.RESTORE_RESULT_MOUNT_PATH, "mode": "rw"}
             output_limit = self._runtime_output_limit(payload, command)
             if self._callback_is_true(cancel_check):
                 return self._failure_result("runtime canceled before launch", False, secrets, 130)
@@ -1461,10 +1332,22 @@ class DockerRuntimeAdapter:
                     output_limit,
                     output_callback,
                 )
+            restore_evidence, restore_error = self._read_restore_result(restore_result_path, secrets) if restore_result_path else (None, None)
             if exceeded:
-                return self._failure_result("runtime logs exceeded the permitted limit", False, secrets, 413)
+                failure = self._failure_result("runtime logs exceeded the permitted limit", False, secrets, 413)
+                if restore_evidence: failure["restore_ownership"] = restore_evidence
+                return failure
             status_code = result.get("StatusCode", 1)
-            return {"success": status_code == 0, "status_code": status_code, "logs": combined, "stderr": ""}
+            if restore_error:
+                failure = self._failure_result(restore_error, False, secrets, status_code or 1)
+                failure["restore_ownership"] = restore_evidence
+                return failure
+            success = status_code == 0 and (not restore_evidence or restore_evidence.get("status") == "succeeded")
+            output = {"success": success, "status_code": status_code, "logs": combined, "stderr": ""}
+            if restore_evidence:
+                output["restore_ownership"] = restore_evidence
+                if not success: output["error"] = restore_evidence.get("error") or f"runtime exited with status code {status_code}"
+            return output
         except Exception as exc:
             return self._failure_result(f"runtime execution failed: {exc}", False, secrets)
         finally:

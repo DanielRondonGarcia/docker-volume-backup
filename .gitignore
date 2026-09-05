@@ -22,3 +22,5 @@ __pycache__/
 /control_plane.db
 body.json
 target.json
+# Local AI runtime state
+.atl/

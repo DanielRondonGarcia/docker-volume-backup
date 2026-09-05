@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import tempfile
@@ -278,5 +279,18 @@ class RuntimeProcessBoundaryTests(unittest.TestCase):
         self.assertEqual(len(temp_dirs), 2)
         self.assertTrue(all(not os.path.exists(path) for path in temp_dirs))
         runtime.client.containers.run.assert_not_called()
+
+    def test_restore_result_file_is_bounded_and_missing_output_fails_closed(self):
+        container = self.container(); runtime = self.runtime(container)
+        def launch(**kwargs):
+            source = next(source for source, spec in kwargs["volumes"].items() if spec["bind"] == "/run/restore-result")
+            with open(os.path.join(source, "restore-result.json"), "w", encoding="utf-8") as handle:
+                json.dump({"schema_version": 1, "status": "succeeded", "category": "ok"}, handle)
+            return container
+        runtime.client.containers.run.side_effect = launch
+        result = runtime.run_runtime_job("runtime", {"command": "/root/backup.sh", "environment": {"RESTORE_MODE": "true"}, "_restore_result_transport": True})
+        self.assertTrue(result["success"]); self.assertEqual(result["restore_ownership"]["status"], "succeeded"); self.assertEqual(DockerRuntimeAdapter._read_restore_result("missing-result", set())[0]["category"], "result_unavailable")
+        with tempfile.NamedTemporaryFile("w+", delete=False) as handle: handle.write("{"); malformed_path = handle.name
+        self.assertEqual(DockerRuntimeAdapter._read_restore_result(malformed_path, set())[0]["category"], "result_unavailable"); os.unlink(malformed_path)
 if __name__ == "__main__":
     unittest.main()

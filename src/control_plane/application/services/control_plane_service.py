@@ -54,6 +54,25 @@ class WorkerDeletionConflict(ValueError):
 
 class ControlPlaneService:
     SUPPORTED_SECRET_TYPES = {"generic", "env", "file"}
+    SUPPORTED_RUNTIME_TYPES = frozenset({"docker", "kubernetes"})
+    KUBERNETES_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    STABLE_VOLUME_PART_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    STABLE_VOLUME_KEY_PATTERN = re.compile(
+        r"^compose:[A-Za-z0-9][A-Za-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    )
+    GENERATED_VOLUME_NAME_PATTERN = re.compile(r"^[0-9a-f]{32,64}$", re.IGNORECASE)
+    KUBERNETES_CREDENTIAL_KEY_NAMES = frozenset(
+        {
+            "bearer_token",
+            "cluster_credentials",
+            "cluster_token",
+            "kube_config",
+            "kubeconfig",
+            "kubernetes_bearer_token",
+            "kubernetes_credentials",
+            "kubernetes_token",
+        }
+    )
     DEFAULT_WORKER_OFFLINE_AFTER_SECONDS = 90.0
     MIN_WORKER_OFFLINE_AFTER_SECONDS = 1.0
     MAX_WORKER_OFFLINE_AFTER_SECONDS = 3600.0
@@ -72,6 +91,9 @@ class ControlPlaneService:
     MAX_SNAPSHOT_LISTING_OUTPUT_BYTES = 16 * 1024 * 1024
     DEFAULT_RESTORE_RUNTIME_TIMEOUT_SECONDS = 6 * 60 * 60
     MAX_RUNTIME_TIMEOUT_SECONDS = 24 * 60 * 60
+    MAX_RESTORE_READ_ONLY_PATHS = 256
+    MAX_RESTORE_READ_ONLY_PATH_LENGTH = 4096
+    MAX_RESTORE_READ_ONLY_PATHS_BYTES = 16 * 1024
     LIVE_REVISION_SCHEMA_VERSION = 1
     SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{8,64}$", re.IGNORECASE)
     REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -248,6 +270,204 @@ class ControlPlaneService:
         return mode
 
     @classmethod
+    def _normalize_runtime_type(cls, value: Optional[str]) -> str:
+        if value is None:
+            return "docker"
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("runtime_type must be exactly 'docker' or 'kubernetes'")
+        normalized = value.strip().lower()
+        if normalized not in cls.SUPPORTED_RUNTIME_TYPES:
+            raise ValueError("runtime_type must be exactly 'docker' or 'kubernetes'")
+        return normalized
+
+    @classmethod
+    def _normalize_kubernetes_namespace(cls, value: Any) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value.strip()) > 253
+            or not cls.KUBERNETES_NAME_PATTERN.fullmatch(value.strip())
+        ):
+            raise ValueError("Kubernetes target must specify exactly one valid namespace")
+        return value.strip()
+
+    @classmethod
+    def _normalize_kubernetes_pvc_names(cls, value: Any) -> List[str]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("Kubernetes target must specify one or more explicit PVC names")
+        normalized: List[str] = []
+        for pvc_name in value:
+            if (
+                not isinstance(pvc_name, str)
+                or not pvc_name.strip()
+                or len(pvc_name.strip()) > 253
+                or not cls.KUBERNETES_NAME_PATTERN.fullmatch(pvc_name.strip())
+            ):
+                raise ValueError("Kubernetes target PVC names must be valid explicit names")
+            pvc_name = pvc_name.strip()
+            if pvc_name in normalized:
+                raise ValueError(f"duplicate Kubernetes target PVC name: {pvc_name}")
+            normalized.append(pvc_name)
+        return normalized
+
+    @classmethod
+    def _credential_key_is_forbidden(cls, key: Any) -> bool:
+        if not isinstance(key, str):
+            return False
+        normalized = key.strip().lower().replace("-", "_")
+        return normalized in cls.KUBERNETES_CREDENTIAL_KEY_NAMES or (
+            "kube" in normalized
+            and any(marker in normalized for marker in ("token", "config", "credential"))
+        ) or "bearer_token" in normalized
+
+    @classmethod
+    def _reject_kubernetes_credentials(cls, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if cls._credential_key_is_forbidden(key):
+                    raise ValueError("Kubernetes bearer tokens and kubeconfigs must not be provided")
+                cls._reject_kubernetes_credentials(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                cls._reject_kubernetes_credentials(nested)
+
+    @staticmethod
+    def _capability_values(value: Any) -> List[str]:
+        def normalize(items: List[str]) -> List[str]:
+            return ["kubernetes" if item == "k8s" else item for item in items]
+
+        if isinstance(value, dict):
+            return normalize([str(key).strip().lower() for key, enabled in value.items() if enabled])
+        if isinstance(value, (list, tuple, set)):
+            return normalize([str(item).strip().lower() for item in value])
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if decoded is not None and decoded is not value:
+                return ControlPlaneService._capability_values(decoded)
+            return normalize([item.strip().lower().strip("[]'\"") for item in re.split(r"[,\s]+", raw) if item.strip()])
+        return []
+
+    @classmethod
+    def _worker_supports_runtime(cls, worker: WorkerRecord, runtime_type: str) -> bool:
+        if runtime_type == "docker":
+            return True
+        labels = worker.labels if isinstance(worker.labels, dict) else {}
+        advertised: List[str] = []
+        for key in (
+            "runtime_type",
+            "runtime_kind",
+            "runtime",
+            "capability",
+            "capabilities",
+            "supported_runtimes",
+        ):
+            advertised.extend(cls._capability_values(labels.get(key)))
+        if str(labels.get("kubernetes", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            advertised.append("kubernetes")
+        return runtime_type in advertised
+
+    @staticmethod
+    def _inventory_namespace_entries(inventory: Any) -> List[Dict[str, Any]]:
+        if not isinstance(inventory, dict):
+            return []
+        namespaces = inventory.get("namespaces")
+        if isinstance(namespaces, dict):
+            return [
+                dict(details or {}, name=name)
+                if isinstance(details, dict)
+                else {"name": name, "pvcs": details}
+                for name, details in namespaces.items()
+            ]
+        return namespaces if isinstance(namespaces, list) else []
+
+    @classmethod
+    def _inventory_pvc_names(cls, namespace_entry: Dict[str, Any]) -> set[str]:
+        raw_pvcs = (
+            namespace_entry.get("pvc_names")
+            or namespace_entry.get("pvcs")
+            or namespace_entry.get("persistent_volume_claims")
+            or []
+        )
+        names: set[str] = set()
+        if not isinstance(raw_pvcs, list):
+            return names
+        for pvc in raw_pvcs:
+            if isinstance(pvc, str):
+                names.add(pvc)
+                continue
+            if not isinstance(pvc, dict):
+                continue
+            metadata = pvc.get("metadata") if isinstance(pvc.get("metadata"), dict) else {}
+            name = pvc.get("name") or metadata.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+        return names
+
+    def _validate_target_runtime(
+        self,
+        worker_id: str,
+        runtime_type: str,
+        namespace: Any,
+        pvc_names: Any,
+        compose_project: Optional[str],
+        volume_targets: Any,
+        runtime_environment: Any,
+        runtime_volumes: Any,
+        restore_defaults: Any = None,
+    ) -> tuple[Optional[str], List[str]]:
+        if runtime_type == "docker":
+            if namespace not in (None, "") or pvc_names not in (None, []):
+                raise ValueError("namespace and pvc_names are only supported for Kubernetes targets")
+            return None, []
+
+        self._reject_kubernetes_credentials(runtime_environment)
+        self._reject_kubernetes_credentials(runtime_volumes)
+        self._reject_kubernetes_credentials(restore_defaults)
+        normalized_namespace = self._normalize_kubernetes_namespace(namespace)
+        normalized_pvc_names = self._normalize_kubernetes_pvc_names(pvc_names)
+        if compose_project:
+            raise ValueError("Kubernetes targets must not specify compose_project")
+        if volume_targets:
+            raise ValueError("Kubernetes targets must use pvc_names instead of volume_targets")
+
+        worker = self._require_eligible_worker(worker_id)
+        if not self._worker_supports_runtime(worker, runtime_type):
+            raise ValueError(f"worker '{worker_id}' does not advertise Kubernetes capability")
+        snapshot = self.inventory_repository.get_by_worker(worker_id)
+        inventory = snapshot.inventory if snapshot is not None else None
+        inventory_runtime = inventory.get("runtime") if isinstance(inventory, dict) else None
+        if inventory_runtime is None and isinstance(inventory, dict):
+            inventory_runtime = inventory.get("runtime_type") or inventory.get("runtime_kind")
+        normalized_inventory_runtime = str(inventory_runtime or "").strip().lower()
+        if normalized_inventory_runtime == "k8s":
+            normalized_inventory_runtime = "kubernetes"
+        if normalized_inventory_runtime != "kubernetes":
+            raise ValueError(f"worker '{worker_id}' has no Kubernetes inventory")
+        namespace_entry = next(
+            (
+                entry
+                for entry in self._inventory_namespace_entries(inventory)
+                if isinstance(entry, dict) and entry.get("name") == normalized_namespace
+            ),
+            None,
+        )
+        if namespace_entry is None:
+            raise ValueError(f"Kubernetes namespace '{normalized_namespace}' is not present in worker inventory")
+        available_pvcs = self._inventory_pvc_names(namespace_entry)
+        missing = [name for name in normalized_pvc_names if name not in available_pvcs]
+        if missing:
+            raise ValueError(
+                "Kubernetes PVC(s) are not present in worker inventory: " + ", ".join(missing)
+            )
+        return normalized_namespace, normalized_pvc_names
+
+    @classmethod
     def _validate_restore_timeout(cls, value: Any) -> float:
         if isinstance(value, bool):
             raise ValueError("restore timeout_seconds must be a finite positive number")
@@ -324,6 +544,7 @@ class ControlPlaneService:
 
     def sync_inventory(self, worker_id: str, inventory: Dict[str, Any]) -> InventorySnapshot:
         worker = self._require_worker(worker_id)
+        self._reject_kubernetes_credentials(inventory)
         worker.updated_at = utcnow()
         self.worker_repository.save(worker)
 
@@ -355,7 +576,11 @@ class ControlPlaneService:
         live_access_enabled: bool = False,
         path_storage: Optional[str] = None,
         volume_sources: Optional[List[str]] = None,
+        runtime_type: Optional[str] = None,
+        namespace: Optional[str] = None,
+        pvc_names: Optional[List[str]] = None,
     ) -> BackupTargetRecord:
+        runtime_type = self._normalize_runtime_type(runtime_type)
         backup_mode = self._validate_backup_mode(backup_mode)
         if not isinstance(live_access_enabled, bool):
             raise ValueError("live_access_enabled must be a boolean")
@@ -365,6 +590,17 @@ class ControlPlaneService:
             normalized_path_storage, runtime_environment, backup_strategy
         )
         self._require_eligible_worker(worker_id)
+        normalized_namespace, normalized_pvc_names = self._validate_target_runtime(
+            worker_id=worker_id,
+            runtime_type=runtime_type,
+            namespace=namespace,
+            pvc_names=pvc_names,
+            compose_project=compose_project,
+            volume_targets=volume_targets,
+            runtime_environment=runtime_environment,
+            runtime_volumes=runtime_volumes,
+            restore_defaults=restore_defaults,
+        )
         if storage_profile_id:
             self._require_storage_profile(storage_profile_id)
         if retention_policy_id:
@@ -374,6 +610,9 @@ class ControlPlaneService:
 
         client_volume_targets: List[str] = list(volume_targets or [])
         client_runtime_volumes: Dict[str, Dict[str, str]] = dict(runtime_volumes or {})
+        if runtime_type == "kubernetes":
+            client_volume_targets = []
+            client_runtime_volumes = {}
         if volume_sources is not None:
             if not compose_project:
                 raise ValueError("volume_sources requires compose_project")
@@ -418,8 +657,174 @@ class ControlPlaneService:
             live_access_enabled=live_access_enabled,
             cron_expression=(cron_expression.strip() if cron_expression else None),
             path_storage=normalized_path_storage,
+            runtime_type=runtime_type,
+            namespace=normalized_namespace,
+            pvc_names=normalized_pvc_names,
         )
         return self.target_repository.save(target)
+
+    @classmethod
+    def _safe_volume_metadata_text(cls, value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if (
+            not normalized
+            or len(normalized) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+        ):
+            return None
+        return normalized
+
+    @classmethod
+    def _stable_volume_part(cls, value: Any) -> Optional[str]:
+        normalized = cls._safe_volume_metadata_text(value)
+        return normalized if normalized and cls.STABLE_VOLUME_PART_PATTERN.fullmatch(normalized) else None
+
+    @classmethod
+    def _stable_volume_key(cls, value: Any) -> Optional[str]:
+        normalized = cls._safe_volume_metadata_text(value)
+        return normalized if normalized and cls.STABLE_VOLUME_KEY_PATTERN.fullmatch(normalized) else None
+
+    @classmethod
+    def _is_truthy_inventory_flag(cls, value: Any) -> bool:
+        return value is True or (
+            isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+        )
+
+    @classmethod
+    def _is_generated_volume_identity(cls, value: Any) -> bool:
+        normalized = cls._safe_volume_metadata_text(value)
+        if not normalized:
+            return False
+        leaf = normalized.rstrip("/").rsplit("/", 1)[-1]
+        return bool(cls.GENERATED_VOLUME_NAME_PATTERN.fullmatch(leaf))
+
+    @classmethod
+    def _stable_volume_key_from_inventory(
+        cls,
+        spec: Dict[str, Any],
+        compose_project: Optional[str],
+    ) -> Optional[str]:
+        if not isinstance(spec, dict):
+            return None
+        if (
+            cls._is_truthy_inventory_flag(spec.get("anonymous"))
+            or cls._is_truthy_inventory_flag(spec.get("generated"))
+            or spec.get("named") is False
+        ):
+            return None
+
+        mount_type = spec.get("mount_type", spec.get("type"))
+        mount_type = mount_type.strip().lower() if isinstance(mount_type, str) else None
+        if mount_type == "bind":
+            return None
+
+        supplied_key = cls._stable_volume_key(spec.get("stable_key") or spec.get("volume_key"))
+        if supplied_key:
+            volume_part = supplied_key.rsplit(":", 1)[-1]
+            return None if cls._is_generated_volume_identity(volume_part) else supplied_key
+
+        project = cls._stable_volume_part(compose_project)
+        if not project:
+            return None
+        compose_volume = cls._stable_volume_part(spec.get("compose_volume"))
+        if compose_volume and not cls._is_generated_volume_identity(compose_volume):
+            return f"compose:{project}:{compose_volume}"
+
+        # A named Docker volume is safe only when the inventory identifies the
+        # mount as a volume. Never infer an identity from a bind/backup path.
+        if mount_type != "volume":
+            return None
+        named_volume = cls._stable_volume_part(spec.get("name") or spec.get("source"))
+        if not named_volume or cls._is_generated_volume_identity(named_volume):
+            return None
+        return f"compose:{project}:{named_volume}"
+
+    @staticmethod
+    def _is_protected_inventory_mount(spec: Dict[str, Any]) -> bool:
+        if not isinstance(spec, dict):
+            return True
+        mount_type = spec.get("mount_type", spec.get("type"))
+        return isinstance(mount_type, str) and mount_type.strip().lower() in {"secret", "config"}
+
+    @classmethod
+    def _safe_inventory_volume_spec(
+        cls,
+        source: str,
+        raw_spec: Dict[str, Any],
+        compose_project: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw_spec, dict):
+            return None
+        bind = raw_spec.get("bind")
+        if not isinstance(bind, str) or not bind:
+            return None
+        if (
+            cls._is_protected_inventory_mount(raw_spec)
+            or cls._is_unsafe_inventory_mount(bind)
+            or cls._is_unsafe_inventory_mount(raw_spec.get("source") or source)
+        ):
+            return None
+
+        identity_spec = dict(raw_spec)
+        identity_spec.setdefault("source", source)
+        spec: Dict[str, Any] = {"bind": bind, "mode": raw_spec.get("mode", "ro")}
+        name = cls._safe_volume_metadata_text(raw_spec.get("name"))
+        compose_volume = cls._stable_volume_part(raw_spec.get("compose_volume"))
+        if name:
+            spec["name"] = name
+        if compose_volume:
+            spec["compose_volume"] = compose_volume
+        stable_key = cls._stable_volume_key_from_inventory(identity_spec, compose_project)
+        if stable_key:
+            spec["stable_key"] = stable_key
+        return spec
+
+    def _inventory_volume_specs(
+        self,
+        matching: Dict[str, Any],
+        compose_project: str,
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+        source_specs: Dict[str, Dict[str, Any]] = {}
+        source_aliases: Dict[str, str] = {}
+
+        candidates = matching.get("volume_candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                source = candidate.get("source")
+                if not isinstance(source, str) or not source:
+                    continue
+                spec = self._safe_inventory_volume_spec(source, candidate, compose_project)
+                if spec is None:
+                    continue
+                existing = source_specs.get(source)
+                if existing is not None and existing != spec:
+                    raise ValueError(
+                        f"volume source '{source}' is ambiguous in compose project '{compose_project}'"
+                    )
+                source_specs[source] = spec
+                for alias in (spec.get("name"), spec.get("compose_volume"), spec.get("stable_key")):
+                    if not isinstance(alias, str) or not alias:
+                        continue
+                    previous = source_aliases.get(alias)
+                    if previous is not None and previous != source:
+                        raise ValueError(
+                            f"volume alias '{alias}' is ambiguous in compose project '{compose_project}'"
+                        )
+                    source_aliases[alias] = source
+
+        if not source_specs:
+            for source, raw_spec in (matching.get("runtime_volumes") or {}).items():
+                if not isinstance(source, str) or not source:
+                    continue
+                spec = self._safe_inventory_volume_spec(source, raw_spec, compose_project)
+                if spec is not None:
+                    source_specs[source] = spec
+
+        return source_specs, source_aliases
 
     def _derive_volumes_from_worker_inventory(self, worker_id: str, compose_project: str) -> Dict[str, Any]:
         snapshot = self.inventory_repository.get_by_worker(worker_id)
@@ -430,8 +835,73 @@ class ControlPlaneService:
         if matching is None:
             return {"volume_targets": [], "runtime_volumes": {}}
         volume_targets = list(matching.get("volume_targets") or [])
-        runtime_volumes = dict(matching.get("runtime_volumes") or {})
+        runtime_volumes, _ = self._inventory_volume_specs(matching, compose_project)
         return {"volume_targets": volume_targets, "runtime_volumes": runtime_volumes}
+
+    def _target_runtime_volumes_for_view(self, target: BackupTargetRecord) -> Dict[str, Any]:
+        """Enrich persisted target volumes for a read-only API/UI view.
+
+        Existing targets may predate the inventory metadata fields. Resolve only
+        the target's persisted volume entries and copy safe identity metadata
+        from the current worker inventory; never add inventory volumes or save
+        the enriched result back to the repository.
+        """
+        persisted = getattr(target, "runtime_volumes", {})
+        if not isinstance(persisted, dict) or not persisted:
+            return persisted
+
+        worker_id = getattr(target, "worker_id", None)
+        compose_project = getattr(target, "compose_project", None)
+        if not isinstance(worker_id, str) or not worker_id or not isinstance(compose_project, str) or not compose_project:
+            return persisted
+
+        try:
+            derived = self._derive_volumes_from_worker_inventory(worker_id, compose_project)
+        except Exception:
+            # Inventory is an optional read-side enhancement. Keep the legacy
+            # payload when the latest snapshot cannot be read or is ambiguous.
+            logger.debug("Unable to enrich target runtime volume metadata", exc_info=True)
+            return persisted
+
+        inventory_volumes = derived.get("runtime_volumes") if isinstance(derived, dict) else None
+        if not isinstance(inventory_volumes, dict) or not inventory_volumes:
+            return persisted
+
+        by_bind: Dict[str, List[Dict[str, Any]]] = {}
+        for spec in inventory_volumes.values():
+            if not isinstance(spec, dict):
+                continue
+            bind = spec.get("bind")
+            if isinstance(bind, str) and bind:
+                by_bind.setdefault(bind, []).append(spec)
+
+        enriched: Dict[str, Any] = {}
+        for source, current in persisted.items():
+            if not isinstance(current, dict):
+                enriched[source] = current
+                continue
+
+            match = inventory_volumes.get(source)
+            if not isinstance(match, dict):
+                bind = current.get("bind")
+                candidates = by_bind.get(bind, []) if isinstance(bind, str) else []
+                match = candidates[0] if len(candidates) == 1 else None
+
+            merged = dict(current)
+            if isinstance(match, dict):
+                metadata = {
+                    "name": self._safe_volume_metadata_text(match.get("name")),
+                    "compose_volume": self._stable_volume_part(match.get("compose_volume")),
+                    "stable_key": self._stable_volume_key(match.get("stable_key")),
+                }
+                stable_key = metadata["stable_key"]
+                if stable_key and self._is_generated_volume_identity(stable_key.rsplit(":", 1)[-1]):
+                    metadata["stable_key"] = None
+                for field, value in metadata.items():
+                    if value is not None:
+                        merged[field] = value
+            enriched[source] = merged
+        return enriched
 
     def _resolve_volume_sources_from_worker_inventory(
         self,
@@ -451,36 +921,7 @@ class ControlPlaneService:
         if matching is None:
             raise ValueError(f"compose project '{compose_project}' is not present in worker inventory")
 
-        source_specs: Dict[str, Dict[str, str]] = {}
-        source_aliases: Dict[str, str] = {}
-        candidates = matching.get("volume_candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                source = candidate.get("source")
-                bind = candidate.get("bind")
-                if not isinstance(source, str) or not source or not isinstance(bind, str) or not bind:
-                    continue
-                spec = {"bind": bind, "mode": candidate.get("mode", "ro")}
-                existing = source_specs.get(source)
-                if existing is not None and existing != spec:
-                    raise ValueError(
-                        f"volume source '{source}' is ambiguous in compose project '{compose_project}'"
-                    )
-                source_specs[source] = spec
-                for alias in (candidate.get("name"), candidate.get("compose_volume")):
-                    if isinstance(alias, str) and alias and alias not in source_aliases:
-                        source_aliases[alias] = source
-        if not source_specs:
-            source_specs = {
-                source: {
-                    "bind": spec.get("bind"),
-                    "mode": spec.get("mode", "ro"),
-                }
-                for source, spec in (matching.get("runtime_volumes") or {}).items()
-                if isinstance(source, str) and source and isinstance(spec, dict) and spec.get("bind")
-            }
+        source_specs, source_aliases = self._inventory_volume_specs(matching, compose_project)
 
         resolved_sources: List[str] = []
         unknown_sources: List[str] = []
@@ -511,6 +952,22 @@ class ControlPlaneService:
             "runtime_volumes": selected_runtime_volumes,
         }
 
+    @staticmethod
+    def _is_unsafe_inventory_mount(value: Any) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        normalized = value.rstrip("/") or "/"
+        return (
+            normalized in {
+                "/var/run/docker.sock",
+                "/run/docker.sock",
+                "/run/secrets",
+                "/run/rclone-config",
+            }
+            or normalized.startswith(("/run/secrets/", "/run/rclone-config/"))
+            or normalized.endswith((".sock", ".socket"))
+        )
+
     def update_target(
         self,
         target_id: str,
@@ -518,6 +975,7 @@ class ControlPlaneService:
         worker_id: Optional[str] = None,
         compose_project: Optional[str] = None,
         volume_targets: Optional[List[str]] = None,
+        volume_sources: Optional[List[str]] = None,
         backup_mode: Optional[str] = None,
         backup_strategy: Optional[str] = None,
         runtime_image: Optional[str] = None,
@@ -532,8 +990,24 @@ class ControlPlaneService:
         enabled: Optional[bool] = None,
         live_access_enabled: Optional[bool] = None,
         path_storage: Any = _TARGET_FIELD_UNSET,
+        runtime_type: Optional[str] = None,
+        namespace: Any = _TARGET_FIELD_UNSET,
+        pvc_names: Any = _TARGET_FIELD_UNSET,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
+        effective_runtime_type = self._normalize_runtime_type(
+            runtime_type if runtime_type is not None else getattr(target, "runtime_type", None)
+        )
+        effective_namespace = getattr(target, "namespace", None) if namespace is _TARGET_FIELD_UNSET else namespace
+        effective_pvc_names = getattr(target, "pvc_names", []) if pvc_names is _TARGET_FIELD_UNSET else pvc_names
+        if (
+            runtime_type is not None
+            and effective_runtime_type == "docker"
+            and namespace is _TARGET_FIELD_UNSET
+            and pvc_names is _TARGET_FIELD_UNSET
+        ):
+            effective_namespace = None
+            effective_pvc_names = []
         normalized_path_storage = getattr(target, "path_storage", None)
         if path_storage is not _TARGET_FIELD_UNSET:
             normalized_path_storage = self._normalize_path_storage(path_storage)
@@ -559,6 +1033,37 @@ class ControlPlaneService:
         effective_worker_id = worker_id if worker_id is not None else target.worker_id
         if worker_id is not None:
             self._require_eligible_worker(worker_id)
+        effective_compose_project = compose_project if compose_project is not None else target.compose_project
+        effective_volume_targets = volume_targets if volume_targets is not None else target.volume_targets
+        resolved_volume_selection = None
+        if volume_sources is not None:
+            if effective_runtime_type != "docker":
+                raise ValueError("volume_sources are only supported for Docker targets")
+            if not effective_compose_project:
+                raise ValueError("volume_sources requires compose_project")
+            self._require_eligible_worker(effective_worker_id)
+            resolved_volume_selection = self._resolve_volume_sources_from_worker_inventory(
+                effective_worker_id,
+                effective_compose_project,
+                volume_sources,
+            )
+            effective_volume_targets = resolved_volume_selection["volume_targets"]
+        effective_runtime_volumes = (
+            resolved_volume_selection["runtime_volumes"]
+            if resolved_volume_selection is not None
+            else target.runtime_volumes
+        )
+        self._validate_target_runtime(
+            worker_id=effective_worker_id,
+            runtime_type=effective_runtime_type,
+            namespace=effective_namespace,
+            pvc_names=effective_pvc_names,
+            compose_project=effective_compose_project,
+            volume_targets=effective_volume_targets,
+            runtime_environment=effective_runtime_environment,
+            runtime_volumes=effective_runtime_volumes,
+            restore_defaults=restore_defaults if restore_defaults is not None else target.restore_defaults,
+        )
         if enabled is True:
             self._require_eligible_worker(effective_worker_id)
         if live_access_enabled is True:
@@ -569,7 +1074,10 @@ class ControlPlaneService:
             target.name = name
         if compose_project is not None:
             target.compose_project = compose_project
-        if volume_targets is not None:
+        if resolved_volume_selection is not None:
+            target.volume_targets = list(resolved_volume_selection["volume_targets"])
+            target.runtime_volumes = copy.deepcopy(resolved_volume_selection["runtime_volumes"])
+        elif volume_targets is not None:
             client_set = set(volume_targets)
             target.volume_targets = list(volume_targets)
             if target.runtime_volumes:
@@ -608,6 +1116,15 @@ class ControlPlaneService:
             target.enabled = bool(enabled)
         if live_access_enabled is not None:
             target.live_access_enabled = bool(live_access_enabled)
+        if runtime_type is not None:
+            target.runtime_type = effective_runtime_type
+        if runtime_type is not None or namespace is not _TARGET_FIELD_UNSET:
+            target.namespace = self._normalize_kubernetes_namespace(effective_namespace) if effective_runtime_type == "kubernetes" else None
+        if runtime_type is not None or pvc_names is not _TARGET_FIELD_UNSET:
+            target.pvc_names = self._normalize_kubernetes_pvc_names(effective_pvc_names) if effective_runtime_type == "kubernetes" else []
+        if effective_runtime_type == "kubernetes":
+            target.volume_targets = []
+            target.runtime_volumes = {}
         if path_storage is not _TARGET_FIELD_UNSET:
             target.path_storage = normalized_path_storage
         target.updated_at = utcnow()
@@ -1467,18 +1984,27 @@ class ControlPlaneService:
             lines.append(line)
         return sequence, normalized, lines
 
-    def _normalize_runtime_volumes(self, volumes: Dict[str, Dict[str, str]], target: BackupTargetRecord) -> Dict[str, Dict[str, str]]:
-        normalized: Dict[str, Dict[str, str]] = {}
+    def _normalize_runtime_volumes(self, volumes: Dict[str, Dict[str, Any]], target: BackupTargetRecord) -> Dict[str, Dict[str, Any]]:
+        normalized: Dict[str, Dict[str, Any]] = {}
         for source, spec in (volumes or {}).items():
-            bind = spec.get("bind") if isinstance(spec, dict) else None
-            mode = spec.get("mode", "ro") if isinstance(spec, dict) else "ro"
+            if not isinstance(spec, dict):
+                continue
+            bind = spec.get("bind")
             if not bind:
                 continue
+            normalized_spec = self._safe_inventory_volume_spec(
+                source,
+                spec,
+                getattr(target, "compose_project", None),
+            )
+            if normalized_spec is None:
+                continue
             if bind.startswith("/backup/"):
-                normalized[source] = {"bind": bind, "mode": mode}
+                normalized_spec["bind"] = bind
             else:
                 safe = self._safe_backup_name(bind)
-                normalized[source] = {"bind": f"/backup/{safe}", "mode": mode}
+                normalized_spec["bind"] = f"/backup/{safe}"
+            normalized[source] = normalized_spec
         return normalized
 
     def _normalized_backup_sources(self, volumes: Dict[str, Dict[str, str]]) -> List[str]:
@@ -1492,6 +2018,37 @@ class ControlPlaneService:
                 seen.add(bind)
                 sources.append(bind)
         return sources
+
+    @classmethod
+    def _serialize_restore_read_only_paths(cls, volumes: Dict[str, Dict[str, Any]]) -> str:
+        paths = []
+        seen = set()
+        for spec in (volumes or {}).values():
+            if not isinstance(spec, dict) or spec.get("mode") != "ro":
+                continue
+            bind = spec.get("bind")
+            if (
+                not isinstance(bind, str)
+                or not bind
+                or "\\" in bind
+                or any(ord(character) < 32 or ord(character) == 127 for character in bind)
+            ):
+                raise ValueError("read-only runtime volume is missing a bind path")
+            normalized = posixpath.normpath(bind)
+            if normalized != "/backup" and not normalized.startswith("/backup/"):
+                raise ValueError("read-only runtime volume bind path is outside /backup")
+            if len(normalized) > cls.MAX_RESTORE_READ_ONLY_PATH_LENGTH:
+                raise ValueError("read-only runtime volume bind path exceeds the permitted length")
+            if normalized not in seen:
+                seen.add(normalized)
+                paths.append(normalized)
+                if len(paths) > cls.MAX_RESTORE_READ_ONLY_PATHS:
+                    raise ValueError("RESTORE_READ_ONLY_PATHS exceeds the permitted entry count")
+
+        encoded = json.dumps(paths, ensure_ascii=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > cls.MAX_RESTORE_READ_ONLY_PATHS_BYTES:
+            raise ValueError("RESTORE_READ_ONLY_PATHS exceeds the permitted size")
+        return encoded
 
     def _build_backup_payload(
         self,
@@ -1512,6 +2069,9 @@ class ControlPlaneService:
 
         payload = {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "volume_targets": target.volume_targets,
             "backup_mode": effective_mode,
@@ -1533,6 +2093,9 @@ class ControlPlaneService:
         storage_context = self._storage_context(target, environment, resolved_files)
         return {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": "restic snapshots --json",
@@ -1573,6 +2136,9 @@ class ControlPlaneService:
         storage_context = self._storage_context(target, environment, resolved_files)
         return {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": ["restic", "stats", "--mode", "restore-size", "--json", snapshot_id],
@@ -1651,6 +2217,9 @@ class ControlPlaneService:
             raise ValueError("unsupported snapshot read operation")
         payload = {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": command,
@@ -1706,6 +2275,9 @@ class ControlPlaneService:
         storage_context = self._storage_context(target, environment, resolved_files)
         return {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": "restic stats --mode raw-data --json",
@@ -1744,6 +2316,9 @@ class ControlPlaneService:
 
         return {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": " ".join(command_parts),
@@ -1768,6 +2343,7 @@ class ControlPlaneService:
     ) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         volumes = self._normalize_runtime_volumes(volumes, target)
+        environment["RESTORE_READ_ONLY_PATHS"] = self._serialize_restore_read_only_paths(volumes)
         storage_context = self._storage_context(target, environment, resolved_files)
         defaults = dict(target.restore_defaults)
         environment.update({
@@ -1797,6 +2373,9 @@ class ControlPlaneService:
 
         return {
             "target_id": target.id,
+            "runtime_type": target.runtime_type,
+            "namespace": target.namespace,
+            "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "image": target.runtime_image,
             "command": target.runtime_command,
@@ -2248,6 +2827,9 @@ class ControlPlaneService:
                 safe[key] = self._redact_job_text(value, self._job_sensitive_values(job))[:2048]
             else:
                 safe[key] = self._safe_public_value(value, job)
+        ownership = self._safe_restore_ownership(raw.get("restore_ownership"), job)
+        if ownership:
+            safe["restore_ownership"] = ownership
         safe.update(self._safe_snapshot_listing_diagnostics(raw))
         context = self._safe_storage_context(raw.get("storage_context"))
         if context:
@@ -2281,6 +2863,31 @@ class ControlPlaneService:
                     projected = self._safe_public_value(value, job)
                 if projected:
                     safe[key] = projected
+        return safe
+
+    def _safe_restore_ownership(self, value: Any, job: JobRecord) -> Dict[str, Any]:
+        if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("status") not in {"succeeded", "failed", "blocked"} or ("partial" in value and not isinstance(value["partial"], bool)) or ("destructive_state" in value and value["destructive_state"] not in {"none", "partial", "complete", "unknown"}):
+            return {}
+        safe: Dict[str, Any] = {key: value[key] for key in ("schema_version", "status", "partial", "destructive_state") if key in value}
+        for key in ("category", "error", "detail"):
+            if isinstance(value.get(key), str):
+                safe[key] = self._redact_job_text(value[key], self._job_sensitive_values(job))[:2048]
+        sections = {
+            "policy": ("mode", "mappings", "confirmation", "source", "default_mapping"),
+            "metadata": ("state", "strategy", "snapshot", "creator", "creator_label", "classification", "restored_metadata_proven", "owners", "volumes", "samples"),
+            "capability": ("state", "category", "mount_mode", "writable", "write_probe", "chown_probe", "rootless", "userns_mode", "detail"),
+            "normalization": ("state", "category", "changed", "changed_count", "unsupported_metadata", "failed_path", "detail"),
+            "restart": ("requested", "state", "detail"),
+        }
+        for section, fields in sections.items():
+            raw_section = value.get(section)
+            if not isinstance(raw_section, dict):
+                continue
+            projected = self._safe_public_value({key: raw_section[key] for key in fields if key in raw_section}, job)
+            for key in ("detail", "failed_path"):
+                if isinstance(projected.get(key), str): projected[key] = projected[key][:512]
+            if projected:
+                safe[section] = projected
         return safe
 
     @classmethod
@@ -2625,6 +3232,23 @@ class ControlPlaneService:
         target = self._require_target(target_id)
         issues: List[str] = []
         warnings: List[str] = []
+
+        runtime_type = self._normalize_runtime_type(getattr(target, "runtime_type", None))
+        if runtime_type == "kubernetes":
+            try:
+                self._validate_target_runtime(
+                    worker_id=target.worker_id,
+                    runtime_type=runtime_type,
+                    namespace=getattr(target, "namespace", None),
+                    pvc_names=getattr(target, "pvc_names", []),
+                    compose_project=target.compose_project,
+                    volume_targets=target.volume_targets,
+                    runtime_environment=target.runtime_environment,
+                    runtime_volumes=target.runtime_volumes,
+                    restore_defaults=target.restore_defaults,
+                )
+            except ValueError as exc:
+                issues.append(str(exc))
 
         if not target.runtime_image:
             issues.append("runtime_image is required")

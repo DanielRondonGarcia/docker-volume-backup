@@ -67,6 +67,7 @@ services:
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
       WORKER_NAME: ${WORKER_NAME:-worker-ghcr}
       WORKER_HOST_NAME: ${WORKER_HOST_NAME:-worker-ghcr}
+      WORKER_RUNTIME: ${WORKER_RUNTIME:-docker}
       WORKER_ENROLLMENT_TOKEN: ${WORKER_ENROLLMENT_TOKEN:-}
       WORKER_CREDENTIAL_FILE: /data/worker_credentials.json
       WORKER_RUN_ONCE: "false"

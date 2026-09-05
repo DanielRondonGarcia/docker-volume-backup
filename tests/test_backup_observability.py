@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import sqlite3
 import threading
 import tempfile
@@ -9,7 +11,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from cryptography.fernet import Fernet
 
-from src.app.domain.models import BackupConfig
+from src.app.domain.models import BackupConfig, RestoreResult
 from src.app.infrastructure.adapters.backup_strategy import ResticBackupStrategy
 from src.control_plane.application.services.control_plane_service import ControlPlaneService
 from src.control_plane.domain.models import BackupTargetRecord, JobRecord, JobStatus, SecretRecord, SettingsRecord, StorageProfileRecord, WorkerRecord, utcnow
@@ -200,6 +202,24 @@ class BackupObservabilityServiceTests(unittest.TestCase):
         self.assertNotIn("private-file-content", serialized)
         self.assertIn("storage_context", view)
         self.assertIn("log_lines", view)
+
+    def test_restore_result_writer_is_atomic_bounded_and_sanitized(self):
+        fake_docker = SimpleNamespace(from_env=lambda: None, errors=SimpleNamespace(NotFound=RuntimeError))
+        with patch.dict(sys.modules, {"docker": fake_docker}):
+            from src.app import main as app_main
+        result = RestoreResult(datetime.now(), 0, False, error="token=private-value")
+        result.category = "ownership_normalization_failed"
+        result.partial = True
+        result.destructive_state = "partial"
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "restore-result.json")
+            with patch.dict(os.environ, {"RESTORE_RESULT_FILE": path}, clear=False):
+                app_main._write_restore_result(result)
+            raw = open(path, encoding="utf-8").read()
+            self.assertLessEqual(len(raw.encode("utf-8")), 64 * 1024)
+            self.assertNotIn("private-value", raw)
+            self.assertEqual(json.loads(raw)["destructive_state"], "partial")
+            self.assertEqual(os.listdir(directory), ["restore-result.json"])
 
     def test_lightweight_job_listing_does_not_load_persisted_payload_or_logs(self):
         with tempfile.TemporaryDirectory() as directory:

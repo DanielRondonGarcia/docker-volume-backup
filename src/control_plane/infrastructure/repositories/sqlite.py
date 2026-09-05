@@ -103,6 +103,9 @@ class SQLiteRepositoryBase:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     worker_id TEXT NOT NULL,
+                    runtime_type TEXT NOT NULL DEFAULT 'docker',
+                    namespace TEXT,
+                    pvc_names_json TEXT NOT NULL DEFAULT '[]',
                     compose_project TEXT,
                     volume_targets_json TEXT NOT NULL,
                     backup_mode TEXT NOT NULL,
@@ -255,6 +258,9 @@ class SQLiteRepositoryBase:
             self._ensure_column(connection, "targets", "cron_expression", "TEXT")
             self._ensure_column(connection, "targets", "live_access_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "targets", "path_storage", "TEXT")
+            self._ensure_column(connection, "targets", "runtime_type", "TEXT NOT NULL DEFAULT 'docker'")
+            self._ensure_column(connection, "targets", "namespace", "TEXT")
+            self._ensure_column(connection, "targets", "pvc_names_json", "TEXT NOT NULL DEFAULT '[]'")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_submitted_at_id_desc "
                 "ON jobs (submitted_at DESC, id DESC)"
@@ -436,19 +442,22 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO targets (
-                    id, name, worker_id, compose_project, volume_targets_json, backup_mode, backup_strategy,
+                    id, name, worker_id, runtime_type, namespace, pvc_names_json, compose_project, volume_targets_json, backup_mode, backup_strategy,
                     runtime_image, runtime_command, runtime_environment_json, runtime_volumes_json, runtime_network_mode,
                     storage_profile_id, path_storage, retention_policy_id, execution_policy_id, restic_password_secret_id, restore_defaults_json, labels_json,
                     enabled, live_access_enabled, cron_expression, created_at, updated_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     target.id,
                     target.name,
                     target.worker_id,
+                    target.runtime_type,
+                    target.namespace,
+                    json.dumps(target.pvc_names),
                     target.compose_project,
                     json.dumps(target.volume_targets),
                     target.backup_mode,
@@ -495,6 +504,9 @@ class SQLiteTargetRepository(SQLiteRepositoryBase, TargetRepository):
             id=row["id"],
             name=row["name"],
             worker_id=row["worker_id"],
+            runtime_type=row["runtime_type"] if "runtime_type" in row.keys() else "docker",
+            namespace=row["namespace"] if "namespace" in row.keys() else None,
+            pvc_names=_json_load(row["pvc_names_json"], []) if "pvc_names_json" in row.keys() else [],
             compose_project=row["compose_project"],
             volume_targets=_json_load(row["volume_targets_json"], []),
             backup_mode=row["backup_mode"],

@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 import unittest
 import re
 from pathlib import Path
@@ -190,6 +193,70 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIn(".filter(([_, v]) => v && v.bind === p)", volume_cell_source)
         self.assertIn(".map(([name]) => name)", volume_cell_source)
 
+    def test_edit_target_volume_selector_loads_inventory_preselects_and_preserves_unavailable_state(self):
+        edit = re.search(r"function openEditTargetModal\(target\) \{.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(edit)
+        edit_source = edit.group(0)
+        for marker in (
+            "Volúmenes incluidos en el backup",
+            'id="editTargetVolumeList"',
+            'id="editTargetVolumeSummary"',
+            "fetchWorkerInventory(workerId)",
+            "getTargetVolumeSelectionKeys(target, candidates)",
+            'targetUpdate.volume_sources = getSelectedVolumeSourcesFor("editTargetVolumeList")',
+            "editVolumeSelectionReady",
+            "No se pudo cargar el inventario del worker",
+            "La selección actual se conservará",
+        ):
+            self.assertIn(marker, edit_source)
+        for marker in (
+            "target.runtime_volumes",
+            "target.volume_targets",
+            '<input type="checkbox" class="volume-checkbox"',
+            'aria-expanded="${String(isExpanded)}"',
+            "volume-inline-warning",
+        ):
+            self.assertIn(marker, self.source)
+
+        if not shutil.which("node"):
+            self.skipTest("Node.js is not installed")
+        helper = re.search(
+            r"(function getTargetVolumeSelectionKeys\(target, candidates\) \{.*?\n    \})\n\n    function bindTargetForm",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(helper)
+        script = """
+const volumeCandidateKey = candidate => candidate.source || candidate.bind;
+""" + helper.group(1) + r'''
+const candidates = [
+  { source: "source-a", bind: "/shared" },
+  { source: "source-b", bind: "/shared" },
+  { source: "source-c", bind: "/other" },
+];
+const bySource = [...getTargetVolumeSelectionKeys({
+  volume_targets: ["/shared"],
+  runtime_volumes: { "source-a": { bind: "/shared", mode: "rw" } },
+}, candidates)];
+const byLegacyPath = [...getTargetVolumeSelectionKeys({
+  volume_targets: ["/shared"],
+  runtime_volumes: {},
+}, candidates)];
+const byEmptyLegacy = [...getTargetVolumeSelectionKeys({ volume_targets: [], runtime_volumes: {} }, candidates)];
+process.stdout.write(JSON.stringify({ bySource, byLegacyPath, byEmptyLegacy }));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=commonjs", "--eval", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["bySource"], ["source-a"])
+        self.assertEqual(set(output["byLegacyPath"]), {"source-a", "source-b"})
+        self.assertEqual(set(output["byEmptyLegacy"]), {"source-a", "source-b", "source-c"})
+
     def test_blocked_targets_are_opaque_and_cannot_run_or_enable_on_ineligible_workers(self):
         for marker in (
             "target-execution-blocked",
@@ -290,7 +357,6 @@ class SnapshotExplorerUiStateTests(unittest.TestCase):
         self.assertIsNotNone(mobile)
         mobile_css = mobile.group(0)
         self.assertIn("@media (max-width: 1200px)", mobile_css)
-        self.assertNotIn("@media (max-width: 900px)", self.css)
         for marker in (
             ".targets-table {",
             "min-width: 0",
@@ -1298,6 +1364,234 @@ class WorkerUiStateTests(unittest.TestCase):
             "El límite del listado debe ser un número entero entre 1 y 16 MiB.",
         ):
             self.assertIn(marker, settings_source)
+
+    def test_restore_ownership_ui_uses_simple_spanish_choices_and_preserves_payload_contract(self):
+        restore = re.search(r"function openRestoreFromSnapshotModal\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(restore)
+        restore_source = restore.group(0)
+        self.assertIn('spec.stable_key || spec.volume_key || ""', self.source)
+        for marker in (
+            'getRestoreOwnershipVolumeCandidates(state.target)',
+            'name="restore_overwrite"',
+            'name="restore_mode"',
+            'Conservar archivos existentes',
+            'Reemplazar archivos existentes',
+            'Detener servicios antes de restaurar',
+            'Mantener servicios activos',
+            'Conservar permisos del backup',
+            'Aplicar permisos manuales',
+            'data-restore-mapping',
+            'id="rsOwnershipAdvanced"',
+            'Configuración avanzada',
+            'id="rsOwnershipStatus"',
+            'aria-live="polite"',
+            'id="rsOwnershipConfirm"',
+            'Confirmo que revisé las opciones y acepto reemplazar los datos del target.',
+            'Acción destructiva:',
+            'id="rsConfirm" aria-describedby="rsOwnershipStatus rsRestoreWarning" disabled',
+            'const syncRestoreButton = policy =>',
+            'const ready = Boolean(policy) && Boolean(confirmation?.checked);',
+            'restoreButton.disabled = !ready;',
+            'if (confirmation) confirmation.addEventListener("change", preview);',
+            'const firstInvalid = overlay.querySelector(\'[aria-invalid="true"]\');',
+            'Para continuar, valida la configuración y confirma que aceptas reemplazar los datos.',
+            'La configuración es válida, pero debes confirmar que aceptas reemplazar los datos para continuar.',
+            'Corrige la sintaxis del JSON y vuelve a validar la configuración.',
+            'restore_ownership: policy',
+            'policy.confirmation = "confirmed"',
+            'force_overwrite: forceOverwrite',
+            'stop_containers: stopContainers',
+            'if (policy.mode === "map" && values.length === 1) request.chown = values[0];',
+            'Los volúmenes restaurados se detectaron automáticamente.',
+            'Ruta restaurada:',
+            'data-mapping-key="${escapeHtml(candidate.key)}"',
+            'data-mapping-label="${escapeHtml(candidate.name)}"',
+            'placeholder="1000:1000…"',
+            'aria-describedby="rsMappingHint${index} rsMappingError${index}"',
+            'class="restore-mapping-hint"',
+            'Formato: UID:GID',
+            'Este target no expone claves estables de volúmenes.',
+            'no generaremos claves a partir de rutas del host',
+        ):
+            self.assertIn(marker, restore_source)
+        self.assertIn('data-restore-mapping', restore_source)
+        self.assertNotIn('class="restore-mapping-key"', restore_source)
+        manual = re.search(r'<div id="rsOwnershipManual".*?</div>`\n        :', restore_source, re.S)
+        self.assertIsNotNone(manual)
+        self.assertNotIn('<code', manual.group(0))
+        for marker in (
+            'Restore ownership request JSON',
+            'Use preserve or explicit numeric UID:GID mappings',
+            'Validated request; confirmation required',
+            'I confirm this preserve or numeric UID:GID request',
+            'Decline',
+            'Preview request',
+            'Confirm restore',
+            'Cold restore',
+            'Hot restore',
+        ):
+            self.assertNotIn(marker, restore_source)
+        self.assertIn('"schema_version":1,"mode":"preserve","mappings":{}', restore_source)
+        self.assertIn('compose:proyecto:volumen', restore_source)
+        self.assertIn('UID:GID', restore_source)
+        self.assertIn('renderRestoreOwnershipEvidence(job)', self.source)
+
+    def test_restore_ownership_candidate_helper_creates_one_mapping_row_per_stable_volume(self):
+        helper = re.search(
+            r"(function getRestoreOwnershipVolumeCandidates\(target\) \{.*?\n    \})\n\n    function openRestoreFromSnapshotModal",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(helper)
+        restore = re.search(r"function openRestoreFromSnapshotModal\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(restore)
+        restore_source = restore.group(0)
+        self.assertIn('volumeCandidates.map((candidate, index) => `<div class="restore-mapping-row">', restore_source)
+        self.assertIn('data-restore-mapping', restore_source)
+
+        if not shutil.which("node"):
+            self.skipTest("Node.js is not installed")
+        script = helper.group(1) + r'''
+const target = {
+  volume_targets: ["/restore/one", "/restore/two"],
+  runtime_volumes: {
+    first_source: { bind: "/restore/one", name: "first", stable_key: "compose:project:first" },
+    second_source: { bind: "/restore/two", name: "second", stable_key: "compose:project:second" },
+    ignored_source: { bind: "/ignored", name: "ignored", stable_key: "compose:project:ignored" },
+  },
+};
+const candidates = getRestoreOwnershipVolumeCandidates(target);
+const rows = candidates.map((candidate, index) => ({ id: `rsMapping${index}`, key: candidate.key }));
+process.stdout.write(JSON.stringify({ candidates, rows }));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=commonjs", "--eval", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual([candidate["key"] for candidate in output["candidates"]], [
+            "compose:project:first",
+            "compose:project:second",
+        ])
+        self.assertEqual(len(output["rows"]), 2)
+        self.assertEqual([row["id"] for row in output["rows"]], ["rsMapping0", "rsMapping1"])
+
+    def test_restore_snapshot_modal_keeps_scrollable_body_and_usable_footer_focus(self):
+        styles_start = self.css.index(".restore-snapshot-modal {")
+        styles_end = self.css.index("@media (max-width: 560px)", styles_start)
+        restore_styles = self.css[styles_start:styles_end]
+        for marker in (
+            '.restore-snapshot-modal .modal-body { min-height: 0; overflow-y: auto;',
+            '.restore-snapshot-modal .modal-footer { flex-shrink: 0;',
+            '.restore-snapshot-modal :is(input, select, textarea, button):focus-visible',
+            '.restore-snapshot-confirmation { display: flex;',
+            '.restore-choice:focus-within',
+            '.restore-mapping-row {',
+            'grid-template-columns: minmax(0, 1fr) minmax(170px, .45fr);',
+            '.restore-mapping-input input {',
+            'min-height: 40px;',
+            'font: 600 14px/1.2 var(--font-mono);',
+            '.restore-mapping-input input:hover',
+            '.restore-mapping-input input:focus-visible',
+            '.restore-mapping-input input[aria-invalid="true"]',
+            '.restore-mapping-hint {',
+        ):
+            self.assertIn(marker, self.css)
+        self.assertNotIn('transition: all', restore_styles)
+
+    def test_volume_selector_has_keyboard_focus_and_visible_inventory_warning_styles(self):
+        for marker in (
+            ".volume-group-header:focus-visible",
+            ".volume-card:focus-within",
+            ".volume-card .volume-checkbox",
+            ".volume-inline-warning",
+            ".volume-selection-count",
+        ):
+            self.assertIn(marker, self.css)
+
+    def test_edit_target_modal_uses_responsive_two_column_layout_and_keeps_create_scoped(self):
+        for marker in (
+            '<div class="modal edit-target-modal" role="dialog"',
+            'id="editTargetForm" class="edit-target-form"',
+            'class="edit-target-layout"',
+            'class="edit-target-settings"',
+            'class="edit-target-volume-panel"',
+            'class="modal-footer edit-target-footer"',
+            'form="editTargetForm"',
+        ):
+            self.assertIn(marker, self.source)
+
+        modal = re.search(r"\.edit-target-modal \{.*?\n\}", self.css, re.S)
+        self.assertIsNotNone(modal)
+        modal_source = modal.group(0)
+        for marker in (
+            "width: min(1080px, calc(100vw - 32px));",
+            "max-width: 1080px;",
+            "max-height: min(900px, calc(100vh - 32px));",
+            "overflow: hidden;",
+        ):
+            self.assertIn(marker, modal_source)
+
+        layout = re.search(r"\.edit-target-layout \{.*?\n\}", self.css, re.S)
+        self.assertIsNotNone(layout)
+        layout_source = layout.group(0)
+        for marker in (
+            "display: grid;",
+            "grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr);",
+            "min-width: 0;",
+        ):
+            self.assertIn(marker, layout_source)
+        self.assertRegex(self.css, r"(?s)@media \(max-width: 900px\) \{.*?\.edit-target-layout \{ grid-template-columns: 1fr;")
+
+        for marker in (
+            ".edit-target-modal .modal-body",
+            "overflow-y: auto;",
+            ".edit-target-modal .modal-footer",
+            "position: sticky;",
+            ".edit-target-volume-panel .volume-list",
+            "overflow-x: hidden;",
+        ):
+            self.assertIn(marker, self.css)
+
+    def test_volume_selector_uses_one_responsive_scroll_container(self):
+        for marker in (
+            'id="targetVolumeList" class="volume-list"',
+            'id="editTargetVolumeList" class="volume-list"',
+        ):
+            self.assertIn(marker, self.source)
+
+        volume_list = re.search(r"^\.volume-list \{.*?\n\}", self.css, re.M | re.S)
+        self.assertIsNotNone(volume_list)
+        volume_list_source = volume_list.group(0)
+        for marker in (
+            "height: clamp(240px, 42vh, 420px);",
+            "min-height: 0;",
+            "max-height: none;",
+            "overflow-y: auto;",
+            "scrollbar-gutter: stable;",
+            "overscroll-behavior: contain;",
+        ):
+            self.assertIn(marker, volume_list_source)
+
+        volume_group = re.search(r"\.volume-group \{.*?\n\}", self.css, re.S)
+        self.assertIsNotNone(volume_group)
+        self.assertIn("flex: 0 0 auto;", volume_group.group(0))
+
+        volume_group_body = re.search(r"\.volume-group-body \{.*?\n\}", self.css, re.S)
+        self.assertIsNotNone(volume_group_body)
+        volume_group_body_source = volume_group_body.group(0)
+        self.assertIn("grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));", volume_group_body_source)
+        self.assertIn("gap: 8px;", volume_group_body_source)
+        self.assertIn("max-height: none;", volume_group_body_source)
+        self.assertIn("overflow: visible;", volume_group_body_source)
+        self.assertNotIn("overflow-y", volume_group_body_source)
+        self.assertRegex(
+            self.css,
+            r"@media \(max-width: 640px\) \{\s*\.volume-group-body \{ grid-template-columns: 1fr; \}\s*\}",
+        )
 
 
 if __name__ == "__main__":
