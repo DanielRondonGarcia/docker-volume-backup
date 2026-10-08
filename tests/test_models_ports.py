@@ -188,6 +188,8 @@ class FeatureFlagEnvTests(unittest.TestCase):
             for key, value in saved.items():
                 if value is not None:
                     os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

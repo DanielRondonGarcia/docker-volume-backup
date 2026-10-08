@@ -41,7 +41,7 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - Existing local modifications in `.atl/`, tracked `__pycache__`, `.codegraph/`, and `.playwright-mcp/` predate this feature and must remain untouched and excluded from feature commits.
 - Full test command: `python -m unittest discover tests` (from `.github/workflows/ci.yml:22-23`). Run focused tests per task first. Report any platform checks unavailable in this environment honestly.
 - No push, PR, or merge is authorized. Do not commit without explicit user authorization.
-- Forecast: approximately 1,000 authored changed lines across the full feature; keep work units independently reviewable. Delivery strategy: `ask-on-risk`. User-selected chain strategy for any future PR: `feature-branch-chain`. No push or PR is authorized.
+- Forecast: approximately 1,900 authored changed lines across the full feature, revised from the initial estimate using observed NFS-1/2/3 diffs and the remaining CLI/service work; keep work units independently reviewable. Delivery strategy: `ask-on-risk`. User-selected chain strategy for any future PR: `feature-branch-chain`. No push or PR is authorized.
 
 ## Tasks
 
@@ -65,20 +65,30 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 
 ### NFS-3 — Restore through the native worker
 
-- Status: in progress; implementation and focused checks complete, authorized work-unit commit pending.
+- Status: done.
 - Route: delegated direct; multi-file restore/runtime change.
 - Scope: native dry-run and restore destinations, platform-aware path validation, and safe overwrite behavior; preserve container stop/start only for Docker targets.
 - Acceptance: a native target can preview and restore a selected snapshot to a configured host destination; Docker and Kubernetes restore paths remain unchanged.
 - Checks: 11 native restore tests, 16 backup integrity tests (1 skipped), and 86 Control Plane dispatch tests passed; full-suite check remains scheduled for feature close.
-- Evidence: Native restore requires explicit host destination, preserves dry-run/overwrite, avoids container stop/start, and treats Windows ownership mapping as unsupported/reportable.
+- Evidence: commit `c72bb54` (`feat(restore): support native filesystem restores`). Native restore requires explicit host destination, preserves dry-run/overwrite, avoids container stop/start, and treats Windows ownership mapping as unsupported/reportable.
 
 ### NFS-4 — Add CLI/daemon operations and platform guidance
 
-- Status: pending
+- Status: done.
+- Evidence: commit `81e9805` (`feat(worker): add native worker CLI and service guidance`); CLI, tests, systemd unit, and quickstart guidance were committed as one work unit.
 - Route: delegated direct; multi-file CLI, service integration, tests, and docs.
 - Scope: CLI for native worker diagnostics and daemon mode, Linux and Windows service launch/install guidance, configuration/enrollment documentation, and dependency self-check guidance.
-- Acceptance: an operator can install/configure and run a native worker daemon on Linux and Windows using the documented CLI/service path; no secrets are printed in diagnostics.
-- Checks: CLI argument/configuration tests; Linux service-file validation and Windows-specific structural checks where runnable; full suite at feature close.
+- Decision: use a systemd unit on Linux and a Windows Task Scheduler startup task; explicitly document that the latter is not a Windows SCM service. Avoid adding an unrequested third-party service-wrapper dependency.
+- Acceptance: an operator can install/configure and run a native worker daemon on Linux and Windows using the documented CLI and OS task/service manager path; diagnostics never print secrets.
+- Checks: 3 CLI tests passed; diff whitespace check passed. Systemd execution could not be validated because `systemd-analyze` is unavailable; Windows Task Scheduler syntax was checked against official parameter sets but not executed on this host. Full suite passed in NFS-5.
+
+### NFS-5 — Fix test isolation and run feature-level close checks
+
+- Status: in progress (test repair and verification complete; explicit authorization received for the local commit).
+- Route: inline, one-file test-environment cleanup discovered by the full-suite run; focused and full-suite verification delegated.
+- Scope: ensure environment-mutating tests restore absent variables, rerun the full suite, and report Linux/Windows service validation limits accurately.
+- Acceptance: full unittest discovery passes without cross-test environment leakage; any platform-specific execution unavailable on this host is recorded as pending.
+- Checks: focused interaction tests passed (3); full suite passed (452 run, 1 skipped, 0 failures); `systemd-analyze` unavailable; Windows runtime/service execution was not available on this host.
 
 ## Progress and evidence
 
@@ -97,9 +107,15 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - NFS-3 adds native restore destination handling, dry-run/overwrite semantics, worker-side restore, no container stop/start, and explicit Windows ownership limitations. Windows path containment comparisons casefold drive/UNC paths but preserve Linux case sensitivity.
 - NFS-3 TDD evidence: `test_native_restore.py` initially failed before restore support and later failed four path-overlap cases before the flavor-aware correction. Final checks passed: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_restore.py'` (11 tests), `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_backup_integrity.py'` (16 tests, 1 skipped), and `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_control_plane_dispatch.py'` (86 tests).
 - Independent verification confirmed Windows drive/UNC case-insensitive overlap, Linux case-sensitive behavior, dry-run/overwrite/no-stop semantics, no `/backup` rewriting, and Docker/Kubernetes regressions.
-- `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so a separate verifier ran after the final correction. Full suite and Windows execution remain pending for feature close. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes remain excluded.
-- NFS-3 implementation is awaiting its explicitly authorized commit.
+- NFS-3 commit: `c72bb54` (`feat(restore): support native filesystem restores`). It contains the native restore flow, tests, specification update, and ODD task file; pre-existing dirty paths were excluded. This cohesive restore unit is 517 authored changed lines.
+- NFS-3 verification: 11 native restore tests, 16 backup integrity tests (1 skipped), and 86 Control Plane dispatch tests passed. Independent verification confirmed Windows drive/UNC case-insensitive containment, Linux case-sensitive behavior, dry-run/overwrite/no-stop semantics, no `/backup` rewriting, and Docker/Kubernetes regressions. `git diff --cached --check` passed before commit.
+- `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so a separate verifier ran for completed work units. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes remain excluded.
+- NFS-4 exploration found the existing worker already has a native runtime selector, foreground loop, health endpoint, credential storage, and executable self-check, but no service-manager wrapper or packaging entrypoint. The bounded implementation uses a stdlib CLI wrapper, Linux systemd unit, and Windows Task Scheduler guidance; it does not present a scheduled task as a Windows SCM service.
+- NFS-4 implementation adds a redacted native self-check and foreground daemon CLI, a systemd unit example, and Spanish guidance for credentials and OS runners. Commit `81e9805` (`feat(worker): add native worker CLI and service guidance`) contains these files. Its 3 focused CLI tests and the final post-correction rerun passed. PowerShell cmdlet syntax was checked against Microsoft's current `Register-ScheduledTask` and `New-ScheduledTaskAction` reference; actual Windows execution remains unavailable.
+- The full suite ran 452 tests with one skipped and one failure: `FeatureFlagEnvTests.test_from_env_parses_values` left `SNAPSHOT_EXPLORER_NO_LOCK=true` in `os.environ` when the key was initially absent; a later native runtime test then received `--no-lock`. Both native-runtime-only and failing-test-isolated commands pass, confirming a test-order leak rather than a native runtime behavior regression.
+- NFS-5 fix removes keys that were absent before `FeatureFlagEnvTests.test_from_env_parses_values` in its `finally` cleanup. RED: full suite previously ran 452 tests with one skip and one failure from leaked `SNAPSHOT_EXPLORER_NO_LOCK`; GREEN: the focused interaction tests passed 3/3 and full discovery passed 452 tests (1 skipped, 0 failures).
+- Feature-wide close checks are complete except platform executions unavailable on this host: `systemd-analyze` is not installed and Windows Task Scheduler/worker execution was not run. Microsoft Learn parameter references were reviewed for Task Scheduler syntax.
 
 ## Next step
 
-Create the explicitly authorized NFS-3 work-unit commit from native restore, tests/docs, and the ODD task file. Then record its identity, close NFS-3, update the mirror and TODO, and delegate NFS-4.
+Create the authorized NFS-5 test-isolation commit with the ODD task record. Do not push, open a PR, or merge.
