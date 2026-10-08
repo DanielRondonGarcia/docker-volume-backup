@@ -191,10 +191,128 @@ Variables útiles del Worker:
 - `WORKER_ID`
 - `WORKER_LABELS`
 - `BACKUP_RUNTIME_IMAGE`
+- `WORKER_RUNTIME=docker|kubernetes|native`
 - `WORKER_RUN_ONCE`
 - `WORKER_POLL_INTERVAL_SECONDS`
 - `WORKER_HEALTH_HOST`
 - `WORKER_HEALTH_PORT`
+- `WORKER_CREDENTIAL_FILE`
+- `CONTROL_PLANE_CA_FILE`
+
+### Worker nativo para filesystem
+
+El wrapper recomendado para respaldos de filesystem nativo es:
+
+```powershell
+python -m src.worker_agent.cli daemon
+```
+
+Ese comando corre en primer plano, selecciona `WORKER_RUNTIME=native` y usa
+polling continuo por defecto (`WORKER_RUN_ONCE=false`). Para depuración manual y
+sin instalar un runner del SO puedes ejecutar una sola iteración explícita:
+
+```powershell
+python -m src.worker_agent.cli daemon --once
+```
+
+Diagnóstico local redacted:
+
+```powershell
+python -m src.worker_agent.cli self-check
+```
+
+El self-check informa presencia de configuración y disponibilidad de ejecutables
+sin imprimir valores de entorno, URL, tokens, credenciales, firmas ni contenido
+del archivo de credenciales. Los ejecutables externos (`restic`, `rclone`,
+`gpg`, `aws`, `ssh`, `scp`, `tar`) se instalan manualmente en el host; no todos
+son obligatorios para todos los targets, dependen del storage profile y de las
+operaciones habilitadas.
+
+Configuración recomendada:
+
+- guarda `CONTROL_PLANE_URL`, `WORKER_NAME`, `WORKER_CREDENTIAL_FILE` y otros
+  valores no secretos en un archivo de entorno protegido;
+- expón `WORKER_ENROLLMENT_TOKEN` solo durante el primer registro: es de un solo
+  uso y debe retirarse del archivo de arranque después de que el worker guarde
+  sus credenciales;
+- no escribas tokens, contraseñas, secretos Restic/Rclone ni contenido de
+  credenciales en unidades systemd, tareas programadas, scripts compartidos o
+  logs;
+- protege el archivo de credenciales, el archivo de entorno y el estado local
+  con permisos restrictivos (`chmod 600` y dueño del usuario del worker en
+  Linux; ACLs equivalentes en Windows);
+- concede al usuario del worker lectura en cada `filesystem_path` de origen y
+  escritura solo donde el flujo lo requiera (por ejemplo repositorio local,
+  cache, restore o estado del worker).
+
+#### Runner Linux con systemd
+
+El repositorio incluye una unidad de ejemplo en
+`deploy/worker/native/docker-volume-backup-worker.service`. Cópiala a
+`/etc/systemd/system/`, ajusta `User`, `Group`, `WorkingDirectory`,
+`EnvironmentFile` y `ReadWritePaths`, y crea el archivo de entorno fuera del
+repositorio, por ejemplo `/etc/docker-volume-backup/worker.env`. La unidad deja
+escribible `/var/lib/docker-volume-backup` para credenciales y estado del worker;
+si cambias `WORKER_CREDENTIAL_FILE` o añades cache/estado local, mantenlos dentro
+de esa ruta o añade una ruta de estado igualmente acotada en `ReadWritePaths`:
+
+```ini
+CONTROL_PLANE_URL=https://backups.example.com
+WORKER_NAME=worker-linux-01
+WORKER_CREDENTIAL_FILE=/var/lib/docker-volume-backup/worker_credentials.json
+WORKER_HEALTH_PORT=8081
+```
+
+No incluyas secretos permanentes en la unidad. Si necesitas enrolar el worker,
+añade temporalmente `WORKER_ENROLLMENT_TOKEN`, arranca el servicio una vez,
+confirma el registro y elimina esa línea antes de dejar el servicio en modo
+continuo.
+
+El sandbox de systemd usa `ProtectSystem=full` y `ProtectHome=read-only`: el
+usuario del worker debe conservar lectura sobre cada `filesystem_path` de origen,
+pero solo puede escribir en las rutas listadas en `ReadWritePaths`. Para restore
+a destinos bloqueados por `ProtectHome` o `ProtectSystem`, añade únicamente el
+destino aprobado (por ejemplo `/srv/app-restore`) a `ReadWritePaths`; no
+deshabilites el sandbox globalmente por defecto.
+
+Comandos típicos:
+
+```bash
+sudo install -d -m 0700 -o dvb-worker -g dvb-worker /var/lib/docker-volume-backup
+sudo install -d -m 0750 /etc/docker-volume-backup
+sudo systemctl daemon-reload
+sudo systemctl enable --now docker-volume-backup-worker.service
+sudo systemctl status docker-volume-backup-worker.service
+journalctl -u docker-volume-backup-worker.service -n 50 --no-pager
+```
+
+#### Runner Windows MVP con Task Scheduler
+
+El MVP de Windows no instala un servicio nativo de Windows SCM y no requiere
+wrappers de terceros. Usa una tarea de inicio de Windows Task Scheduler que lance
+el módulo de Python en primer plano:
+
+```powershell
+$WorkerAccount = "DOMAIN\dvb-worker"
+$PythonExe = "C:\Python312\python.exe"          # Ajusta a la ruta real de Python.
+$WorkingDirectory = "C:\docker-volume-backup"  # Ajusta a la copia local del repo/app.
+$Credential = Get-Credential -UserName $WorkerAccount -Message "Credencial de la cuenta dedicada del worker"
+
+$Action = New-ScheduledTaskAction -Execute $PythonExe -Argument "-m src.worker_agent.cli daemon" -WorkingDirectory $WorkingDirectory
+$Trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -TaskName "DockerVolumeBackupWorker" -Action $Action -Trigger $Trigger -User $Credential.UserName -Password $Credential.GetNetworkCredential().Password -RunLevel Limited
+Remove-Variable Credential
+```
+
+Ejecuta el registro desde PowerShell elevado; el prompt recoge la contraseña sin
+escribirla en el archivo ni en el argumento de la tarea. La cuenta debe tener
+permiso de inicio de sesión por lotes y acceso a las rutas configuradas.
+
+Define variables de entorno no secretas en el perfil del usuario de la tarea o
+en un mecanismo administrado por el operador. No insertes tokens ni contraseñas
+en el argumento de la tarea. Aplica ACLs restrictivas al directorio de estado,
+al archivo de credenciales y a cualquier archivo de configuración usado por el
+worker; el usuario de la tarea también debe poder leer los paths origen.
 
 El worker publica `GET /healthz` con un payload similar a:
 
