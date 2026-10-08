@@ -1,0 +1,10 @@
+Package: vaultline-worker
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Vaultline maintainers <maintainers@example.invalid>
+Depends: libc6 (>= 2.17), adduser, systemd
+Description: Vaultline native filesystem worker
+ Frozen console worker for native filesystem backup orchestration.
+ The package installs the worker binary and an inactive systemd unit only.

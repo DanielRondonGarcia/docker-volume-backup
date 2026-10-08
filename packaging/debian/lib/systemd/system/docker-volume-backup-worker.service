@@ -1,0 +1,26 @@
+[Unit]
+Description=Vaultline native filesystem worker
+Documentation=https://github.com/danielrondongarcia/docker-volume-backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dvb-worker
+Group=dvb-worker
+WorkingDirectory=/var/lib/docker-volume-backup
+EnvironmentFile=-/etc/docker-volume-backup/worker.env
+ExecStart=/usr/bin/vaultline-worker daemon
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+# Keep the native unit sandbox compatible with the repository service template.
+# Worker credentials/state stay writable here. For restore destinations blocked
+# by ProtectHome/ProtectSystem, append only the approved destination path here.
+ReadWritePaths=/var/lib/docker-volume-backup
+
+[Install]
+WantedBy=multi-user.target

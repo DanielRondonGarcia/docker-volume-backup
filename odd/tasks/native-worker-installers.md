@@ -7,12 +7,12 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 ## User-approved direction
 
 - Add a **Worker nativo** option alongside the existing Docker Compose enrollment instructions.
-- Publish a generic Linux `.deb` and Windows `.exe` worker artifact as versioned assets on GitHub Releases; the Control Plane links to the latest stable compatible release and shows version/checksum metadata.
+- Publish generic Linux amd64 and arm64 `.deb` packages and a Windows x64 `.exe` worker artifact as versioned GitHub Release assets; the Control Plane links to the latest stable compatible release and shows version/checksum metadata.
 - Keep artifacts generic/reusable. Never embed a per-worker enrollment token or credential in a package, installer, release asset, command argument, or public config template.
 - At first enrollment, the worker receives a short-lived one-use token out-of-band (secure interactive prompt by default), generates a separate per-worker durable credential, and stores only the durable credential locally after successful enrollment. The token is removed/not persisted after use.
 - Introduce a versioned, retry-safe enrollment path for new native clients while retaining the existing V1 behavior for already-installed workers.
 - Build the Windows output as a portable console worker executable and use Task Scheduler guidance for background startup; do not claim Windows SCM service or introduce an unrequested service wrapper. Linux `.deb` installs a worker executable and systemd unit, but does not start an unenrolled agent.
-- Build Linux and Windows PyInstaller outputs on their respective OS runners. Package only the Vaultline worker code/runtime; external backup executables (`restic`, `tar`, `gpg`, `rclone`, `aws`, `ssh`, `scp`) remain separately installed and feature-dependent.
+- Build Linux amd64 and arm64 PyInstaller outputs on native runners using the oldest supported glibc baseline (`manylinux2014`, glibc 2.17); build Windows x64 on a Windows runner. Package only the Vaultline worker code/runtime; external backup executables (`restic`, `tar`, `gpg`, `rclone`, `aws`, `ssh`, `scp`) remain separately installed and feature-dependent.
 
 ## Security and protocol decisions
 
@@ -34,7 +34,7 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 ## Verification
 
 - TDD the V2 enrollment behavior, retry semantics, legacy V1 compatibility, secure CLI prompting/persistence, and frozen backup-engine subprocess dispatch.
-- Build/test the Linux PyInstaller executable and `.deb` on Ubuntu CI; build the Windows executable on a Windows CI runner. Local Windows execution is unavailable unless the environment changes.
+- Build/test Linux amd64 and arm64 PyInstaller executables and `.deb` packages on native Ubuntu CI runners (using a glibc 2.17 baseline); build the Windows x64 executable on Windows CI. Local PyInstaller smoke build is unavailable unless the build dependency is installed.
 - Validate package metadata/contents and systemd unit on the Linux runner; ensure artifacts contain no enrollment secrets and release assets/checksum names are deterministic.
 - Exercise latest-release asset metadata and the enrollment UI both when assets exist and when the latest release has none; preserve Docker Compose enrollment.
 - Run focused tests by task, then the full documented suite `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover tests` at feature close.
@@ -62,24 +62,26 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ### NWI-3 — Bundle the native worker and backup engine for each OS
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_native_runtime tests.test_native_restore tests.test_worker_cli tests.test_worker_packaging tests.test_worker_enrollment_cli tests.test_worker_enrollment_v2` — 44 tests passed, 1 skipped. PyInstaller is not installed locally, so no executable smoke build ran.
+- Commit: `b795711 feat(worker): bundle frozen backup runtime`.
 - Route: delegated bounded worker/runtime and PyInstaller build implementation.
 - Scope: frozen CLI executable, internal backup-engine entrypoint for `NativeRuntimeAdapter`, PyInstaller spec/hidden imports/data, and per-OS build checks.
 - Acceptance: packaged daemon and packaged backup execution run without a separately installed Python interpreter; external backup tools remain detected/documented, not bundled.
 
 ### NWI-4 — Build Linux `.deb` and Windows worker release artifacts
 
-- Status: pending.
+- Status: in progress.
 - Route: delegated packaging implementation.
 - Scope: Debian package metadata/layout/systemd unit/state ownership, Windows portable `.exe` task guidance, deterministic versioned artifact names, and SHA-256 manifest.
-- Acceptance: Linux package installs without enrolling/starting a worker; Windows executable is a portable console program; no bootstrap secrets appear in package contents.
+- Acceptance: amd64/arm64 Linux packages install without enrolling/starting a worker; Windows x64 executable is a portable console program; no bootstrap secrets appear in package contents.
 
 ### NWI-5 — Publish assets and expose latest release metadata
 
 - Status: pending.
 - Route: delegated release workflow/API implementation.
 - Scope: host-native GitHub Actions build jobs and release asset uploads; extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
-- Acceptance: release workflow attaches the expected Linux/Windows assets and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
+- Acceptance: release workflow attaches amd64/arm64 Linux packages, the Windows x64 executable, and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
 
 ### NWI-6 — Add native package option to worker enrollment UI and docs
 
@@ -93,8 +95,8 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 - Status: pending.
 - Route: delegated verifier; full suite and focused Linux/Windows artifact jobs.
 - Scope: verify V1/V2 enrollment, no-secret packaging, install output, latest API/UI fallback, backward compatibility, and all existing Docker/Kubernetes regressions.
-- Acceptance: full Python suite passes; Linux package validation passes on CI; Windows binary build/import smoke passes on Windows runner; platform checks unavailable locally are reported explicitly.
+- Acceptance: full Python suite passes; amd64/arm64 Linux package validation passes on native CI; Windows x64 binary build/import smoke passes on Windows runner; platform checks unavailable locally are reported explicitly.
 
 ## Next step
 
-Complete NWI-3 test-first: map the worker/runtime entrypoint and imports required by a frozen build, then implement the executable's internal backup-engine dispatch and platform build configuration. Keep each work unit narrow; do not start package/release/UI wiring until the frozen worker contract is stable.
+Complete NWI-4 test-first: stage the Linux `.deb` layout/service ownership and define the portable Windows executable install/task instructions and deterministic asset/checksum names. Validate the Debian package contents without starting an unenrolled worker. Keep GitHub release wiring and UI changes for NWI-5/6.
