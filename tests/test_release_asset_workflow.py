@@ -29,6 +29,12 @@ class ReleaseAssetWorkflowTests(unittest.TestCase):
         self.assertIn("PyInstaller build/vaultline-worker.spec", self.workflow)
         self.assertIn("scripts/build_worker_deb.sh", self.workflow)
 
+    def test_linux_debian_builder_is_invoked_with_bash(self):
+        self.assertIn(
+            'bash scripts/build_worker_deb.sh "${VERSION}" "${{ matrix.arch }}" "dist/vaultline-worker" "dist/packages"',
+            self.workflow,
+        )
+
     def test_linux_pyinstaller_uses_shared_python_build_standalone_runtime(self):
         self.assertIn("pbs_url", self.workflow)
         self.assertIn("pbs_sha256", self.workflow)

@@ -103,11 +103,15 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 - Status: in progress.
 - Evidence: final full suite passed 500 tests with 2 skipped; local Linux amd64 executable/package and Windows x64 `--help` smokes pass. Workflow YAML parsed; `actionlint` is unavailable. Browser-level interaction was unavailable.
-- Blocker: local Docker lacks arm64 binfmt; the native `ubuntu-24.04-arm` job is inside the release workflow, which also pushes Docker images and publishes a GitHub Release. It was not triggered, so actual arm64 build/release artifacts remain unverified.
+- Release authorization: user selected a minor pre-release from `origin/master` and explicitly authorized fast-forwarding the feature commits, pushing, and dispatching; the workflow also pushes Docker images and creates the tag/GitHub Release. The 14 commits were fast-forwarded to master at `90f4f4413584710836920994c52c1e0f5088177c`; unrelated local dirt was excluded.
+- First dispatch: authorized run `37855514875` computed version `3.7.0` (`minor`, previous stable tag `3.6.1`). `prepare` and Windows succeeded; both Linux jobs failed because the workflow directly executed `scripts/build_worker_deb.sh`, tracked as mode `100644`, yielding `Permission denied`.
+- Partial external side effect: `image-build` succeeded and published `3.7.0`, `3.7`, `3`, and `latest` tags for the runtime, Control Plane, and worker images. `publish-release` was skipped; no `3.7.0` tag, GitHub Release, worker assets, or checksums were created.
+- Workflow correction implemented: the Linux package step now invokes `bash scripts/build_worker_deb.sh`; the regression was RED before the fix and `tests.test_release_asset_workflow` passes all 8 tests. YAML parsing and `git diff --check` pass (line-ending warnings only).
+- Next: commit and push this correction to master, then rerun the authorized minor pre-release. The rerun will update the already-published image tags.
 - Route: delegated verifier; full suite and focused Linux/Windows artifact jobs.
 - Scope: verify V1/V2 enrollment, no-secret packaging, install output, latest API/UI fallback, backward compatibility, and all existing Docker/Kubernetes regressions.
 - Acceptance: full Python suite passes; amd64/arm64 Linux package validation passes on native CI; Windows x64 binary build/import smoke passes on Windows runner; platform checks unavailable locally are reported explicitly.
 
 ## Next step
 
-Run the native arm64 build in a non-publishing CI path, or wait for explicit authorization before triggering the release workflow (which also pushes images and publishes). Do not push, create a PR, publish, or trigger the current release workflow without that authorization.
+Commit the verified Debian-builder invocation fix with its regression test and task evidence, push it to `master` without force, and rerun the same `minor` pre-release. Confirm both Linux `.deb` jobs, Windows `.exe`, checksums, release/tag, and image tag updates; preserve unrelated local dirt.

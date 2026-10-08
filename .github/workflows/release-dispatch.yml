@@ -159,7 +159,7 @@ jobs:
       - name: Package Debian worker on native host
         run: |
           VERSION="${{ needs.prepare.outputs.new_version }}"
-          scripts/build_worker_deb.sh "${VERSION}" "${{ matrix.arch }}" "dist/vaultline-worker" "dist/packages"
+          bash scripts/build_worker_deb.sh "${VERSION}" "${{ matrix.arch }}" "dist/vaultline-worker" "dist/packages"
           test -s "dist/packages/vaultline-worker_${VERSION}_${{ matrix.arch }}.deb"
 
       - name: Upload Debian package
