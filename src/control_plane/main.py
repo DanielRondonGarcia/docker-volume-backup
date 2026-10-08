@@ -757,6 +757,14 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     name=result["name"], host_name=result["host_name"], labels=result["labels"], worker_id=result["worker_id"]
                 )
                 return self._write_json(201, {"worker_id": worker.id, "credential_version": result["credential_version"]})
+            if path == "/api/v2/worker-enrollments/complete":
+                result = self._worker_auth().complete_v2(
+                    body.get("secret", ""), body.get("attempt_id", ""), body.get("credential_secret", ""), body.get("labels")
+                )
+                worker = self._control_plane_service().register_worker(
+                    name=result["name"], host_name=result["host_name"], labels=result["labels"], worker_id=result["worker_id"]
+                )
+                return self._write_json(201, {"worker_id": worker.id, "credential_version": result["credential_version"]})
             if len(parts) == 5 and parts[:3] == ["api", "v2", "targets"] and parts[4] == "about":
                 if not self._require_auth(ROLE_VIEWER, api_mode=True):
                     return

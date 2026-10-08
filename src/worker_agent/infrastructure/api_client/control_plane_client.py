@@ -138,6 +138,30 @@ class ControlPlaneClient:
             authenticate=False,
         )
 
+    def complete_worker_enrollment_v2(
+        self,
+        bootstrap_secret: str,
+        attempt_id: str,
+        credential_secret: str,
+        labels: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
+        response = self._post(
+            "/api/v2/worker-enrollments/complete",
+            {
+                "secret": bootstrap_secret,
+                "attempt_id": attempt_id,
+                "credential_secret": credential_secret,
+                "labels": labels or {},
+            },
+            authenticate=False,
+        )
+        worker_id = response["worker_id"]
+        credential_version = response["credential_version"]
+        self.worker_id = worker_id
+        if self.credential_store:
+            self.credential_store.save(worker_id, credential_secret, credential_version)
+        return {**response, "attempt_id": attempt_id, "durable_credential_secret": credential_secret}
+
     def send_heartbeat(self, worker_id: str, version: str, labels: Dict[str, str]) -> Dict[str, Any]:
         return self._post(f"/api/v1/workers/{worker_id}/heartbeat", {"version": version, "labels": labels})
 
