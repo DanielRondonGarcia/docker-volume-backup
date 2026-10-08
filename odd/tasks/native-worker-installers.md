@@ -63,11 +63,13 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 ### NWI-3 — Bundle the native worker and backup engine for each OS
 
 - Status: done.
-- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_native_runtime tests.test_native_restore tests.test_worker_cli tests.test_worker_packaging tests.test_worker_enrollment_cli tests.test_worker_enrollment_v2` — 44 tests passed, 1 skipped. PyInstaller is not installed locally, so no executable smoke build ran.
-- Commit: `b795711 feat(worker): bundle frozen backup runtime`.
-- Route: delegated bounded worker/runtime and PyInstaller build implementation.
-- Scope: frozen CLI executable, internal backup-engine entrypoint for `NativeRuntimeAdapter`, PyInstaller spec/hidden imports/data, and per-OS build checks.
-- Acceptance: packaged daemon and packaged backup execution run without a separately installed Python interpreter; external backup tools remain detected/documented, not bundled.
+- Original commit: `b795711 feat(worker): bundle frozen backup runtime`.
+- Follow-up commit: `c25e41a fix(packaging): harden native worker builds`.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_worker_packaging tests.test_release_asset_workflow` — 11 focused tests passed; final full suite passed 500 tests with 2 skipped.
+- The spec now resolves the repo root from its own directory and includes setuptools-vendored backports only on Windows. Its tests observed RED before each correction.
+- Linux amd64 smoke: checksum-pinned shared CPython 3.11.17+20261003 ran on manylinux2014/glibc 2.17; final worker built and `--help` passed. Debian package `0.0.2` metadata/contents were inspected and contained no token/credential/secret paths.
+- Windows x64 smoke: local Python 3.11.15/PyInstaller 6.16.0 produced a 21,605,367-byte exe and `--help` exited 0. PyInstaller still reports a missing optional `backports` module warning, but no runtime failure.
+- The Linux release workflow uses checksum-pinned shared CPython assets for amd64/aarch64, asserts shared Python, and runs `--help` before package creation. Native arm64 runner execution remains part of NWI-7.
 
 ### NWI-4 — Prepare native package layouts and release naming
 
@@ -83,24 +85,29 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 - Status: done.
 - Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_api tests.test_release_asset_workflow tests.test_worker_runtime_integration` — 21 tests passed; workflow YAML parsed; `actionlint` unavailable. Workflow was not triggered and no release was published.
 - Commit: `2ca913f feat(release): add cross-platform worker assets`.
+- Follow-up Linux build-runtime correction: `c25e41a fix(packaging): harden native worker builds`; workflow was not triggered and no release was published.
 - Route: delegated release workflow/API implementation.
 - Scope: native GitHub Actions builds for Linux amd64/arm64 from manylinux2014 (glibc 2.17) and Windows x64; build packages, rename versioned assets, generate SHA256SUMS, attach to the GitHub Release, and extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
 - Acceptance: release workflow attaches amd64/arm64 Linux packages, the Windows x64 executable, and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
 
 ### NWI-6 — Add native package option to worker enrollment UI and docs
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_ui_states tests.test_native_worker_docs` — 77 tests passed; inline JavaScript `node --check` passed. Browser-level interaction was unavailable.
+- Commit: `c21549f feat(ui): add native worker enrollment downloads`.
 - Route: delegated bounded UI/docs writer.
 - Scope: add a native-worker enrollment tab with latest platform assets, version/checksum, secure prompt instructions, install/enroll/start commands, and no-assets fallback; preserve Compose tab and separate copy-secret action.
 - Acceptance: administrators can download the correct OS asset and enroll without exposing the token in the package, generated shell arguments, or Compose environment.
 
 ### NWI-7 — Run integration and release-artifact verification
 
-- Status: pending.
+- Status: in progress.
+- Evidence: final full suite passed 500 tests with 2 skipped; local Linux amd64 executable/package and Windows x64 `--help` smokes pass. Workflow YAML parsed; `actionlint` is unavailable. Browser-level interaction was unavailable.
+- Blocker: local Docker lacks arm64 binfmt; the native `ubuntu-24.04-arm` job is inside the release workflow, which also pushes Docker images and publishes a GitHub Release. It was not triggered, so actual arm64 build/release artifacts remain unverified.
 - Route: delegated verifier; full suite and focused Linux/Windows artifact jobs.
 - Scope: verify V1/V2 enrollment, no-secret packaging, install output, latest API/UI fallback, backward compatibility, and all existing Docker/Kubernetes regressions.
 - Acceptance: full Python suite passes; amd64/arm64 Linux package validation passes on native CI; Windows x64 binary build/import smoke passes on Windows runner; platform checks unavailable locally are reported explicitly.
 
 ## Next step
 
-Complete NWI-6 test-first: add the native-worker option to the enrollment modal using the exact latest API asset keys, retain Docker Compose as the default/available flow, and document secure installation and Task Scheduler/systemd startup. Keep the token separate, hidden at CLI prompt, and never embed it in downloads or commands.
+Run the native arm64 build in a non-publishing CI path, or wait for explicit authorization before triggering the release workflow (which also pushes images and publishes). Do not push, create a PR, publish, or trigger the current release workflow without that authorization.
