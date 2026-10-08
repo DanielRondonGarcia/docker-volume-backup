@@ -54,7 +54,7 @@ class WorkerDeletionConflict(ValueError):
 
 class ControlPlaneService:
     SUPPORTED_SECRET_TYPES = {"generic", "env", "file"}
-    SUPPORTED_RUNTIME_TYPES = frozenset({"docker", "kubernetes"})
+    SUPPORTED_RUNTIME_TYPES = frozenset({"docker", "kubernetes", "native"})
     KUBERNETES_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
     STABLE_VOLUME_PART_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     STABLE_VOLUME_KEY_PATTERN = re.compile(
@@ -84,6 +84,8 @@ class ControlPlaneService:
     MAX_JOB_LOG_CHARS = 512 * 1024
     MAX_REPOSITORY_DISPLAY_LENGTH = 256
     MAX_PATH_STORAGE_LENGTH = 4096
+    MAX_FILESYSTEM_PATHS = 256
+    MAX_FILESYSTEM_PATH_LENGTH = 4096
     MAX_PUBLIC_SUMMARY_ITEMS = 200
     MAX_REQUEST_ID_LENGTH = 128
     MAX_SEARCH_QUERY_LENGTH = 256
@@ -270,14 +272,21 @@ class ControlPlaneService:
         return mode
 
     @classmethod
+    def _validate_runtime_backup_mode(cls, runtime_type: str, backup_mode: str) -> str:
+        normalized_mode = cls._validate_backup_mode(backup_mode)
+        if runtime_type == "native" and normalized_mode != "hot":
+            raise ValueError("native filesystem targets support only hot backup mode")
+        return normalized_mode
+
+    @classmethod
     def _normalize_runtime_type(cls, value: Optional[str]) -> str:
         if value is None:
             return "docker"
         if not isinstance(value, str) or not value.strip():
-            raise ValueError("runtime_type must be exactly 'docker' or 'kubernetes'")
+            raise ValueError("runtime_type must be exactly 'docker', 'kubernetes', or 'native'")
         normalized = value.strip().lower()
         if normalized not in cls.SUPPORTED_RUNTIME_TYPES:
-            raise ValueError("runtime_type must be exactly 'docker' or 'kubernetes'")
+            raise ValueError("runtime_type must be exactly 'docker', 'kubernetes', or 'native'")
         return normalized
 
     @classmethod
@@ -308,6 +317,28 @@ class ControlPlaneService:
             if pvc_name in normalized:
                 raise ValueError(f"duplicate Kubernetes target PVC name: {pvc_name}")
             normalized.append(pvc_name)
+        return normalized
+
+    @classmethod
+    def _normalize_filesystem_paths(cls, value: Any, *, required: bool = False) -> List[str]:
+        if value is None:
+            value = []
+        if not isinstance(value, list):
+            raise ValueError("filesystem_paths must be a list of explicit path strings")
+        normalized: List[str] = []
+        for path in value:
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError("filesystem_paths must contain explicit non-empty path strings")
+            path = path.strip()
+            if len(path) > cls.MAX_FILESYSTEM_PATH_LENGTH or "\x00" in path or any(ord(ch) < 32 for ch in path):
+                raise ValueError("filesystem path is invalid")
+            if path in normalized:
+                raise ValueError(f"duplicate filesystem path: {path}")
+            normalized.append(path)
+            if len(normalized) > cls.MAX_FILESYSTEM_PATHS:
+                raise ValueError("filesystem_paths exceeds the permitted entry count")
+        if required and not normalized:
+            raise ValueError("native filesystem targets must specify one or more explicit filesystem paths")
         return normalized
 
     @classmethod
@@ -420,10 +451,25 @@ class ControlPlaneService:
         runtime_environment: Any,
         runtime_volumes: Any,
         restore_defaults: Any = None,
+        filesystem_paths: Any = None,
     ) -> tuple[Optional[str], List[str]]:
         if runtime_type == "docker":
             if namespace not in (None, "") or pvc_names not in (None, []):
                 raise ValueError("namespace and pvc_names are only supported for Kubernetes targets")
+            if filesystem_paths not in (None, []):
+                raise ValueError("filesystem_paths are only supported for native targets")
+            return None, []
+
+        if runtime_type == "native":
+            if namespace not in (None, "") or pvc_names not in (None, []):
+                raise ValueError("namespace and pvc_names are only supported for Kubernetes targets")
+            if compose_project:
+                raise ValueError("native filesystem targets must not specify compose_project")
+            if volume_targets:
+                raise ValueError("native filesystem targets must use filesystem_paths instead of volume_targets")
+            worker = self._require_eligible_worker(worker_id)
+            if not self._worker_supports_runtime(worker, runtime_type):
+                raise ValueError(f"worker '{worker_id}' does not advertise native capability")
             return None, []
 
         self._reject_kubernetes_credentials(runtime_environment)
@@ -438,7 +484,8 @@ class ControlPlaneService:
 
         worker = self._require_eligible_worker(worker_id)
         if not self._worker_supports_runtime(worker, runtime_type):
-            raise ValueError(f"worker '{worker_id}' does not advertise Kubernetes capability")
+            runtime_label = "Kubernetes" if runtime_type == "kubernetes" else runtime_type
+            raise ValueError(f"worker '{worker_id}' does not advertise {runtime_label} capability")
         snapshot = self.inventory_repository.get_by_worker(worker_id)
         inventory = snapshot.inventory if snapshot is not None else None
         inventory_runtime = inventory.get("runtime") if isinstance(inventory, dict) else None
@@ -579,9 +626,14 @@ class ControlPlaneService:
         runtime_type: Optional[str] = None,
         namespace: Optional[str] = None,
         pvc_names: Optional[List[str]] = None,
+        filesystem_paths: Optional[List[str]] = None,
     ) -> BackupTargetRecord:
         runtime_type = self._normalize_runtime_type(runtime_type)
-        backup_mode = self._validate_backup_mode(backup_mode)
+        normalized_filesystem_paths = self._normalize_filesystem_paths(
+            filesystem_paths,
+            required=runtime_type == "native",
+        )
+        backup_mode = self._validate_runtime_backup_mode(runtime_type, backup_mode)
         if not isinstance(live_access_enabled, bool):
             raise ValueError("live_access_enabled must be a boolean")
         normalized_path_storage = self._normalize_path_storage(path_storage)
@@ -600,6 +652,7 @@ class ControlPlaneService:
             runtime_environment=runtime_environment,
             runtime_volumes=runtime_volumes,
             restore_defaults=restore_defaults,
+            filesystem_paths=normalized_filesystem_paths,
         )
         if storage_profile_id:
             self._require_storage_profile(storage_profile_id)
@@ -610,7 +663,7 @@ class ControlPlaneService:
 
         client_volume_targets: List[str] = list(volume_targets or [])
         client_runtime_volumes: Dict[str, Dict[str, str]] = dict(runtime_volumes or {})
-        if runtime_type == "kubernetes":
+        if runtime_type in ("kubernetes", "native"):
             client_volume_targets = []
             client_runtime_volumes = {}
         if volume_sources is not None:
@@ -660,6 +713,7 @@ class ControlPlaneService:
             runtime_type=runtime_type,
             namespace=normalized_namespace,
             pvc_names=normalized_pvc_names,
+            filesystem_paths=normalized_filesystem_paths,
         )
         return self.target_repository.save(target)
 
@@ -993,6 +1047,7 @@ class ControlPlaneService:
         runtime_type: Optional[str] = None,
         namespace: Any = _TARGET_FIELD_UNSET,
         pvc_names: Any = _TARGET_FIELD_UNSET,
+        filesystem_paths: Any = _TARGET_FIELD_UNSET,
     ) -> BackupTargetRecord:
         target = self._require_target(target_id)
         effective_runtime_type = self._normalize_runtime_type(
@@ -1000,6 +1055,15 @@ class ControlPlaneService:
         )
         effective_namespace = getattr(target, "namespace", None) if namespace is _TARGET_FIELD_UNSET else namespace
         effective_pvc_names = getattr(target, "pvc_names", []) if pvc_names is _TARGET_FIELD_UNSET else pvc_names
+        effective_filesystem_paths = (
+            getattr(target, "filesystem_paths", [])
+            if filesystem_paths is _TARGET_FIELD_UNSET
+            else filesystem_paths
+        )
+        normalized_filesystem_paths = self._normalize_filesystem_paths(
+            effective_filesystem_paths,
+            required=effective_runtime_type == "native",
+        )
         if (
             runtime_type is not None
             and effective_runtime_type == "docker"
@@ -1008,6 +1072,8 @@ class ControlPlaneService:
         ):
             effective_namespace = None
             effective_pvc_names = []
+        if runtime_type is not None and effective_runtime_type != "native" and filesystem_paths is _TARGET_FIELD_UNSET:
+            normalized_filesystem_paths = []
         normalized_path_storage = getattr(target, "path_storage", None)
         if path_storage is not _TARGET_FIELD_UNSET:
             normalized_path_storage = self._normalize_path_storage(path_storage)
@@ -1025,7 +1091,9 @@ class ControlPlaneService:
             normalized_path_storage, effective_runtime_environment, effective_backup_strategy
         )
         if backup_mode is not None:
-            backup_mode = self._validate_backup_mode(backup_mode)
+            backup_mode = self._validate_runtime_backup_mode(effective_runtime_type, backup_mode)
+        elif effective_runtime_type == "native" and target.backup_mode != "hot":
+            backup_mode = "hot"
         if enabled is not None and not isinstance(enabled, bool):
             raise ValueError("enabled must be a boolean")
         if live_access_enabled is not None and not isinstance(live_access_enabled, bool):
@@ -1034,7 +1102,11 @@ class ControlPlaneService:
         if worker_id is not None:
             self._require_eligible_worker(worker_id)
         effective_compose_project = compose_project if compose_project is not None else target.compose_project
+        if runtime_type is not None and effective_runtime_type == "native" and compose_project is None:
+            effective_compose_project = None
         effective_volume_targets = volume_targets if volume_targets is not None else target.volume_targets
+        if runtime_type is not None and effective_runtime_type == "native" and volume_targets is None:
+            effective_volume_targets = []
         resolved_volume_selection = None
         if volume_sources is not None:
             if effective_runtime_type != "docker":
@@ -1053,6 +1125,8 @@ class ControlPlaneService:
             if resolved_volume_selection is not None
             else target.runtime_volumes
         )
+        if runtime_type is not None and effective_runtime_type == "native" and resolved_volume_selection is None:
+            effective_runtime_volumes = {}
         self._validate_target_runtime(
             worker_id=effective_worker_id,
             runtime_type=effective_runtime_type,
@@ -1063,6 +1137,7 @@ class ControlPlaneService:
             runtime_environment=effective_runtime_environment,
             runtime_volumes=effective_runtime_volumes,
             restore_defaults=restore_defaults if restore_defaults is not None else target.restore_defaults,
+            filesystem_paths=normalized_filesystem_paths,
         )
         if enabled is True:
             self._require_eligible_worker(effective_worker_id)
@@ -1074,6 +1149,8 @@ class ControlPlaneService:
             target.name = name
         if compose_project is not None:
             target.compose_project = compose_project
+        elif runtime_type is not None and effective_runtime_type == "native":
+            target.compose_project = None
         if resolved_volume_selection is not None:
             target.volume_targets = list(resolved_volume_selection["volume_targets"])
             target.runtime_volumes = copy.deepcopy(resolved_volume_selection["runtime_volumes"])
@@ -1122,9 +1199,13 @@ class ControlPlaneService:
             target.namespace = self._normalize_kubernetes_namespace(effective_namespace) if effective_runtime_type == "kubernetes" else None
         if runtime_type is not None or pvc_names is not _TARGET_FIELD_UNSET:
             target.pvc_names = self._normalize_kubernetes_pvc_names(effective_pvc_names) if effective_runtime_type == "kubernetes" else []
-        if effective_runtime_type == "kubernetes":
+        if runtime_type is not None or filesystem_paths is not _TARGET_FIELD_UNSET:
+            target.filesystem_paths = normalized_filesystem_paths if effective_runtime_type == "native" else []
+        if effective_runtime_type in ("kubernetes", "native"):
             target.volume_targets = []
             target.runtime_volumes = {}
+        if effective_runtime_type != "native":
+            target.filesystem_paths = []
         if path_storage is not _TARGET_FIELD_UNSET:
             target.path_storage = normalized_path_storage
         target.updated_at = utcnow()
@@ -2055,12 +2136,14 @@ class ControlPlaneService:
         target: BackupTargetRecord,
         backup_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        configured_mode = self._validate_backup_mode(target.backup_mode)
-        effective_mode = configured_mode if backup_mode is None else self._validate_backup_mode(backup_mode)
+        configured_mode = self._validate_runtime_backup_mode(target.runtime_type, target.backup_mode)
+        effective_mode = configured_mode if backup_mode is None else self._validate_runtime_backup_mode(target.runtime_type, backup_mode)
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
         environment.setdefault("BACKUP_STRATEGY", target.backup_strategy)
         volumes = self._normalize_runtime_volumes(volumes, target)
-        if target.volume_targets and "BACKUP_SOURCES" not in environment:
+        if target.runtime_type == "native":
+            environment.pop("BACKUP_SOURCES", None)
+        elif target.volume_targets and "BACKUP_SOURCES" not in environment:
             environment["BACKUP_SOURCES"] = " ".join(self._normalized_backup_sources(volumes))
         environment["BACKUP_STOP_CONTAINERS"] = "true" if effective_mode == "cold" else "false"
         if effective_mode == "cold":
@@ -2074,6 +2157,7 @@ class ControlPlaneService:
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
             "volume_targets": target.volume_targets,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "backup_mode": effective_mode,
             "backup_strategy": target.backup_strategy,
             "image": target.runtime_image,
@@ -2097,6 +2181,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": "restic snapshots --json",
             "max_log_bytes": self._effective_snapshot_explorer_listing_max_output_bytes(self.get_settings()),
@@ -2140,6 +2225,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": ["restic", "stats", "--mode", "restore-size", "--json", snapshot_id],
             "environment": environment,
@@ -2221,6 +2307,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": command,
             "environment": environment,
@@ -2279,6 +2366,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": "restic stats --mode raw-data --json",
             "stats_modes": list(self.TARGET_STATS_MODES),
@@ -2320,6 +2408,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": " ".join(command_parts),
             "environment": environment,
@@ -2377,6 +2466,7 @@ class ControlPlaneService:
             "namespace": target.namespace,
             "pvc_names": list(target.pvc_names or []),
             "compose_project": target.compose_project,
+            "filesystem_paths": list(getattr(target, "filesystem_paths", []) or []),
             "image": target.runtime_image,
             "command": target.runtime_command,
             "environment": environment,
@@ -3234,7 +3324,7 @@ class ControlPlaneService:
         warnings: List[str] = []
 
         runtime_type = self._normalize_runtime_type(getattr(target, "runtime_type", None))
-        if runtime_type == "kubernetes":
+        if runtime_type in {"kubernetes", "native"}:
             try:
                 self._validate_target_runtime(
                     worker_id=target.worker_id,
@@ -3246,13 +3336,17 @@ class ControlPlaneService:
                     runtime_environment=target.runtime_environment,
                     runtime_volumes=target.runtime_volumes,
                     restore_defaults=target.restore_defaults,
+                    filesystem_paths=getattr(target, "filesystem_paths", []),
                 )
             except ValueError as exc:
                 issues.append(str(exc))
 
-        if not target.runtime_image:
+        if runtime_type != "native" and not target.runtime_image:
             issues.append("runtime_image is required")
-        if not target.volume_targets and "BACKUP_SOURCES" not in target.runtime_environment:
+        if runtime_type == "native":
+            if not getattr(target, "filesystem_paths", []):
+                warnings.append("No filesystem_paths configured")
+        elif not target.volume_targets and "BACKUP_SOURCES" not in target.runtime_environment:
             warnings.append("No volume_targets or BACKUP_SOURCES configured")
         if target.backup_strategy == "restic":
             has_secret_password = False

@@ -265,9 +265,12 @@ Campos sugeridos:
 - `id`
 - `name`
 - `worker_id`
-- `compose_project`
-- `volume_targets[]`
-- `backup_mode` = `hot|cold`
+- `runtime_type` = `docker|kubernetes|native`
+- `compose_project` (Docker/Compose only)
+- `volume_targets[]` (Docker/Compose bind paths)
+- `namespace` and `pvc_names[]` (Kubernetes only)
+- `filesystem_paths[]` (native filesystem workers only; one or more explicit Linux or Windows paths)
+- `backup_mode` = `hot|cold` (`native` targets are hot-only)
 - `backup_strategy` = `restic|tar`
 - `storage_profile_id`
 - `retention_policy_id`
@@ -394,6 +397,16 @@ Catálogo local de metadatos conocidos para acelerar UI.
 - `PUT /api/v1/targets/{targetId}`
 - `POST /api/v1/targets/{targetId}/enable`
 - `POST /api/v1/targets/{targetId}/disable`
+
+Target source contract:
+
+| Runtime | Source fields | Notes |
+|---|---|---|
+| `docker` | `compose_project`, `volume_targets[]`, `runtime_volumes` | Existing Docker/Compose behavior remains unchanged; dispatch may map sources under `/backup` for container execution. |
+| `kubernetes` | `namespace`, `pvc_names[]` | PVC names are explicit and validated against worker inventory; Docker volume fields stay empty. |
+| `native` | `filesystem_paths[]` | Paths are explicit operator-entered source paths for the assigned native worker. The Control Plane persists and returns them as a list and includes the same list in dispatch payloads without rewriting Windows paths or paths with spaces into `/backup` paths. Native targets are hot-only because this runtime cannot stop Docker containers and the MVP has no application-quiesce mechanism. |
+
+Native filesystem targets use `runtime_type: "native"`, require at least one `filesystem_paths` entry, require `backup_mode: "hot"`, and must not specify Docker/Compose volume selectors or Kubernetes PVC selectors. SQLite stores `filesystem_paths_json` additively so legacy targets default to an empty list.
 
 #### Execution
 

@@ -90,6 +90,7 @@ class BackupTargetRecord:
     runtime_type: str = "docker"
     namespace: Optional[str] = None
     pvc_names: List[str] = field(default_factory=list)
+    filesystem_paths: List[str] = field(default_factory=list)
 
 
 @dataclass

@@ -827,6 +827,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     runtime_type=body.get("runtime_type"),
                     namespace=body.get("namespace"),
                     pvc_names=body.get("pvc_names"),
+                    filesystem_paths=body.get("filesystem_paths"),
                     compose_project=body.get("compose_project"),
                     volume_targets=body.get("volume_targets"),
                     backup_mode=body.get("backup_mode") or "hot",
@@ -1215,6 +1216,8 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     target_update["namespace"] = body.get("namespace")
                 if "pvc_names" in body:
                     target_update["pvc_names"] = body.get("pvc_names")
+                if "filesystem_paths" in body:
+                    target_update["filesystem_paths"] = body.get("filesystem_paths")
                 target = self._control_plane_service().update_target(**target_update)
                 if self._live_service() is not None:
                     self._live_service().invalidate_target(parts[3], "configuration_changed")
