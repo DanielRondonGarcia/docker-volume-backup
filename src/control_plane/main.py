@@ -96,6 +96,14 @@ LIVE_WORKER_FAILURE_MESSAGES = {
     "invalid_source": "live source is invalid",
     "invalid_request": "live request is invalid",
 }
+LATEST_RELEASE_REPOSITORY = "DanielRondonGarcia/docker-volume-backup"
+LATEST_RELEASE_DOWNLOAD_BASE = f"https://github.com/{LATEST_RELEASE_REPOSITORY}/releases/download"
+LATEST_RELEASE_ASSET_KEYS = {
+    "linux-amd64": "vaultline-worker_{tag}_amd64.deb",
+    "linux-arm64": "vaultline-worker_{tag}_arm64.deb",
+    "windows-amd64": "vaultline-worker_{tag}_windows-amd64.exe",
+    "checksums": "vaultline-worker_{tag}_SHA256SUMS",
+}
 
 
 def _safe_app_version() -> str:
@@ -109,6 +117,35 @@ def _safe_live_log_value(value, fallback="unknown"):
     if not isinstance(value, str) or not value:
         return fallback
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:128] or fallback
+
+
+def _latest_release_payload(data=None, exception=None):
+    if exception is not None:
+        return {"tag_name": "", "html_url": "", "assets": {}, "error": str(exception)}
+
+    data = data if isinstance(data, dict) else {}
+    tag_name = data.get("tag_name") if isinstance(data.get("tag_name"), str) else ""
+    html_url = data.get("html_url") if isinstance(data.get("html_url"), str) else ""
+    payload = {"tag_name": tag_name, "html_url": html_url, "assets": {}}
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", tag_name):
+        return payload
+
+    allowed_names = {template.format(tag=tag_name): key for key, template in LATEST_RELEASE_ASSET_KEYS.items()}
+    official_base = f"{LATEST_RELEASE_DOWNLOAD_BASE}/{tag_name}"
+    for asset in data.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        url = asset.get("browser_download_url")
+        key = allowed_names.get(name)
+        if key is None or url != f"{official_base}/{name}":
+            continue
+        entry = {"name": name, "url": url}
+        digest = asset.get("digest")
+        if isinstance(digest, str) and re.fullmatch(r"sha256:[0-9A-Fa-f]{64}", digest):
+            entry["sha256"] = digest.split(":", 1)[1].lower()
+        payload["assets"][key] = entry
+    return payload
 
 
 class LiveWorkerError(LiveSessionError):
@@ -435,14 +472,14 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 import urllib.request, json as _json
                 try:
                     req = urllib.request.Request(
-                        "https://api.github.com/repos/DanielRondonGarcia/docker-volume-backup/releases/latest",
+                        f"https://api.github.com/repos/{LATEST_RELEASE_REPOSITORY}/releases/latest",
                         headers={"Accept": "application/vnd.github+json", "User-Agent": "docker-volume-backup-control-plane"},
                     )
                     with urllib.request.urlopen(req, timeout=5) as resp:
                         data = _json.loads(resp.read().decode("utf-8"))
-                    return self._write_json(200, {"tag_name": data.get("tag_name", ""), "html_url": data.get("html_url", "")}, head_only=head_only)
+                    return self._write_json(200, _latest_release_payload(data), head_only=head_only)
                 except Exception as e:
-                    return self._write_json(200, {"tag_name": "", "html_url": "", "error": str(e)}, head_only=head_only)
+                    return self._write_json(200, _latest_release_payload(exception=e), head_only=head_only)
             if path == "/api/v1/config/public":
                 public_url = ""
                 try:

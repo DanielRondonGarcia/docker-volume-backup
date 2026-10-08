@@ -22,13 +22,16 @@ permissions:
   packages: write
 
 jobs:
-  release-and-build:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.version.outputs.new_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Calculate next version
         id: version
@@ -39,14 +42,14 @@ jobs:
             | sort -t $'\t' -k1,1V \
             | tail -n 1 \
             | cut -f2- || true)
-          
+
           if [ -z "$LATEST_TAG" ]; then
             echo "No previous tags found. Starting at 0.1.0"
             NEW_VERSION="0.1.0"
           else
             CLEAN_TAG="${LATEST_TAG#v}"
             IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN_TAG"
-            
+
             case "${{ inputs.bump }}" in
               major)
                 MAJOR=$((MAJOR + 1))
@@ -61,17 +64,16 @@ jobs:
                 PATCH=$((PATCH + 1))
                 ;;
             esac
-            
+
             NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           fi
-          
+
           echo "Previous tag: ${LATEST_TAG:-none}"
           echo "Bump: ${{ inputs.bump }}"
           echo "New version: ${NEW_VERSION}"
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog
-        id: changelog
         run: |
           PREV_TAG=$(git tag --list \
             | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -79,7 +81,7 @@ jobs:
             | sort -t $'\t' -k1,1V \
             | tail -n 1 \
             | cut -f2- || true)
-          
+
           if [ -z "$PREV_TAG" ]; then
             echo "No previous tag found, generating full changelog"
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" HEAD)
@@ -87,38 +89,116 @@ jobs:
             echo "Generating changelog from $PREV_TAG"
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD")
           fi
-          
+
           if [ -z "$CHANGELOG" ]; then
             CHANGELOG="- No changes since last release"
           fi
-          
-          echo "$CHANGELOG" > /tmp/changelog.txt
-          
+
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
-          
-          cat > /tmp/release_body.md <<EOF
+
+          cat > release_body.md <<EOF
           ## What's Changed
-          
+
           $CHANGELOG
-          
+
           **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${NEW_VERSION}
           EOF
 
-      - name: Create Git tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.version.outputs.new_version }}" -m "Release ${{ steps.version.outputs.new_version }}"
-          git push origin "${{ steps.version.outputs.new_version }}"
+      - name: Upload release notes for publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release_body.md
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  native-linux:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build onefile worker in manylinux2014
         run: |
-          gh release create "${{ steps.version.outputs.new_version }}" \
-            --title "v${{ steps.version.outputs.new_version }}" \
-            --notes-file /tmp/release_body.md \
-            ${{ inputs.prerelease && '--prerelease' || '' }}
+          mkdir -p dist build/pyinstaller-${{ matrix.arch }}
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            ${{ matrix.manylinux_image }} \
+            bash -lc '/opt/python/cp311-cp311/bin/python -m pip install -r requirements-build.txt && /opt/python/cp311-cp311/bin/python -m PyInstaller build/vaultline-worker.spec --distpath /workspace/dist --workpath /workspace/build/pyinstaller-${{ matrix.arch }} --noconfirm'
+
+      - name: Package Debian worker on native host
+        run: |
+          VERSION="${{ needs.prepare.outputs.new_version }}"
+          scripts/build_worker_deb.sh "${VERSION}" "${{ matrix.arch }}" "dist/vaultline-worker" "dist/packages"
+          test -s "dist/packages/vaultline-worker_${VERSION}_${{ matrix.arch }}.deb"
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultline-worker-linux-${{ matrix.arch }}
+          path: dist/packages/vaultline-worker_${{ needs.prepare.outputs.new_version }}_${{ matrix.arch }}.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  native-windows:
+    needs: prepare
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build onefile worker
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-build.txt
+          python -m PyInstaller build/vaultline-worker.spec --distpath dist --workpath build/pyinstaller-windows-amd64 --noconfirm
+
+      - name: Smoke and name Windows executable
+        shell: pwsh
+        run: |
+          $Version = "${{ needs.prepare.outputs.new_version }}"
+          & dist\vaultline-worker.exe --help
+          New-Item -ItemType Directory -Force -Path dist\release | Out-Null
+          Move-Item -Path dist\vaultline-worker.exe -Destination "dist\release\vaultline-worker_${Version}_windows-amd64.exe"
+          if (-not (Test-Path "dist\release\vaultline-worker_${Version}_windows-amd64.exe")) { throw "missing Windows release asset" }
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultline-worker-windows-amd64
+          path: dist/release/vaultline-worker_${{ needs.prepare.outputs.new_version }}_windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  image-build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # ── Docker build & push ──
 
@@ -141,9 +221,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.new_version }}
             type=raw,value=latest
 
       - name: Extract metadata for Control Plane image
@@ -152,9 +232,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}-control-plane
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.new_version }}
             type=raw,value=latest
 
       - name: Extract metadata for Worker image
@@ -163,9 +243,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}-worker
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.new_version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.new_version }}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.new_version }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.new_version }}
             type=raw,value=latest
 
       - name: Build and push backup runtime image
@@ -177,7 +257,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_runtime.outputs.tags }}
           labels: ${{ steps.meta_runtime.outputs.labels }}
-          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
+          build-args: APP_VERSION=${{ needs.prepare.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -190,7 +270,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_control_plane.outputs.tags }}
           labels: ${{ steps.meta_control_plane.outputs.labels }}
-          build-args: APP_VERSION=${{ steps.version.outputs.new_version }}
+          build-args: APP_VERSION=${{ needs.prepare.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -208,7 +288,66 @@ jobs:
           # existing Docker/Compose deployment while the Kubernetes client is
           # supplied by requirements.txt.
           build-args: |
-            APP_VERSION=${{ steps.version.outputs.new_version }}
+            APP_VERSION=${{ needs.prepare.outputs.new_version }}
             INSTALL_DOCKER_CLI=true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-release:
+    needs:
+      - prepare
+      - native-linux
+      - native-windows
+      - image-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download native release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vaultline-worker-*
+          path: dist/release-assets
+          merge-multiple: true
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Validate assets and generate checksums
+        run: |
+          VERSION="${{ needs.prepare.outputs.new_version }}"
+          cd dist/release-assets
+          required=(
+            "vaultline-worker_${VERSION}_amd64.deb"
+            "vaultline-worker_${VERSION}_arm64.deb"
+            "vaultline-worker_${VERSION}_windows-amd64.exe"
+          )
+          for asset in "${required[@]}"; do
+            test -s "$asset"
+          done
+          sha256sum "${required[@]}" > "vaultline-worker_${VERSION}_SHA256SUMS"
+          test -s "vaultline-worker_${VERSION}_SHA256SUMS"
+
+      - name: Create Git tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.prepare.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          gh release create "${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file release_body.md \
+            ${{ inputs.prerelease && '--prerelease' || '' }} \
+            "dist/release-assets/vaultline-worker_${VERSION}_amd64.deb" \
+            "dist/release-assets/vaultline-worker_${VERSION}_arm64.deb" \
+            "dist/release-assets/vaultline-worker_${VERSION}_windows-amd64.exe" \
+            "dist/release-assets/vaultline-worker_${VERSION}_SHA256SUMS"

@@ -69,18 +69,20 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 - Scope: frozen CLI executable, internal backup-engine entrypoint for `NativeRuntimeAdapter`, PyInstaller spec/hidden imports/data, and per-OS build checks.
 - Acceptance: packaged daemon and packaged backup execution run without a separately installed Python interpreter; external backup tools remain detected/documented, not bundled.
 
-### NWI-4 — Build Linux `.deb` and Windows worker release artifacts
+### NWI-4 — Prepare native package layouts and release naming
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_worker_deb_package tests.test_worker_packaging` — 8 tests passed; `bash -n scripts/build_worker_deb.sh` passed. `dpkg-deb` is unavailable on this Windows host, so package install/build validation remains for native CI.
 - Route: delegated packaging implementation.
-- Scope: Debian package metadata/layout/systemd unit/state ownership, Windows portable `.exe` task guidance, deterministic versioned artifact names, and SHA-256 manifest.
-- Acceptance: amd64/arm64 Linux packages install without enrolling/starting a worker; Windows x64 executable is a portable console program; no bootstrap secrets appear in package contents.
+- Scope: Debian package metadata/layout/systemd unit/state ownership, a build script for amd64/arm64, and deterministic `.deb` names. Windows executable naming/checksums are produced in NWI-5; Task Scheduler instructions are documented in NWI-6.
+- Acceptance: the builder validates amd64/arm64 and emits deterministic `.deb` names; package templates preserve existing service/config/state identifiers and install without enrolling/starting a worker; no bootstrap secrets appear in package content.
+- Commit: `0b54c07 feat(packaging): add Debian worker package`.
 
 ### NWI-5 — Publish assets and expose latest release metadata
 
-- Status: pending.
+- Status: in progress.
 - Route: delegated release workflow/API implementation.
-- Scope: host-native GitHub Actions build jobs and release asset uploads; extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
+- Scope: native GitHub Actions builds for Linux amd64/arm64 from manylinux2014 (glibc 2.17) and Windows x64; build packages, rename versioned assets, generate SHA256SUMS, attach to the GitHub Release, and extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
 - Acceptance: release workflow attaches amd64/arm64 Linux packages, the Windows x64 executable, and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
 
 ### NWI-6 — Add native package option to worker enrollment UI and docs
@@ -99,4 +101,4 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ## Next step
 
-Complete NWI-4 test-first: stage the Linux `.deb` layout/service ownership and define the portable Windows executable install/task instructions and deterministic asset/checksum names. Validate the Debian package contents without starting an unenrolled worker. Keep GitHub release wiring and UI changes for NWI-5/6.
+Complete NWI-5 test-first: inspect release/version output and latest-version API contracts, then build Linux amd64/arm64 artifacts from the glibc 2.17 manylinux baseline plus Windows x64 on native runners, attach versioned assets/checksums, and expose allowlisted latest asset metadata. Do not trigger or publish a release.
