@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
+import secrets
+import socket
+import sys
+import uuid
 from pathlib import Path
 from typing import Sequence
 
+from src.security.hmac_protocol import digest_secret
 from src.worker_agent import main as worker_main
 from src.worker_agent.infrastructure.adapters.native_runtime import NativeRuntimeAdapter
+from src.worker_agent.infrastructure.api_client.control_plane_client import ControlPlaneClient
+from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
 
 
 def _env_present(name: str) -> bool:
@@ -63,12 +71,85 @@ def _daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _enrollment_labels() -> dict[str, str]:
+    return {
+        "runtime_kind": "native",
+        "runtime_type": "native",
+        "supported_runtimes": "native",
+        "host_name": socket.gethostname(),
+    }
+
+
+def _new_pending_enrollment(store: WorkerCredentialStore, token_digest: str):
+    attempt_id = f"attempt-{uuid.uuid4()}"
+    durable_credential = secrets.token_urlsafe(48)
+    return store.save_pending_enrollment(attempt_id, durable_credential, token_digest)
+
+
+def _enroll(args: argparse.Namespace) -> int:
+    store = WorkerCredentialStore(os.environ.get("WORKER_CREDENTIAL_FILE", ".worker_credentials.json"))
+    if args.reset_pending:
+        store.delete_pending_enrollment()
+        print("Pending enrollment reset. Run enroll again with a valid bootstrap token to start over.")
+        return 0
+
+    bootstrap_token = getpass.getpass("Bootstrap token: ")
+    token_digest = digest_secret(bootstrap_token)
+    pending = store.load_pending_enrollment()
+    if pending is None:
+        pending = _new_pending_enrollment(store, token_digest)
+    elif pending.token_digest != token_digest:
+        print(
+            "A pending enrollment already exists for a different bootstrap token. "
+            "Re-run with the original token, or run 'enroll --reset-pending' if you intentionally want to discard the pending attempt.",
+            file=sys.stderr,
+        )
+        return 2
+
+    client = ControlPlaneClient(
+        os.environ.get("CONTROL_PLANE_URL", "http://127.0.0.1:8080"),
+        ca_file=os.environ.get("CONTROL_PLANE_CA_FILE") or None,
+        credential_store=store,
+    )
+    try:
+        response = client.complete_worker_enrollment_v2(
+            bootstrap_token,
+            pending.attempt_id,
+            pending.durable_credential,
+            labels=_enrollment_labels(),
+        )
+    except Exception as exc:
+        print(
+            "Enrollment did not complete. The pending attempt was kept; re-run enroll with the same bootstrap token to retry.",
+            file=sys.stderr,
+        )
+        print(f"Enrollment error type: {exc.__class__.__name__}", file=sys.stderr)
+        return 1
+
+    if store.load() is None:
+        store.save(response["worker_id"], pending.durable_credential, response["credential_version"])
+    store.delete_pending_enrollment()
+    print("Enrollment completed. Durable worker credentials were stored for daemon use.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.worker_agent.cli",
         description="Native filesystem worker CLI.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    enroll = subcommands.add_parser(
+        "enroll",
+        help="Securely complete native worker first-run enrollment using a hidden bootstrap token prompt.",
+    )
+    enroll.add_argument(
+        "--reset-pending",
+        action="store_true",
+        help="Discard a pending native enrollment attempt without prompting for a bootstrap token.",
+    )
+    enroll.set_defaults(handler=_enroll)
 
     daemon = subcommands.add_parser(
         "daemon",

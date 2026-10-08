@@ -44,14 +44,16 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ### NWI-1 — Add retry-safe V2 enrollment with separate durable worker credentials
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_hmac_auth tests.test_worker_enrollment_v2 tests.test_sqlite_runtime` — 15 tests passed; `git diff --check` reported no whitespace errors.
+- Commit: `d605540 feat(enrollment): separate bootstrap and worker credentials`.
 - Route: delegated bounded Control Plane/auth/client protocol writer; preserve the V1 endpoint.
 - Scope: additive enrollment-attempt persistence and V2 endpoint, client-generated durable key/attempt identity, idempotent completion replay, worker credential rotation/version rules, and old-client compatibility tests.
 - Acceptance: a one-time bootstrap token is not reused as the durable key for V2; exact retries return the same worker/version while a different attempt/key is rejected; V1 tests remain green.
 
 ### NWI-2 — Add secure native first-run enrollment CLI
 
-- Status: pending.
+- Status: in progress.
 - Route: delegated worker CLI writer.
 - Scope: interactive non-echo token prompt, pending credential/attempt file with restrictive permissions/ACL behavior, cleanup after success, and daemon start using the durable credential only.
 - Acceptance: no bootstrap token is accepted from CLI arguments or embedded in output; interrupted requests can retry the same attempt; daemon requires successful enrollment.
@@ -93,4 +95,4 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ## Next step
 
-Resolve build/runtime entrypoint surfaces, then begin NWI-1 test-first. Keep each work unit narrow; do not start packaging or release/UI wiring until the versioned enrollment and frozen worker contracts are stable.
+Complete NWI-2 test-first: inspect the existing CLI/config and credential store, then add secure interactive bootstrap and durable pending-attempt persistence. Keep each work unit narrow; do not start packaging or release/UI wiring until the versioned enrollment and frozen worker contracts are stable.
