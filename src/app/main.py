@@ -195,6 +195,8 @@ def main():
         container_port = DockerAdapter()
 
     if _env_bool("RESTORE_MODE"):
+        if runtime_type == "native" and _env_bool("RESTORE_STOP_CONTAINERS"):
+            raise ValueError("native restore must not stop containers")
         restore_config = RestoreConfig(
             target_path=os.environ.get("RESTORE_TARGET_PATH", ""),
             source=os.environ.get("RESTORE_SOURCE") or None,
@@ -217,6 +219,8 @@ def main():
             stop_label=os.environ.get("RESTORE_STOP_LABEL") or None,
             custom_label=os.environ.get("RESTORE_CUSTOM_LABEL") or None,
             read_only_paths=_parse_restore_read_only_paths(os.environ.get("RESTORE_READ_ONLY_PATHS")),
+            runtime_type=runtime_type,
+            filesystem_paths=tuple(backup_sources),
         )
 
         service = RestoreService(

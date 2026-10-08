@@ -2419,6 +2419,59 @@ class ControlPlaneService:
             "storage_context": storage_context,
         }
 
+    @staticmethod
+    def _native_path_parts(value: str) -> list[str]:
+        return [part for part in re.split(r"[\\/]+", value) if part]
+
+    @classmethod
+    def _is_absolute_native_path(cls, value: str) -> bool:
+        if value.startswith("/") and not value.startswith("//"):
+            return True
+        if re.match(r"^[A-Za-z]:[\\/]", value):
+            return True
+        if value.startswith("\\\\"):
+            parts = cls._native_path_parts(value)
+            return len(parts) >= 3 and all(part not in {".", ".."} for part in parts[:2])
+        return False
+
+    @classmethod
+    def _canonical_native_path(cls, value: str) -> tuple[str, str]:
+        text = value.strip()
+        if re.match(r"^[A-Za-z]:[\\/]", text):
+            comparable = text.replace("\\", "/").rstrip("/") or text
+            return "windows", comparable.casefold()
+        if text.startswith(("\\\\", "//")):
+            comparable = text.replace("\\", "/").rstrip("/") or text
+            return "windows", comparable.casefold()
+        comparable = text.replace("\\", "/")
+        while "//" in comparable and not comparable.startswith("//"):
+            comparable = comparable.replace("//", "/")
+        return "linux", comparable.rstrip("/") or comparable
+
+    @classmethod
+    def _native_path_is_within(cls, child: str, parent: str) -> bool:
+        child_flavor, child_norm = cls._canonical_native_path(child)
+        parent_flavor, parent_norm = cls._canonical_native_path(parent)
+        if child_flavor != parent_flavor:
+            return False
+        return child_norm == parent_norm or child_norm.startswith(parent_norm.rstrip("/") + "/")
+
+    @classmethod
+    def _validate_native_restore_destination(cls, destination: Any, source_paths: List[str]) -> str:
+        if not isinstance(destination, str) or not destination.strip():
+            raise ValueError("native restore requires an explicit host restore destination")
+        value = destination.strip()
+        if len(value) > cls.MAX_FILESYSTEM_PATH_LENGTH or "\x00" in value or any(ord(ch) < 32 for ch in value):
+            raise ValueError("native restore destination path is invalid")
+        if not cls._is_absolute_native_path(value):
+            raise ValueError("native restore destination must be an absolute Linux, Windows drive, or UNC path")
+        if any(part in {".", ".."} for part in cls._native_path_parts(value)):
+            raise ValueError("native restore destination traversal is not allowed")
+        for source in source_paths or []:
+            if isinstance(source, str) and cls._native_path_is_within(value, source):
+                raise ValueError("native restore destination must not overwrite a configured source path")
+        return value
+
     def _build_restore_payload(
         self,
         target: BackupTargetRecord,
@@ -2431,18 +2484,32 @@ class ControlPlaneService:
         layout: Optional[str],
     ) -> Dict[str, Any]:
         environment, volumes, resolved_files = self._resolve_runtime_dependencies(target)
-        volumes = self._normalize_runtime_volumes(volumes, target)
-        environment["RESTORE_READ_ONLY_PATHS"] = self._serialize_restore_read_only_paths(volumes)
-        storage_context = self._storage_context(target, environment, resolved_files)
         defaults = dict(target.restore_defaults)
+        if target.runtime_type == "native":
+            volumes = {}
+            environment.pop("BACKUP_SOURCES", None)
+            environment["RESTORE_READ_ONLY_PATHS"] = "[]"
+            effective_stop_containers = stop_containers if stop_containers is not None else defaults.get("stop_containers", False)
+            if effective_stop_containers:
+                raise ValueError("native restore must not stop containers")
+            target_path = self._validate_native_restore_destination(
+                restore_target_path or defaults.get("target_path") or defaults.get("RESTORE_TARGET_PATH"),
+                list(getattr(target, "filesystem_paths", []) or []),
+            )
+        else:
+            volumes = self._normalize_runtime_volumes(volumes, target)
+            environment["RESTORE_READ_ONLY_PATHS"] = self._serialize_restore_read_only_paths(volumes)
+            effective_stop_containers = stop_containers if stop_containers is not None else defaults.get("stop_containers", False)
+            target_path = restore_target_path or defaults.get("target_path") or defaults.get("RESTORE_TARGET_PATH") or "/backup"
+        storage_context = self._storage_context(target, environment, resolved_files)
         environment.update({
             "RESTORE_MODE": "true",
             "RESTORE_BACKUP_STRATEGY": target.backup_strategy,
             "RESTORE_DRY_RUN": "true" if dry_run else "false",
             "RESTORE_FORCE_OVERWRITE": "true" if force_overwrite else "false",
-            "RESTORE_TARGET_PATH": restore_target_path or defaults.get("target_path") or defaults.get("RESTORE_TARGET_PATH") or "/backup",
+            "RESTORE_TARGET_PATH": target_path,
             "RESTORE_LAYOUT": layout or defaults.get("layout") or defaults.get("RESTORE_LAYOUT") or "auto",
-            "RESTORE_STOP_CONTAINERS": "true" if (stop_containers if stop_containers is not None else defaults.get("stop_containers", False)) else "false",
+            "RESTORE_STOP_CONTAINERS": "true" if effective_stop_containers else "false",
             "RESTORE_STOP_LABEL": "docker-volume-backup.stop-during-backup=true",
         })
         if target.labels.get("BACKUP_CUSTOM_LABEL"):

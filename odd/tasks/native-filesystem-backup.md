@@ -56,20 +56,21 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 
 ### NFS-2 — Execute native filesystem backups
 
-- Status: in progress; implementation and focused checks complete, authorized work-unit commit pending.
+- Status: done.
 - Route: delegated direct; multi-file worker/runtime/engine change.
 - Scope: native runtime selection, local backup execution over configured paths, progress/cancellation/result handling, and relevant snapshot/retention operations already supported by the product.
 - Acceptance: native worker backs up configured Linux/Windows path sources without Docker; existing storage strategies remain usable when their required executables are installed.
 - Checks: 7 native runtime tests, 9 worker integration tests, and 1 backup-source preservation test passed; full-suite check remains scheduled for feature close.
-- Evidence: native jobs preserve JSON-encoded paths and spaces, report missing executables, support progress/cancellation/timeouts, and fail closed for restore pending NFS-3.
+- Evidence: commit `388ab98` (`feat(worker): add native filesystem backup runtime`). Native jobs preserve JSON-encoded paths and spaces, report missing executables, support progress/cancellation/timeouts, and fail closed for restore pending NFS-3.
 
 ### NFS-3 — Restore through the native worker
 
-- Status: pending
+- Status: in progress; implementation and focused checks complete, authorized work-unit commit pending.
 - Route: delegated direct; multi-file restore/runtime change.
 - Scope: native dry-run and restore destinations, platform-aware path validation, and safe overwrite behavior; preserve container stop/start only for Docker targets.
 - Acceptance: a native target can preview and restore a selected snapshot to a configured host destination; Docker and Kubernetes restore paths remain unchanged.
-- Checks: native restore tests for Linux-style and Windows-style paths, dry-run/overwrite cases, existing restore tests, full suite at feature close.
+- Checks: 11 native restore tests, 16 backup integrity tests (1 skipped), and 86 Control Plane dispatch tests passed; full-suite check remains scheduled for feature close.
+- Evidence: Native restore requires explicit host destination, preserves dry-run/overwrite, avoids container stop/start, and treats Windows ownership mapping as unsupported/reportable.
 
 ### NFS-4 — Add CLI/daemon operations and platform guidance
 
@@ -91,8 +92,14 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - NFS-2 TDD evidence: native runtime tests first failed because the adapter was absent; timeout tests later failed before bounded timeout/cleanup was implemented. Final focused checks passed: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_runtime.py'` (7 tests), `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_worker_runtime_integration.py'` (9 tests), and `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_backup_integrity.BackupIntegrityTests.test_native_runtime_main_consumes_backup_sources_json_without_splitting_paths` (1 test).
 - NFS-1 verification: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_filesystem_targets.py'` passed (7 tests); four targeted existing Docker/Kubernetes dispatch/route tests passed. One earlier attempt used incorrect test class names and failed; the corrected command passed. Tests emitted the existing `datetime.utcnow()` deprecation warning. `git diff --cached --check` passed before NFS-1 commit.
 - `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so a separate verifier ran for each task and confirmed the final focused results and diff behavior.
-- NFS-2 implementation is awaiting its explicitly authorized commit. Full suite and Windows execution remain pending for feature close. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes remain excluded.
+- NFS-2 commit: `388ab98` (`feat(worker): add native filesystem backup runtime`). It contains the native runtime, backup engine integration, focused tests, specification update, and ODD task file; pre-existing dirty paths were excluded. The cohesive native execution unit is 602 authored changed lines; the selected feature-branch chain strategy applies if the user later requests a PR.
+- NFS-2 verification: 7 native runtime tests, 9 worker integration tests, and 1 backup-source path preservation test passed. Independent verification confirmed timeout/cancellation status handling, JSON path preservation, no Docker/Kubernetes runtime selection, and native restore fail-closed. `git diff --cached --check` passed before commit.
+- NFS-3 adds native restore destination handling, dry-run/overwrite semantics, worker-side restore, no container stop/start, and explicit Windows ownership limitations. Windows path containment comparisons casefold drive/UNC paths but preserve Linux case sensitivity.
+- NFS-3 TDD evidence: `test_native_restore.py` initially failed before restore support and later failed four path-overlap cases before the flavor-aware correction. Final checks passed: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_restore.py'` (11 tests), `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_backup_integrity.py'` (16 tests, 1 skipped), and `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_control_plane_dispatch.py'` (86 tests).
+- Independent verification confirmed Windows drive/UNC case-insensitive overlap, Linux case-sensitive behavior, dry-run/overwrite/no-stop semantics, no `/backup` rewriting, and Docker/Kubernetes regressions.
+- `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so a separate verifier ran after the final correction. Full suite and Windows execution remain pending for feature close. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes remain excluded.
+- NFS-3 implementation is awaiting its explicitly authorized commit.
 
 ## Next step
 
-Create the explicitly authorized NFS-2 work-unit commit from only the native runtime, engine, tests/docs, and ODD task file. Then record its identity, close NFS-2, update the mirror and TODO, and delegate NFS-3.
+Create the explicitly authorized NFS-3 work-unit commit from native restore, tests/docs, and the ODD task file. Then record its identity, close NFS-3, update the mirror and TODO, and delegate NFS-4.

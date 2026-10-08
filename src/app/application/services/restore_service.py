@@ -96,6 +96,14 @@ class RestoreService:
     def _capability_gate(self, policy: RestoreOwnershipPolicy) -> dict[str, Any]:
         if policy.mode != "map" or (not policy.mappings and not policy.default_mapping):
             return {"state": "not_requested", "category": "not_requested", "mount_mode": "preserve", "writable": None}
+        if self._is_native_restore() and os.name == "nt":
+            return {
+                "state": "unsupported",
+                "category": "ownership_unsupported",
+                "mount_mode": "native",
+                "writable": None,
+                "detail": "Windows native restore does not support POSIX ownership mapping",
+            }
         config = copy.copy(self.restore_config)
         config.restore_ownership = policy
         if self.volume_scopes is not None:
@@ -163,7 +171,13 @@ class RestoreService:
             return "RESTORE_LAYOUT must be one of: auto, direct, backup-dir"
         return None
 
+    def _is_native_restore(self) -> bool:
+        return str(getattr(self.restore_config, "runtime_type", "") or "").strip().lower() == "native"
+
     def _find_affected_containers(self) -> List[str]:
+        if self._is_native_restore():
+            logger.info("Native restore: container discovery is disabled")
+            return []
         logger.info("Finding containers that mount the same volumes as the runtime container")
         containers = self.container_port.find_containers_using_runtime_volumes()
         logger.info(f"Found {len(containers)} container(s) sharing runtime volumes: {containers}")
@@ -256,6 +270,9 @@ class RestoreService:
             logger.info("Restore dry-run complete; no files, containers, or backup objects were modified")
             return plan
 
+        if self._is_native_restore() and self.restore_config.stop_containers:
+            return self._failure("native restore must not stop containers", plan.planned_actions, category="unsupported_native_stop_containers")
+
         if not self.restore_config.force_overwrite:
             return self._failure(
                 "Actual restore replaces target contents and requires RESTORE_FORCE_OVERWRITE=true. "
@@ -266,8 +283,9 @@ class RestoreService:
         policy = self._restore_policy
         capability = self._capability_gate(policy)
         if capability.get("state") not in {"ready", "not_requested"}:
+            detail = capability.get("detail") or capability.get("category", "ownership capability unavailable")
             return self._failure(
-                f"Restore blocked before clearing: {capability.get('category', 'ownership capability unavailable')}",
+                f"Restore blocked before clearing: {detail}",
                 plan.planned_actions,
                 category=capability.get("category", "ownership_capability_unknown"),
                 evidence=capability,

@@ -70,6 +70,8 @@ class RestoreConfig:
     custom_label: Optional[str] = None
     restore_ownership: Optional["RestoreOwnershipPolicy"] = None
     read_only_paths: tuple[str, ...] = ()
+    runtime_type: str = "docker"
+    filesystem_paths: tuple[str, ...] = ()
 
 @dataclass
 class RestoreCandidate:

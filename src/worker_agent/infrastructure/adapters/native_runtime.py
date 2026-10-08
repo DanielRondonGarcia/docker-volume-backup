@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List
@@ -72,6 +73,55 @@ class NativeRuntimeAdapter(RuntimePort):
     def _which(executable: str) -> str | None:
         return shutil.which(executable)
 
+    @staticmethod
+    def _native_path_parts(value: str) -> list[str]:
+        import re
+
+        return [part for part in re.split(r"[\\/]+", value) if part]
+
+    @classmethod
+    def _is_absolute_native_path(cls, value: str) -> bool:
+        import re
+
+        if value.startswith("/") and not value.startswith("//"):
+            return True
+        if re.match(r"^[A-Za-z]:[\\/]", value):
+            return True
+        if value.startswith("\\\\"):
+            return len(cls._native_path_parts(value)) >= 3
+        return False
+
+    @classmethod
+    def _canonical_native_path(cls, value: str) -> tuple[str, str]:
+        import re
+
+        text = value.strip()
+        if re.match(r"^[A-Za-z]:[\\/]", text):
+            comparable = text.replace("\\", "/").rstrip("/") or text
+            return "windows", comparable.casefold()
+        if text.startswith(("\\\\", "//")):
+            comparable = text.replace("\\", "/").rstrip("/") or text
+            return "windows", comparable.casefold()
+        comparable = text.replace("\\", "/")
+        while "//" in comparable and not comparable.startswith("//"):
+            comparable = comparable.replace("//", "/")
+        return "linux", comparable.rstrip("/") or comparable
+
+    @classmethod
+    def _validate_native_restore_destination(cls, destination: Any, source_paths: list[str]) -> None:
+        if not isinstance(destination, str) or not destination.strip():
+            raise ValueError("native restore requires an explicit host restore destination")
+        value = destination.strip()
+        if "\x00" in value or any(ord(ch) < 32 for ch in value) or not cls._is_absolute_native_path(value):
+            raise ValueError("native restore destination path is invalid")
+        if any(part in {".", ".."} for part in cls._native_path_parts(value)):
+            raise ValueError("native restore destination traversal is not allowed")
+        target_flavor, target = cls._canonical_native_path(value)
+        for source in source_paths:
+            source_flavor, source_norm = cls._canonical_native_path(source)
+            if target_flavor == source_flavor and (target == source_norm or target.startswith(source_norm.rstrip("/") + "/")):
+                raise ValueError("native restore destination must not overwrite a configured source path")
+
     def _require_executable(self, executable: str) -> None:
         if self._which(executable) is None:
             raise FileNotFoundError(
@@ -103,8 +153,11 @@ class NativeRuntimeAdapter(RuntimePort):
     def _command_and_environment(self, payload: Dict[str, Any]) -> tuple[list[str], dict[str, str]]:
         filesystem_paths = self._validate_native_scope(payload)
         raw_environment = payload.get("environment") if isinstance(payload.get("environment"), dict) else {}
-        if payload.get("restore_mode") or payload.get("_restore_result_transport") or str(raw_environment.get("RESTORE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}:
-            raise ValueError("native restore is not implemented in this worker task")
+        restore_mode = payload.get("restore_mode") or str(raw_environment.get("RESTORE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if restore_mode and str(raw_environment.get("RESTORE_STOP_CONTAINERS", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            raise ValueError("native restore must not stop containers")
+        if restore_mode:
+            self._validate_native_restore_destination(raw_environment.get("RESTORE_TARGET_PATH"), filesystem_paths)
         environment = os.environ.copy()
         for key, value in raw_environment.items():
             if isinstance(key, str) and isinstance(value, (str, int, float)) and not isinstance(value, bool):
@@ -257,13 +310,38 @@ class NativeRuntimeAdapter(RuntimePort):
             result["logs"] = ""
         return result
 
+    @staticmethod
+    def _is_restore_environment(environment: dict[str, str]) -> bool:
+        return str(environment.get("RESTORE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+
     def run_runtime_job(self, image: str, payload: Dict[str, Any], cancel_check: Callable[[], bool] | None = None, output_callback: Callable[[str], None] | None = None) -> Dict[str, Any]:
         secrets = self._payload_secrets(payload)
+        result_dir = None
+        restore_result_path = None
         try:
             command, environment = self._command_and_environment(payload)
-            return self._run_process(command, environment, payload, cancel_check, output_callback, binary=False)
+            if payload.get("_restore_result_transport") and self._is_restore_environment(environment):
+                result_dir = tempfile.mkdtemp(prefix="worker-native-restore-result-", dir=tempfile.gettempdir())
+                os.chmod(result_dir, 0o700)
+                restore_result_path = os.path.join(result_dir, DockerRuntimeAdapter.RESTORE_RESULT_FILENAME)
+                environment["RESTORE_RESULT_FILE"] = restore_result_path
+            result = self._run_process(command, environment, payload, cancel_check, output_callback, binary=False)
+            if restore_result_path:
+                restore_evidence, restore_error = DockerRuntimeAdapter._read_restore_result(restore_result_path, secrets)
+                if restore_evidence:
+                    result["restore_ownership"] = restore_evidence
+                if restore_error:
+                    result.update(self._failure(restore_error, secrets, result.get("status_code") or 1))
+                    result["restore_ownership"] = restore_evidence
+                elif restore_evidence and restore_evidence.get("status") != "succeeded":
+                    result["success"] = False
+                    result["error"] = restore_evidence.get("error") or "native restore failed"
+            return result
         except Exception as exc:
             return self._failure(str(exc), secrets)
+        finally:
+            if result_dir:
+                shutil.rmtree(result_dir, ignore_errors=True)
 
     def run_runtime_job_binary(self, image: str, payload: Dict[str, Any], cancel_check: Callable[[], bool] | None = None) -> Dict[str, Any]:
         secrets = self._payload_secrets(payload)

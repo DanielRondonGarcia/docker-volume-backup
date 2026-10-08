@@ -553,7 +553,14 @@ Reglas de ejecución nativa:
 - reporta claramente ejecutables faltantes (`tar`, `restic`, `gpg`, `rclone`, etc.) mediante `worker.self_check` o el resultado del job;
 - mantiene el ciclo existente de lease, progreso, cancelación, logs redactados y resultado del worker;
 - soporta operaciones Restic de metadatos/retención existentes que usan el mismo contrato de comando validado;
-- no implementa restore nativo en este paso.
+- soporta `restore.dry_run` y `restore.run` cuando el payload incluye un destino explícito del host;
+- no detiene contenedores, no usa Kubernetes y rechaza `RESTORE_STOP_CONTAINERS=true` para targets nativos.
+
+### Contrato de restore nativo
+
+Para targets `runtime_type: "native"`, el Control Plane exige `restore_target_path` o un default explícito equivalente antes de despachar `restore.dry_run` o `restore.run`. El destino se valida como ruta absoluta Linux, Windows con drive (`C:\\...`) o UNC (`\\\\server\\share\\...`), no puede contener traversal, no puede estar vacío y no puede apuntar dentro de los `filesystem_paths[]` fuente configurados. Las comprobaciones de contención son sensibles a mayúsculas en rutas Linux y no mezclan rutas Linux con Windows; en rutas Windows con drive o UNC son insensibles a mayúsculas para reflejar la semántica habitual del filesystem. El payload conserva `filesystem_paths[]`, usa `RESTORE_TARGET_PATH` con la ruta del host tal como fue autorizada, envía `RESTORE_READ_ONLY_PATHS=[]`, y no reescribe el destino ni las fuentes a `/backup`.
+
+El worker nativo ejecuta el mismo motor local (`src.app.main`) con `BACKUP_RUNTIME_TYPE=native`, `BACKUP_SOURCES_JSON` y las variables `RESTORE_*`. Dry-run sigue siendo el valor seguro por defecto; `restore.run` mantiene la exigencia de `RESTORE_FORCE_OVERWRITE=true` antes de limpiar o escribir. La restauración de ownership POSIX en Windows se reporta como `ownership_unsupported` cuando se solicita mapping, en lugar de tratarse como un crash. Docker y Kubernetes mantienen su comportamiento existente de mounts, `/backup`, `RESTORE_READ_ONLY_PATHS` y stop/start de contenedores donde aplique.
 
 ## Gestión de secretos
 

@@ -4428,6 +4428,10 @@ docker compose up -d
       if (!state || !state.target || !snapshotId) return;
       invalidateSnapshotRequest(false);
       const overlay = state.overlay;
+      const isNativeTarget = String(state.target.runtime_type || "docker").toLowerCase() === "native";
+      const nativeRestoreDestination = isNativeTarget
+        ? `<fieldset class="restore-snapshot-group"><legend>Destino en el host</legend><div class="field"><label for="rsRestoreTargetPath">Ruta destino</label><input id="rsRestoreTargetPath" name="restore_target_path" autocomplete="off" spellcheck="false" translate="no" placeholder="/restore/app o C:\\Restore\\app" required /><div class="helper">Obligatorio para targets nativos. No se restaura sobre las rutas origen ni se remapea a /backup.</div></div></fieldset>`
+        : "";
       const volumeCandidates = getRestoreOwnershipVolumeCandidates(state.target);
       const ownershipEditorId = volumeCandidates.length ? "rsOwnershipManual" : "rsOwnershipAdvanced";
       const mappingEditor = volumeCandidates.length
@@ -4464,13 +4468,14 @@ docker compose up -d
           <div class="modal-body">
             <div class="restore-snap-info" aria-label="Resumen del snapshot"><div class="field-row"><div class="field"><div class="field-label">Target</div><div class="info-value">${escapeHtml(state.target.name)}</div></div><div class="field"><div class="field-label">Snapshot</div><div class="info-value mono" translate="no">${escapeHtml(snapshotId)}</div></div></div>${dateStr ? `<div class="field"><div class="field-label">Fecha del snapshot</div><div class="info-value">${escapeHtml(dateStr)}</div></div>` : ""}</div>
             <form id="rsForm" class="restore-snapshot-form">
+              ${nativeRestoreDestination}
               <fieldset class="restore-snapshot-group restore-destructive-group">
                 <legend>Archivos existentes</legend>
                 <div class="field"><label for="rsOverwrite">Durante la restauración</label><select id="rsOverwrite" name="restore_overwrite" autocomplete="off"><option value="false">Conservar archivos existentes</option><option value="true">Reemplazar archivos existentes</option></select><div class="helper">Reemplazar puede eliminar cambios hechos después del snapshot.</div></div>
               </fieldset>
               <fieldset class="restore-snapshot-group">
                 <legend>Servicios durante la restauración</legend>
-                <div class="field"><label for="rsMode">Qué hacer con los servicios</label><select id="rsMode" name="restore_mode" autocomplete="off"><option value="cold">Detener servicios antes de restaurar</option><option value="hot">Mantener servicios activos</option></select><div class="helper">Puedes detener los servicios asociados para evitar escrituras durante la restauración, o mantenerlos activos si el entorno lo permite.</div></div>
+                <div class="field"><label for="rsMode">Qué hacer con los servicios</label><select id="rsMode" name="restore_mode" autocomplete="off" ${isNativeTarget ? "disabled" : ""}><option value="hot" ${isNativeTarget ? "selected" : ""}>Mantener servicios activos</option><option value="cold">Detener servicios antes de restaurar</option></select><div class="helper">${isNativeTarget ? "Los restores nativos no detienen contenedores ni usan Kubernetes." : "Puedes detener los servicios asociados para evitar escrituras durante la restauración, o mantenerlos activos si el entorno lo permite."}</div></div>
               </fieldset>
               <fieldset class="restore-snapshot-group restore-ownership-group">
                 <legend>Permisos de archivos</legend>
@@ -4622,7 +4627,13 @@ docker compose up -d
          }
         policy.confirmation = "confirmed";
         const forceOverwrite = document.getElementById("rsOverwrite").value === "true";
-        const stopContainers = document.getElementById("rsMode").value === "cold";
+        const stopContainers = !isNativeTarget && document.getElementById("rsMode").value === "cold";
+        const restoreTargetPath = document.getElementById("rsRestoreTargetPath")?.value.trim();
+        if (isNativeTarget && !restoreTargetPath) {
+          setOwnershipStatus("blocked", "Escribe una ruta destino del host para restaurar este target nativo.");
+          document.getElementById("rsRestoreTargetPath")?.focus();
+          return;
+        }
         const request = {
           requested_by: "ui",
           snapshot_id: snapshotId,
@@ -4630,6 +4641,7 @@ docker compose up -d
           stop_containers: stopContainers,
           restore_ownership: policy,
         };
+        if (restoreTargetPath) request.restore_target_path = restoreTargetPath;
         const values = Object.values(policy.mappings);
         if (policy.mode === "map" && values.length === 1) request.chown = values[0];
         void withBtnLoading(event.submitter || document.getElementById("rsConfirm"), async () => {
