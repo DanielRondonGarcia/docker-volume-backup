@@ -69,12 +69,12 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 - The spec now resolves the repo root from its own directory and includes setuptools-vendored backports only on Windows. Its tests observed RED before each correction.
 - Linux amd64 smoke: checksum-pinned shared CPython 3.11.17+20261003 ran on manylinux2014/glibc 2.17; final worker built and `--help` passed. Debian package `0.0.2` metadata/contents were inspected and contained no token/credential/secret paths.
 - Windows x64 smoke: local Python 3.11.15/PyInstaller 6.16.0 produced a 21,605,367-byte exe and `--help` exited 0. PyInstaller still reports a missing optional `backports` module warning, but no runtime failure.
-- The Linux release workflow uses checksum-pinned shared CPython assets for amd64/aarch64, asserts shared Python, and runs `--help` before package creation. Native arm64 runner execution remains part of NWI-7.
+- The Linux release workflow uses checksum-pinned shared CPython assets for amd64/aarch64, asserts shared Python, and runs `--help` before package creation. Native amd64/arm64 runner execution passed in NWI-7.
 
 ### NWI-4 — Prepare native package layouts and release naming
 
 - Status: done.
-- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_worker_deb_package tests.test_worker_packaging` — 8 tests passed; `bash -n scripts/build_worker_deb.sh` passed. `dpkg-deb` is unavailable on this Windows host, so package install/build validation remains for native CI.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_worker_deb_package tests.test_worker_packaging` — 8 tests passed; `bash -n scripts/build_worker_deb.sh` passed. Local `dpkg-deb` and host installation were unavailable; NWI-7 native CI successfully built both Debian packages.
 - Route: delegated packaging implementation.
 - Scope: Debian package metadata/layout/systemd unit/state ownership, a build script for amd64/arm64, and deterministic `.deb` names. Windows executable naming/checksums are produced in NWI-5; Task Scheduler instructions are documented in NWI-6.
 - Acceptance: the builder validates amd64/arm64 and emits deterministic `.deb` names; package templates preserve existing service/config/state identifiers and install without enrolling/starting a worker; no bootstrap secrets appear in package content.
@@ -83,9 +83,9 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 ### NWI-5 — Publish assets and expose latest release metadata
 
 - Status: done.
-- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_api tests.test_release_asset_workflow tests.test_worker_runtime_integration` — 21 tests passed; workflow YAML parsed; `actionlint` unavailable. Workflow was not triggered and no release was published.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_api tests.test_release_asset_workflow tests.test_worker_runtime_integration` — 21 tests passed; workflow YAML parsed; `actionlint` unavailable. The final authorized dispatch and artifacts are recorded under NWI-7.
 - Commit: `2ca913f feat(release): add cross-platform worker assets`.
-- Follow-up Linux build-runtime correction: `c25e41a fix(packaging): harden native worker builds`; workflow was not triggered and no release was published.
+- Follow-up Linux build-runtime correction: `c25e41a fix(packaging): harden native worker builds`; final workflow result is recorded under NWI-7.
 - Route: delegated release workflow/API implementation.
 - Scope: native GitHub Actions builds for Linux amd64/arm64 from manylinux2014 (glibc 2.17) and Windows x64; build packages, rename versioned assets, generate SHA256SUMS, attach to the GitHub Release, and extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
 - Acceptance: release workflow attaches amd64/arm64 Linux packages, the Windows x64 executable, and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
@@ -101,17 +101,21 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ### NWI-7 — Run integration and release-artifact verification
 
-- Status: in progress.
-- Evidence: final full suite passed 500 tests with 2 skipped; local Linux amd64 executable/package and Windows x64 `--help` smokes pass. Workflow YAML parsed; `actionlint` is unavailable. Browser-level interaction was unavailable.
-- Release authorization: user selected a minor pre-release from `origin/master` and explicitly authorized fast-forwarding the feature commits, pushing, and dispatching; the workflow also pushes Docker images and creates the tag/GitHub Release. The 14 commits were fast-forwarded to master at `90f4f4413584710836920994c52c1e0f5088177c`; unrelated local dirt was excluded.
-- First dispatch: authorized run `37855514875` computed version `3.7.0` (`minor`, previous stable tag `3.6.1`). `prepare` and Windows succeeded; both Linux jobs failed because the workflow directly executed `scripts/build_worker_deb.sh`, tracked as mode `100644`, yielding `Permission denied`.
-- Partial external side effect: `image-build` succeeded and published `3.7.0`, `3.7`, `3`, and `latest` tags for the runtime, Control Plane, and worker images. `publish-release` was skipped; no `3.7.0` tag, GitHub Release, worker assets, or checksums were created.
-- Workflow correction committed: `7eaf225 fix(release): invoke Debian builder through bash`; the regression was RED before the fix and `tests.test_release_asset_workflow` passes all 8 tests. YAML parsing and `git diff --check` pass (line-ending warnings only).
-- Next: push this correction to master and rerun the authorized minor pre-release. The rerun will update the already-published image tags.
-- Route: delegated verifier; full suite and focused Linux/Windows artifact jobs.
-- Scope: verify V1/V2 enrollment, no-secret packaging, install output, latest API/UI fallback, backward compatibility, and all existing Docker/Kubernetes regressions.
-- Acceptance: full Python suite passes; amd64/arm64 Linux package validation passes on native CI; Windows x64 binary build/import smoke passes on Windows runner; platform checks unavailable locally are reported explicitly.
+- Status: done.
+- Baseline evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover tests` passed 500 tests with 2 skipped. Local Linux amd64 worker/package and Windows x64 `--help` smokes passed. The regression-fix suite `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_workflow` passed all 8 tests; YAML parsing succeeded.
+- Authorization: user selected a minor pre-release from `origin/master` and explicitly authorized the fast-forward push and release dispatch, including Docker image publication. Fourteen feature commits were pushed to master at `90f4f4413584710836920994c52c1e0f5088177c`; unrelated local changes were excluded.
+- Initial run `37855514875` computed `3.7.0` from `3.6.1`; both Linux jobs failed because mode-`100644` `scripts/build_worker_deb.sh` was directly executed. Windows and image-build succeeded; image tags were published but release publication was skipped.
+- Fix: `7eaf225 fix(release): invoke Debian builder through bash` added the regression test and fixed the workflow command. `489b3aa docs(odd): record release workflow fix` recorded the correction. Both were pushed to master without force.
+- Successful retry `37856895889`: branch `master`, HEAD `489b3aa62841554c4941fd2820acca10049ca3d3`; `prepare`, Linux amd64, Linux arm64, Windows, image-build, and publish-release all succeeded. The workflow created pre-release `v3.7.0`, tag `3.7.0`, at https://github.com/DanielRondonGarcia/docker-volume-backup/releases/tag/3.7.0.
+- Release assets and SHA-256:
+  - `vaultline-worker_3.7.0_amd64.deb`: `6e60edea4c97bb0256facb9672b3376d057ce2ec6e99ffa8eb4e0d0bfa8c0ea7`
+  - `vaultline-worker_3.7.0_arm64.deb`: `5f5207fe5aef799786c0649b459a3835f27a1b1c09b0ecb14bc924932de3dcf0`
+  - `vaultline-worker_3.7.0_windows-amd64.exe`: `929b12e508cc8280b1daf37a7d75f3f6cb39798b58aadd454f51628c347de722`
+  - `vaultline-worker_3.7.0_SHA256SUMS` published; its asset digest is `9ae6b17b18d91a9cece4d4ccdc3f425404a259156288da9a7e64d3d482896e16`.
+- Final image tags `3.7.0`, `3.7`, `3`, and `latest` were pushed with digests: runtime `sha256:c812b385ea15c60e8891a410c7d0ed1e2b899f195f00b95f04535a2ae6e46f33`; Control Plane `sha256:2d0d202e146afefb5a9dbb34915f13e0cab42d5b285c9360757dd6eb839f2d4e`; worker `sha256:63f20b650c403388419dc1ec7274a119ac706153c245e3038e20cbe892647cab`.
+- Assessment limitation: native ASSESS returned `unassessable` because preserved untracked `.codegraph/` and `.playwright-mcp/` paths require explicit scope declaration; it reported RDD off. Writer self-checks and the independent verifier passed. `actionlint`, browser-level UI interaction, host installation of the `.deb`, systemd runtime, Windows Task Scheduler, and real Windows `icacls` behavior remain unverified.
+- Acceptance: full suite passed, native CI built both Linux packages and the Windows executable, checksums were generated, and the authorized pre-release completed successfully. Unavailable runtime/UI checks are recorded above.
 
 ## Next step
 
-Push the verified correction to `master` without force and rerun the same `minor` pre-release. Confirm both Linux `.deb` jobs, Windows `.exe`, checksums, release/tag, and image tag updates; preserve unrelated local dirt.
+No release action remains. Preserve unrelated local modifications; the pre-release `3.7.0` is published and verified.
