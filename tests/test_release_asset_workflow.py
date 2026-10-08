@@ -23,10 +23,24 @@ class ReleaseAssetWorkflowTests(unittest.TestCase):
         self.assertIn("ubuntu-24.04-arm", self.workflow)
         self.assertIn("quay.io/pypa/manylinux2014_x86_64", self.workflow)
         self.assertIn("quay.io/pypa/manylinux2014_aarch64", self.workflow)
-        self.assertIn("/opt/python/cp311-cp311/bin/python", self.workflow)
+        self.assertIn("cpython-3.11.17%2B20261003", self.workflow)
+        self.assertNotIn("/opt/python/cp311-cp311/bin/python", self.workflow)
         self.assertIn("requirements-build.txt", self.workflow)
         self.assertIn("PyInstaller build/vaultline-worker.spec", self.workflow)
         self.assertIn("scripts/build_worker_deb.sh", self.workflow)
+
+    def test_linux_pyinstaller_uses_shared_python_build_standalone_runtime(self):
+        self.assertIn("pbs_url", self.workflow)
+        self.assertIn("pbs_sha256", self.workflow)
+        self.assertIn("cpython-3.11.17%2B20261003-x86_64-unknown-linux-gnu-install_only.tar.gz", self.workflow)
+        self.assertIn("c624af93ad62a596806bbd2404e1fb80744a407ca7279854445ede16d93858b8", self.workflow)
+        self.assertIn("cpython-3.11.17%2B20261003-aarch64-unknown-linux-gnu-install_only.tar.gz", self.workflow)
+        self.assertIn("2238f0556d3a9777d42261b1e4d7b9834d56f111d3dd879a0647c27c824cc31d", self.workflow)
+        self.assertIn("/tmp/pbs/python/bin:$PATH", self.workflow)
+        self.assertIn("/tmp/pbs/python/lib:${LD_LIBRARY_PATH:-}", self.workflow)
+        self.assertIn("Py_ENABLE_SHARED=1", self.workflow)
+        self.assertIn("libpython3.11.so", self.workflow)
+        self.assertRegex(self.workflow, r"dist/vaultline-worker --help")
 
     def test_windows_build_names_smokes_and_uploads_exact_exe(self):
         self.assertIn("runs-on: windows-2022", self.workflow)

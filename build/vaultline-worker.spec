@@ -5,10 +5,11 @@ Build on each target OS/Python/architecture combination; one-file outputs are no
 portable across operating systems or architectures.
 """
 
+import sys
 from pathlib import Path
 
 block_cipher = None
-ROOT = Path(SPECPATH).parent.parent.resolve()
+ROOT = Path(SPECPATH).resolve().parent
 
 hiddenimports = [
     "src.app.main",
@@ -24,6 +25,12 @@ hiddenimports = [
     "src.worker_agent.infrastructure.api_client.control_plane_client",
     "src.worker_agent.infrastructure.security.credential_store",
 ]
+
+if sys.platform == "win32":
+    hiddenimports.extend([
+        "backports",
+        "backports.tarfile",
+    ])
 
 
 a = Analysis(

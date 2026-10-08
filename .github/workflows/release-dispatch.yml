@@ -122,9 +122,13 @@ jobs:
           - arch: amd64
             runner: ubuntu-24.04
             manylinux_image: quay.io/pypa/manylinux2014_x86_64
+            pbs_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.11.17%2B20261003-x86_64-unknown-linux-gnu-install_only.tar.gz
+            pbs_sha256: c624af93ad62a596806bbd2404e1fb80744a407ca7279854445ede16d93858b8
           - arch: arm64
             runner: ubuntu-24.04-arm
             manylinux_image: quay.io/pypa/manylinux2014_aarch64
+            pbs_url: https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.11.17%2B20261003-aarch64-unknown-linux-gnu-install_only.tar.gz
+            pbs_sha256: 2238f0556d3a9777d42261b1e4d7b9834d56f111d3dd879a0647c27c824cc31d
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -138,7 +142,19 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
             ${{ matrix.manylinux_image }} \
-            bash -lc '/opt/python/cp311-cp311/bin/python -m pip install -r requirements-build.txt && /opt/python/cp311-cp311/bin/python -m PyInstaller build/vaultline-worker.spec --distpath /workspace/dist --workpath /workspace/build/pyinstaller-${{ matrix.arch }} --noconfirm'
+            bash -lc '
+              set -euo pipefail
+              mkdir -p /tmp/pbs
+              curl -fsSL "${{ matrix.pbs_url }}" -o /tmp/python-build-standalone.tar.gz
+              echo "${{ matrix.pbs_sha256 }}  /tmp/python-build-standalone.tar.gz" | sha256sum -c -
+              tar -xzf /tmp/python-build-standalone.tar.gz -C /tmp/pbs
+              export PATH="/tmp/pbs/python/bin:$PATH"
+              export LD_LIBRARY_PATH="/tmp/pbs/python/lib:${LD_LIBRARY_PATH:-}"
+              python -c "import pathlib, sysconfig; shared = sysconfig.get_config_var(\"Py_ENABLE_SHARED\"); assert shared == 1, f\"Py_ENABLE_SHARED={shared}\"; assert pathlib.Path(\"/tmp/pbs/python/lib/libpython3.11.so\").is_file(), \"missing libpython3.11.so\"; print(\"Py_ENABLE_SHARED=1\")"
+              python -m pip install -r requirements-build.txt
+              python -m PyInstaller build/vaultline-worker.spec --distpath /workspace/dist --workpath /workspace/build/pyinstaller-${{ matrix.arch }} --noconfirm
+              /workspace/dist/vaultline-worker --help
+            '
 
       - name: Package Debian worker on native host
         run: |
