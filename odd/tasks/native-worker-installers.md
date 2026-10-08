@@ -53,14 +53,16 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ### NWI-2 — Add secure native first-run enrollment CLI
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_worker_enrollment_cli tests.test_worker_cli tests.test_worker_enrollment_v2 tests.test_hmac_auth` — 23 tests run, 1 skipped; Windows ACL failure cleanup verified, POSIX permission assertion skipped on this host.
+- Commit: `6d60750 feat(worker): add secure native enrollment command`.
 - Route: delegated worker CLI writer.
 - Scope: interactive non-echo token prompt, pending credential/attempt file with restrictive permissions/ACL behavior, cleanup after success, and daemon start using the durable credential only.
 - Acceptance: no bootstrap token is accepted from CLI arguments or embedded in output; interrupted requests can retry the same attempt; daemon requires successful enrollment.
 
 ### NWI-3 — Bundle the native worker and backup engine for each OS
 
-- Status: pending.
+- Status: in progress.
 - Route: delegated bounded worker/runtime and PyInstaller build implementation.
 - Scope: frozen CLI executable, internal backup-engine entrypoint for `NativeRuntimeAdapter`, PyInstaller spec/hidden imports/data, and per-OS build checks.
 - Acceptance: packaged daemon and packaged backup execution run without a separately installed Python interpreter; external backup tools remain detected/documented, not bundled.
@@ -95,4 +97,4 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ## Next step
 
-Complete NWI-2 test-first: inspect the existing CLI/config and credential store, then add secure interactive bootstrap and durable pending-attempt persistence. Keep each work unit narrow; do not start packaging or release/UI wiring until the versioned enrollment and frozen worker contracts are stable.
+Complete NWI-3 test-first: map the worker/runtime entrypoint and imports required by a frozen build, then implement the executable's internal backup-engine dispatch and platform build configuration. Keep each work unit narrow; do not start package/release/UI wiring until the frozen worker contract is stable.

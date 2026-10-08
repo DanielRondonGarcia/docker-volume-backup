@@ -40,6 +40,39 @@ class NativeRuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(recorded["env"]["BACKUP_SOURCES_JSON"], '["/srv/data with spaces","C:\\\\Users\\\\Alice\\\\My Documents"]')
         self.assertNotIn("/backup", recorded["env"].get("BACKUP_SOURCES", ""))
 
+    def test_frozen_backup_payload_uses_current_executable_backup_engine_subcommand(self):
+        adapter = NativeRuntimeAdapter(python_executable="python-test")
+        payload = {
+            "runtime_type": "native",
+            "filesystem_paths": ["/srv/app"],
+            "environment": {"BACKUP_STRATEGY": "tar"},
+            "command": "/root/backup.sh",
+            "backup_mode": "hot",
+        }
+        recorded = {}
+
+        def fake_popen(command, **kwargs):
+            recorded["command"] = command
+            recorded["env"] = kwargs["env"]
+            process = Mock()
+            process.stdout.readline.side_effect = ["Backup starting\n", ""]
+            process.stderr.readline.side_effect = [""]
+            process.wait.return_value = 0
+            process.returncode = 0
+            return process
+
+        with patch("src.worker_agent.infrastructure.adapters.native_runtime.sys.executable", "vaultline-worker.exe"), patch.object(
+            sys, "frozen", True, create=True
+        ), patch("src.worker_agent.infrastructure.adapters.native_runtime.shutil.which", return_value="vaultline-worker.exe"), patch(
+            "src.worker_agent.infrastructure.adapters.native_runtime.subprocess.Popen", side_effect=fake_popen
+        ):
+            result = adapter.run_runtime_job("unused-image", payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(recorded["command"], ["vaultline-worker.exe", "backup-engine"])
+        self.assertEqual(recorded["env"]["BACKUP_RUNTIME_TYPE"], "native")
+        self.assertEqual(recorded["env"]["BACKUP_SOURCES_JSON"], '["/srv/app"]')
+
     def test_native_backup_rejects_cold_mode_before_process_launch(self):
         adapter = NativeRuntimeAdapter()
         with patch("src.worker_agent.infrastructure.adapters.native_runtime.subprocess.Popen") as popen:

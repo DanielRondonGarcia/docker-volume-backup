@@ -123,10 +123,18 @@ class NativeRuntimeAdapter(RuntimePort):
                 raise ValueError("native restore destination must not overwrite a configured source path")
 
     def _require_executable(self, executable: str) -> None:
-        if self._which(executable) is None:
+        if self._which(executable) is None and not (os.path.isabs(executable) and os.path.exists(executable)):
             raise FileNotFoundError(
                 f"required executable '{executable}' is not available on this native worker PATH"
             )
+
+    def _backup_engine_command(self) -> list[str]:
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            self._require_executable(executable)
+            return [executable, "backup-engine"]
+        self._require_executable(self.python_executable)
+        return [self.python_executable, "-m", "src.app.main"]
 
     def _validate_native_scope(self, payload: Dict[str, Any]) -> list[str]:
         RuntimeCommandPolicy.validate_target_scope(payload)
@@ -169,8 +177,7 @@ class NativeRuntimeAdapter(RuntimePort):
         RuntimeCommandPolicy.validate_snapshot_scope(payload, command)
         command = RuntimeCommandPolicy.apply_lock_policy(command, self.no_lock)
         if command == ["/root/backup.sh"]:
-            self._require_executable(self.python_executable)
-            return [self.python_executable, "-m", "src.app.main"], environment
+            return self._backup_engine_command(), environment
         self._require_executable(command[0])
         return command, environment
 

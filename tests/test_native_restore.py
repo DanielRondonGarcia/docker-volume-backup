@@ -246,6 +246,46 @@ class NativeRestoreTests(unittest.TestCase):
         self.assertEqual(recorded["env"]["BACKUP_SOURCES_JSON"], '["/srv/app"]')
         self.assertIn("restore_ownership", result)
 
+    def test_frozen_native_runtime_restore_invokes_backup_engine_with_result_transport(self):
+        adapter = NativeRuntimeAdapter(python_executable="python-test")
+        recorded = {}
+
+        def fake_popen(command, **kwargs):
+            recorded["command"] = command
+            recorded["env"] = kwargs["env"]
+            result_path = kwargs["env"].get("RESTORE_RESULT_FILE")
+            Path(result_path).write_text(json.dumps({"schema_version": 1, "status": "succeeded", "destructive_state": "none"}))
+            process = Mock()
+            process.stdout.readline.side_effect = ["Restore dry-run complete\n", ""]
+            process.stderr.readline.side_effect = [""]
+            process.wait.return_value = 0
+            process.returncode = 0
+            return process
+
+        payload = {
+            "runtime_type": "native",
+            "filesystem_paths": ["/srv/app"],
+            "command": "/root/backup.sh",
+            "environment": {
+                "RESTORE_MODE": "true",
+                "RESTORE_DRY_RUN": "true",
+                "RESTORE_TARGET_PATH": "/restore/native-target",
+                "RESTORE_STOP_CONTAINERS": "false",
+            },
+            "_restore_result_transport": True,
+        }
+        with patch("src.worker_agent.infrastructure.adapters.native_runtime.sys.executable", "vaultline-worker.exe"), patch.object(
+            sys, "frozen", True, create=True
+        ), patch("src.worker_agent.infrastructure.adapters.native_runtime.shutil.which", return_value="vaultline-worker.exe"), patch(
+            "src.worker_agent.infrastructure.adapters.native_runtime.subprocess.Popen", side_effect=fake_popen
+        ):
+            result = adapter.run_runtime_job("unused", payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(recorded["command"], ["vaultline-worker.exe", "backup-engine"])
+        self.assertEqual(recorded["env"]["BACKUP_RUNTIME_TYPE"], "native")
+        self.assertIn("restore_ownership", result)
+
     def test_native_runtime_rejects_restore_stop_containers(self):
         adapter = NativeRuntimeAdapter(python_executable=sys.executable)
         payload = {

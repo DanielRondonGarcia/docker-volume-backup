@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
+from src.app import main as app_main
 from src.security.hmac_protocol import digest_secret
 from src.worker_agent import main as worker_main
 from src.worker_agent.infrastructure.adapters.native_runtime import NativeRuntimeAdapter
@@ -68,6 +69,20 @@ def _daemon(args: argparse.Namespace) -> int:
     os.environ["WORKER_RUNTIME"] = "native"
     os.environ["WORKER_RUN_ONCE"] = "true" if args.once else "false"
     worker_main.main()
+    return 0
+
+
+def _backup_engine(_args: argparse.Namespace) -> int:
+    try:
+        app_main.main()
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        print(code, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -171,8 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["backup-engine"]:
+        return _backup_engine(argparse.Namespace(command="backup-engine"))
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     return args.handler(args)
 
 

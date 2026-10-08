@@ -7,6 +7,33 @@ from unittest.mock import patch
 
 
 class WorkerNativeCLITests(unittest.TestCase):
+    def test_backup_engine_dispatches_to_app_main_and_returns_zero(self):
+        from src.worker_agent import cli
+
+        with patch("src.app.main.main", return_value=None) as app_main:
+            exit_code = cli.main(["backup-engine"])
+
+        self.assertEqual(exit_code, 0)
+        app_main.assert_called_once_with()
+
+    def test_backup_engine_dispatch_preserves_system_exit_code(self):
+        from src.worker_agent import cli
+
+        with patch("src.app.main.main", side_effect=SystemExit(7)):
+            exit_code = cli.main(["backup-engine"])
+
+        self.assertEqual(exit_code, 7)
+
+    def test_backup_engine_is_not_listed_in_public_help(self):
+        from src.worker_agent import cli
+
+        help_text = cli.build_parser().format_help()
+
+        self.assertIn("daemon", help_text)
+        self.assertIn("enroll", help_text)
+        self.assertIn("self-check", help_text)
+        self.assertNotIn("backup-engine", help_text)
+
     def test_daemon_defaults_to_native_continuous_worker_main(self):
         from src.worker_agent import cli
 
