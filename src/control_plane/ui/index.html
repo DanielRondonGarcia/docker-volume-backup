@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <link rel="icon" type="image/png" href="/favicon.ico" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Docker Volume Backup | Control Plane</title>
+  <title>Vaultline | Control Plane</title>
   <link rel="stylesheet" href="/styles/tokens.css" />
   <link rel="stylesheet" href="/styles/components.css" />
   <link rel="stylesheet" href="/styles/app.css" />
@@ -176,7 +176,7 @@
   <div id="appLoader" class="app-loader">
     <div class="app-loader-content">
       <div class="app-loader-spinner"></div>
-      <div class="app-loader-text">Cargando Docker Volume Backup...</div>
+      <div class="app-loader-text">Cargando Vaultline...</div>
     </div>
   </div>
   <div id="app" class="app" style="visibility:hidden;">
@@ -522,7 +522,7 @@
       const sidebar = document.getElementById("sidebar");
       const items = NAV_ITEMS.filter(item => !state.currentRole || item.roles.includes(state.currentRole));
       sidebar.innerHTML = `
-        <div class="workspace"><img src="/favicon.ico" class="sidebar-logo" alt="logo" /><span>Docker Volume Backup</span></div>
+        <div class="workspace"><img src="/favicon.ico" class="sidebar-logo" alt="logo" /><span>Vaultline</span></div>
         <div class="section-label">Operacion</div>
         <nav class="section">
           ${items.map(item => `

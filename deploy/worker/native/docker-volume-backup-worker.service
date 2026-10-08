@@ -1,5 +1,5 @@
 [Unit]
-Description=Docker Volume Backup native filesystem worker
+Description=Vaultline native filesystem worker
 Documentation=https://github.com/danielrondongarcia/docker-volume-backup
 After=network-online.target
 Wants=network-online.target

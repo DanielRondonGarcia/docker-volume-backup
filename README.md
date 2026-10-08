@@ -1,8 +1,8 @@
-# docker-volume-backup
+# Vaultline
 
-Sistema de backup y restore centralizado para volúmenes Docker, con arquitectura
-**Control Plane + Workers**, UI web, soporte para Restic/Rclone, y backups
-fríos (deteniendo contenedores) o calientes.
+Vaultline provides centralized backup and restore for Docker volumes, Kubernetes
+PVCs, and explicit native filesystem paths, with a **Control Plane + Workers**
+architecture, web UI, Restic/Rclone support, and cold or hot backups.
 
 ![UI Showcase](doc/ui-showcase.png)
 

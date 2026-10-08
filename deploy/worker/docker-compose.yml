@@ -54,7 +54,7 @@ services:
       - /bin/sh
       - -c
       - |
-        printf '%s\n' 'Docker volume backup demo' > /demo-files/README.txt
+        printf '%s\n' 'Vaultline demo backup target' > /demo-files/README.txt
         printf '%s\n' 'sample file A' > /demo-files/sample-a.txt
         printf '%s\n' 'sample file B' > /demo-files/sample-b.txt
         exec tail -f /dev/null

@@ -2,13 +2,13 @@
 
 ## Objetivo
 
-Diseñar una evolución de `docker-volume-backup` hacia una plataforma centralizada de respaldo y restauración, compuesta por:
+Diseñar Vaultline como una plataforma centralizada de respaldo y restauración para volúmenes Docker, PVCs de Kubernetes y rutas nativas explícitas, compuesta por:
 
 - Un `Control Plane` con UI, API, scheduler, metadatos, secretos y auditoría.
-- Uno o varios `Worker Agent` desplegados en hosts con Docker.
+- Uno o varios `Worker Agent` desplegados en hosts con Docker, Kubernetes o filesystem nativo.
 - Un runtime de ejecución reutilizable basado en la imagen actual de backup/restore del proyecto.
 
-El sistema debe permitir operar backups y restores de forma centralizada usando principalmente `restic` + `rclone`, con soporte de backups en frío o en caliente, gestión de retención y operación remota segura.
+El sistema debe permitir operar backups y restores de forma centralizada usando principalmente `restic` + `rclone`, con soporte de backups en frío o en caliente donde aplique, gestión de retención y operación remota segura.
 
 ## Alcance funcional
 
