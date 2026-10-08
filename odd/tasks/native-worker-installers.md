@@ -80,14 +80,16 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ### NWI-5 — Publish assets and expose latest release metadata
 
-- Status: in progress.
+- Status: done.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_api tests.test_release_asset_workflow tests.test_worker_runtime_integration` — 21 tests passed; workflow YAML parsed; `actionlint` unavailable. Workflow was not triggered and no release was published.
+- Commit: `2ca913f feat(release): add cross-platform worker assets`.
 - Route: delegated release workflow/API implementation.
 - Scope: native GitHub Actions builds for Linux amd64/arm64 from manylinux2014 (glibc 2.17) and Windows x64; build packages, rename versioned assets, generate SHA256SUMS, attach to the GitHub Release, and extend latest-version API with allowlisted asset names, download URLs, tag, and checksums while preserving existing fields/clients.
 - Acceptance: release workflow attaches amd64/arm64 Linux packages, the Windows x64 executable, and checksum manifest; endpoint rejects unexpected asset URLs and remains compatible with current version banner consumers.
 
 ### NWI-6 — Add native package option to worker enrollment UI and docs
 
-- Status: pending.
+- Status: in progress.
 - Route: delegated bounded UI/docs writer.
 - Scope: add a native-worker enrollment tab with latest platform assets, version/checksum, secure prompt instructions, install/enroll/start commands, and no-assets fallback; preserve Compose tab and separate copy-secret action.
 - Acceptance: administrators can download the correct OS asset and enroll without exposing the token in the package, generated shell arguments, or Compose environment.
@@ -101,4 +103,4 @@ Add downloadable native worker packages for Linux and Windows, published as GitH
 
 ## Next step
 
-Complete NWI-5 test-first: inspect release/version output and latest-version API contracts, then build Linux amd64/arm64 artifacts from the glibc 2.17 manylinux baseline plus Windows x64 on native runners, attach versioned assets/checksums, and expose allowlisted latest asset metadata. Do not trigger or publish a release.
+Complete NWI-6 test-first: add the native-worker option to the enrollment modal using the exact latest API asset keys, retain Docker Compose as the default/available flow, and document secure installation and Task Scheduler/systemd startup. Keep the token separate, hidden at CLI prompt, and never embed it in downloads or commands.

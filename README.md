@@ -109,6 +109,8 @@ El worker incluye un servicio `demo-app` (nginx) de ejemplo. Edita
 `deploy/worker/docker-compose.yml` para añadir tus propios servicios con
 sus volúmenes — el worker los descubrirá automáticamente vía `docker.sock`.
 
+Para hosts sin Docker, usa la guía de [Worker nativo empaquetado](doc/control-plane-quickstart.md#worker-nativo-empaquetado-v2-seguro): la UI ofrece paquetes Linux/Windows y enrolamiento V2 con prompt oculto.
+
 ### 3. Configurar el backup desde la UI
 
 Abre `http://127.0.0.1:18080/`, inicia sesión y:

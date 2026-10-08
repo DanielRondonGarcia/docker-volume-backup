@@ -1370,6 +1370,55 @@ class WorkerUiStateTests(unittest.TestCase):
         self.assertIn(".worker-notice", self.css)
         self.assertIn(".pill.danger", self.css)
 
+    def test_worker_enrollment_native_tabs_assets_and_secret_handling(self):
+        for marker in (
+            'role="tablist" aria-label="Opciones de despliegue del worker"',
+            'role="tab" aria-selected="${addWorkerState.activeTab === "compose" ? "true" : "false"}',
+            'data-tab="compose"',
+            'data-tab="native"',
+            'Worker nativo',
+            'nativePlatformSelect',
+            'linux-amd64',
+            'linux-arm64',
+            'windows-amd64',
+            'checksums',
+            'assetForSelectedNativePlatform',
+            'renderNativeWorkerTab',
+            'No se infiere desde el navegador',
+            'vaultline-worker enroll',
+            'prompt oculto',
+            'copyEnrollmentSecret',
+            'Pegar solo en el prompt oculto',
+            'SHA256',
+            'SHA256SUMS',
+            'No hay assets nativos publicados para esta version',
+            'state.latestAssets',
+        ):
+            self.assertIn(marker, self.source)
+        commands_block = re.search(r"function renderNativeWorkerTab\(.*?\n    \}", self.source, re.S)
+        self.assertIsNotNone(commands_block)
+        self.assertNotIn("e.secret", commands_block.group(0))
+        self.assertNotIn("WORKER_ENROLLMENT_TOKEN", commands_block.group(0))
+
+    def test_worker_enrollment_native_instructions_preserve_platform_contract(self):
+        for marker in (
+            "dvb-worker",
+            "/etc/docker-volume-backup/worker.env",
+            "/var/lib/docker-volume-backup",
+            "docker-volume-backup-worker.service",
+            "Task Scheduler",
+            "Register-ScheduledTask",
+            "portable x64",
+            "No usa Windows SCM",
+            "glibc >= 2.17",
+            "SmartScreen",
+            "restic, tar, gpg, rclone, aws, ssh y scp",
+            "no arranca ni enrola automaticamente",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertNotIn("navigator.platform", self.source)
+        self.assertNotIn("userAgent", self.source)
+
     def test_worker_enrollment_renewal_preserves_stable_id_and_reuses_compose_flow(self):
         for marker in (
             "data-renew-enrollment",

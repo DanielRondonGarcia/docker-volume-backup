@@ -231,6 +231,7 @@
       systemVersion: "dev",
       latestVersion: null,
       latestVersionUrl: null,
+      latestAssets: {},
       schedulerTimezone: null,
     };
     let workersNotice = null;
@@ -1115,10 +1116,10 @@
       }
     }
 
-    let addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose" };
+    let addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose", nativePlatform: "linux-amd64" };
 
     async function openAddWorkerModal() {
-      addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose" };
+      addWorkerState = { mode: "add", worker: null, step: "form", enrollment: null, activeTab: "compose", nativePlatform: "linux-amd64" };
       renderAddWorkerModal();
       const overlay = document.getElementById("modalOverlay");
       if (overlay) overlay.classList.add("open");
@@ -1132,7 +1133,7 @@
         if (content && state.currentView === "workers") renderWorkers(content);
         return;
       }
-      addWorkerState = { mode: "renew", worker, step: "form", enrollment: null, activeTab: "compose" };
+      addWorkerState = { mode: "renew", worker, step: "form", enrollment: null, activeTab: "compose", nativePlatform: "linux-amd64" };
       renderAddWorkerModal();
       const overlay = document.getElementById("modalOverlay");
       if (overlay) overlay.classList.add("open");
@@ -1215,6 +1216,55 @@
       });
     }
 
+    const NATIVE_WORKER_PLATFORMS = {
+      "linux-amd64": { label: "Linux amd64 (.deb)", os: "linux", key: "linux-amd64" },
+      "linux-arm64": { label: "Linux arm64 (.deb)", os: "linux", key: "linux-arm64" },
+      "windows-amd64": { label: "Windows x64 portable (.exe)", os: "windows", key: "windows-amd64" },
+    };
+
+    function nativeWorkerReleaseUrl() {
+      return state.latestVersionUrl || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest";
+    }
+
+    function assetForSelectedNativePlatform() {
+      const platform = addWorkerState.nativePlatform || "linux-amd64";
+      const assets = state.latestAssets || {};
+      return { platform, info: NATIVE_WORKER_PLATFORMS[platform] || NATIVE_WORKER_PLATFORMS["linux-amd64"], asset: assets[platform] || null, checksums: assets.checksums || null };
+    }
+
+    function renderAssetMetadata(asset, checksums) {
+      if (!asset) return `<p class="helper">No hay assets nativos publicados para esta version. Usa la pagina de release y conserva la opcion Docker Compose.</p>`;
+      return `<dl class="native-asset-meta"><div><dt>Tag</dt><dd>${escapeHtml(state.latestVersion || "release")}</dd></div><div><dt>Archivo</dt><dd><a href="${escapeHtml(asset.url)}" target="_blank" rel="noopener">${escapeHtml(asset.name || "descargar")}</a></dd></div>${asset.sha256 ? `<div><dt>SHA256</dt><dd><code>${escapeHtml(asset.sha256)}</code></dd></div>` : ""}${checksums ? `<div><dt>Checksums</dt><dd><a href="${escapeHtml(checksums.url)}" target="_blank" rel="noopener">SHA256SUMS</a></dd></div>` : ""}</dl>`;
+    }
+
+    function renderNativeWorkerTab(cpUrl) {
+      const { platform, info, asset, checksums } = assetForSelectedNativePlatform();
+      const downloadUrl = asset ? asset.url : nativeWorkerReleaseUrl();
+      const downloadLabel = asset ? "Descargar asset directo" : "Abrir pagina de release";
+      const linuxCommands = `# Instala el paquete descargado y conserva los nombres operativos existentes.
+sudo install -d -m 0750 /etc/docker-volume-backup
+sudo install -d -m 0700 -o dvb-worker -g dvb-worker /var/lib/docker-volume-backup
+sudo editor /etc/docker-volume-backup/worker.env
+sudo vaultline-worker enroll --control-plane-url ${cpUrl}
+sudo systemctl enable --now docker-volume-backup-worker.service`;
+      const windowsCommands = `# Descargar el ejecutable portable x64 y ejecutar en PowerShell elevado.
+.\\vaultline-worker.exe enroll --control-plane-url ${cpUrl}
+$Action = New-ScheduledTaskAction -Execute "C:\\Vaultline\\vaultline-worker.exe" -Argument "daemon" -WorkingDirectory "C:\\Vaultline"
+$Trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -TaskName "VaultlineWorker" -Action $Action -Trigger $Trigger -User "DOMAIN\\dvb-worker" -RunLevel Limited`;
+      const commands = info.os === "windows" ? windowsCommands : linuxCommands;
+      const platformNote = info.os === "windows"
+        ? "Windows usa ejecutable portable x64 con Task Scheduler. No usa Windows SCM ni instala un servicio SCM. Puede aparecer SmartScreen porque el binario no esta firmado."
+        : "Linux requiere glibc >= 2.17, usuario dvb-worker, /etc/docker-volume-backup/worker.env, /var/lib/docker-volume-backup y docker-volume-backup-worker.service.";
+      return `<div class="native-worker-panel" data-native-worker-platform="${escapeHtml(platform)}">
+        <div class="field"><label for="nativePlatformSelect">Plataforma del worker remoto</label><select id="nativePlatformSelect" aria-describedby="nativePlatformHint">${Object.entries(NATIVE_WORKER_PLATFORMS).map(([key, value]) => `<option value="${escapeHtml(key)}" ${key === platform ? "selected" : ""}>${escapeHtml(value.label)}</option>`).join("")}</select><div class="hint" id="nativePlatformHint">Selecciona explicitamente la plataforma del host remoto. No se infiere desde el navegador.</div></div>
+        <div class="card compact"><div class="eyebrow">Asset nativo</div>${renderAssetMetadata(asset, checksums)}<a class="btn secondary sm" href="${escapeHtml(downloadUrl)}" target="_blank" rel="noopener">${downloadLabel}</a></div>
+        <div class="alert info" role="status"><strong>Secreto separado.</strong> Usa <strong>Copiar secreto de enrolamiento</strong>. Pegar solo en el prompt oculto de <code>vaultline-worker enroll</code>. No lo pegues en comandos, archivos, artefactos ni tareas.</div>
+        <p class="helper">${escapeHtml(platformNote)} El paquete no arranca ni enrola automaticamente. Las herramientas externas restic, tar, gpg, rclone, aws, ssh y scp se instalan por separado segun el target.</p>
+        <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(commands)}</pre></div>
+      </div>`;
+    }
+
     async function renderAddWorkerCommands() {
       const overlay = document.getElementById("modalOverlay");
       if (!overlay) return;
@@ -1285,8 +1335,9 @@ docker compose up -d
               <div class="value" style="font-size:13px;font-family:var(--font-mono);word-break:break-all">${escapeHtml(cpUrl)}</div>
               <div class="support">Si esta URL no es correcta (proxy, puerto distinto, dominio), configura <code>CONTROL_PLANE_PUBLIC_URL</code> en Settings.</div>
             </div>
-            <div class="tabs">
-              <button class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
+            <div class="tabs" role="tablist" aria-label="Opciones de despliegue del worker">
+              <button role="tab" aria-selected="${addWorkerState.activeTab === "compose" ? "true" : "false"}" class="tab ${addWorkerState.activeTab === "compose" ? "active" : ""}" data-tab="compose">docker-compose.yml</button>
+              <button role="tab" aria-selected="${addWorkerState.activeTab === "native" ? "true" : "false"}" class="tab ${addWorkerState.activeTab === "native" ? "active" : ""}" data-tab="native">Worker nativo</button>
             </div>
             <div id="tabContent"></div>
             <div class="btn-row">
@@ -1312,10 +1363,12 @@ docker compose up -d
       }));
 
       const tabContent = document.getElementById("tabContent");
-       const code = composeYml;
-      tabContent.innerHTML = `
-        <div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>
-      `;
+      const code = composeYml;
+      tabContent.innerHTML = addWorkerState.activeTab === "native"
+        ? renderNativeWorkerTab(cpUrl)
+        : `<div class="code-block"><button class="copy-btn" data-code-id="modalCode">Copiar</button><pre id="modalCode">${escapeHtml(code)}</pre></div>`;
+      const nativePlatformSelect = document.getElementById("nativePlatformSelect");
+      if (nativePlatformSelect) nativePlatformSelect.addEventListener("change", () => { addWorkerState.nativePlatform = nativePlatformSelect.value; renderAddWorkerCommands(); });
       const copyBtn = tabContent.querySelector(".copy-btn");
       if (copyBtn) {
         copyBtn.addEventListener("click", () => {
@@ -7288,6 +7341,7 @@ docker compose up -d
             const normalize = v => (v || "").replace(/^v/, "").trim();
             state.latestVersion = latest.tag_name;
             state.latestVersionUrl = latest.html_url || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest";
+            state.latestAssets = latest.assets && typeof latest.assets === "object" ? latest.assets : {};
           }
         } catch (e) {}
         renderVersionBanner();

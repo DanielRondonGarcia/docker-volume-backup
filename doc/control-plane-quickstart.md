@@ -199,6 +199,27 @@ Variables útiles del Worker:
 - `WORKER_CREDENTIAL_FILE`
 - `CONTROL_PLANE_CA_FILE`
 
+### Worker nativo empaquetado (V2 seguro)
+
+La opción recomendada para nuevos workers nativos es el flujo V2 seguro desde la UI: **Workers → Agregar worker → Worker nativo**. La UI mantiene Docker Compose como opción por defecto, pero permite elegir explícitamente la plataforma del host remoto: Linux amd64, Linux arm64 o Windows x64. No se infiere desde el navegador.
+
+Flujo seguro:
+
+1. Descarga el asset que corresponda a la plataforma remota. Si la API de release no trae assets, usa el enlace a la página de release.
+2. Verifica el archivo con `SHA256SUMS` cuando esté disponible.
+3. Ejecuta `vaultline-worker enroll --control-plane-url <url>` y pega el secreto solo en el prompt oculto.
+4. No pongas el token en argumentos, archivos, artefactos, scripts, tareas programadas ni logs.
+5. Arranca el daemon solo después de completar el enrolamiento.
+
+El paquete no arranca ni enrola automaticamente. Las herramientas externas `restic, tar, gpg, rclone, aws, ssh y scp` siguen instalándose aparte según el backup/storage usado.
+
+Requisitos y advertencias:
+
+- Linux amd64/arm64: paquetes `.deb`, baseline `glibc >= 2.17`, usuario `dvb-worker`, `/etc/docker-volume-backup/worker.env`, `/var/lib/docker-volume-backup` y `docker-volume-backup-worker.service`.
+- Windows x64: ejecutable portable x64; usa Task Scheduler. No usa Windows SCM ni instala un servicio SCM. El binario no está firmado y Windows SmartScreen puede advertirlo.
+- V2 seguro separa el bootstrap token de la credencial durable generada por el cliente.
+- V1 legacy con variable de entorno de token sigue documentado solo para workers existentes o despliegues Compose heredados.
+
 ### Worker nativo para filesystem
 
 El wrapper recomendado para respaldos de filesystem nativo es:
@@ -263,10 +284,7 @@ WORKER_CREDENTIAL_FILE=/var/lib/docker-volume-backup/worker_credentials.json
 WORKER_HEALTH_PORT=8081
 ```
 
-No incluyas secretos permanentes en la unidad. Si necesitas enrolar el worker,
-añade temporalmente `WORKER_ENROLLMENT_TOKEN`, arranca el servicio una vez,
-confirma el registro y elimina esa línea antes de dejar el servicio en modo
-continuo.
+No incluyas secretos permanentes en la unidad. Para enrolar, ejecuta `sudo vaultline-worker enroll --control-plane-url <url>` y pega el secreto únicamente en el prompt oculto. Después habilita el servicio continuo; no escribas el token en `worker.env`.
 
 El sandbox de systemd usa `ProtectSystem=full` y `ProtectHome=read-only`: el
 usuario del worker debe conservar lectura sobre cada `filesystem_path` de origen,
@@ -289,18 +307,19 @@ journalctl -u docker-volume-backup-worker.service -n 50 --no-pager
 #### Runner Windows MVP con Task Scheduler
 
 El MVP de Windows no instala un servicio nativo de Windows SCM y no requiere
-wrappers de terceros. Usa una tarea de inicio de Windows Task Scheduler que lance
-el módulo de Python en primer plano:
+wrappers de terceros. Usa el ejecutable portable x64 descargado de la release y
+una tarea de inicio de Windows Task Scheduler:
 
 ```powershell
 $WorkerAccount = "DOMAIN\dvb-worker"
-$PythonExe = "C:\Python312\python.exe"          # Ajusta a la ruta real de Python.
-$WorkingDirectory = "C:\docker-volume-backup"  # Ajusta a la copia local del repo/app.
+$WorkerExe = "C:\Vaultline\vaultline-worker.exe"
+$WorkingDirectory = "C:\Vaultline"
+& $WorkerExe enroll --control-plane-url "https://backups.example.com"  # pega el secreto solo en el prompt oculto
 $Credential = Get-Credential -UserName $WorkerAccount -Message "Credencial de la cuenta dedicada del worker"
 
-$Action = New-ScheduledTaskAction -Execute $PythonExe -Argument "-m src.worker_agent.cli daemon" -WorkingDirectory $WorkingDirectory
+$Action = New-ScheduledTaskAction -Execute $WorkerExe -Argument "daemon" -WorkingDirectory $WorkingDirectory
 $Trigger = New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask -TaskName "DockerVolumeBackupWorker" -Action $Action -Trigger $Trigger -User $Credential.UserName -Password $Credential.GetNetworkCredential().Password -RunLevel Limited
+Register-ScheduledTask -TaskName "VaultlineWorker" -Action $Action -Trigger $Trigger -User $Credential.UserName -Password $Credential.GetNetworkCredential().Password -RunLevel Limited
 Remove-Variable Credential
 ```
 

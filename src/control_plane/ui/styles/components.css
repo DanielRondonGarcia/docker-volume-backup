@@ -298,7 +298,14 @@ details.form-section[open] > .form-body { border-top: 1px solid var(--border); p
   white-space: nowrap;
 }
 .tab:hover { background: var(--accent); color: var(--foreground); }
-.tab.active { background: var(--secondary); color: var(--secondary-foreground); border-color: var(--border); }
+.tab:focus-visible { outline: 0; box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring); }
+.tab.active, .tab[aria-selected="true"] { background: var(--secondary); color: var(--secondary-foreground); border-color: var(--border); }
+.native-worker-panel { display: flex; flex-direction: column; gap: 12px; }
+.native-asset-meta { display: grid; gap: 8px; margin: 0 0 10px; }
+.native-asset-meta div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.native-asset-meta dt { color: var(--muted-foreground); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.native-asset-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.native-asset-meta code { overflow-wrap: anywhere; }
 
 .code-block {
   position: relative;
