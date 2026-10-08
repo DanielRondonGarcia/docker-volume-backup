@@ -47,20 +47,21 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 
 ### NFS-1 — Add filesystem target contract and Control Plane configuration
 
-- Status: in progress; implementation and focused checks complete, authorized work-unit commit pending.
+- Status: done.
 - Route: delegated direct; multi-file Control Plane/API/UI change.
 - Scope: target model, SQLite persistence, create/update/dispatch contracts, and explicit path configuration in the existing target UI.
 - Acceptance: create/read/update a native filesystem target with one or more explicit paths; existing Docker/Kubernetes target behavior remains unchanged.
 - Checks: focused Control Plane target/dispatch tests passed; full-suite check remains scheduled for feature close.
-- Evidence: `test_native_filesystem_targets.py` passed 7 tests; 4 targeted Docker/Kubernetes regression tests passed. Native targets reject cold mode; edits preserve existing Kubernetes target metadata.
+- Evidence: commit `ffdd560` (`feat(control-plane): add native filesystem target configuration`). `test_native_filesystem_targets.py` passed 7 tests; 4 targeted Docker/Kubernetes regression tests passed. Native targets reject cold mode; edits preserve existing Kubernetes target metadata.
 
 ### NFS-2 — Execute native filesystem backups
 
-- Status: pending
+- Status: in progress; implementation and focused checks complete, authorized work-unit commit pending.
 - Route: delegated direct; multi-file worker/runtime/engine change.
 - Scope: native runtime selection, local backup execution over configured paths, progress/cancellation/result handling, and relevant snapshot/retention operations already supported by the product.
 - Acceptance: native worker backs up configured Linux/Windows path sources without Docker; existing storage strategies remain usable when their required executables are installed.
-- Checks: deterministic native runtime and dispatch tests, path-with-spaces coverage, existing backup integrity checks, full suite at feature close.
+- Checks: 7 native runtime tests, 9 worker integration tests, and 1 backup-source preservation test passed; full-suite check remains scheduled for feature close.
+- Evidence: native jobs preserve JSON-encoded paths and spaces, report missing executables, support progress/cancellation/timeouts, and fail closed for restore pending NFS-3.
 
 ### NFS-3 — Restore through the native worker
 
@@ -85,10 +86,13 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - User authorized a full vertical delivery and selected files/folders as the native MVP source.
 - Created `feat/native-filesystem-backup` from `master` with existing local changes preserved.
 - NFS-1 implementation adds persisted `filesystem_paths`, native target create/update/dispatch, and explicit paths in the Control Plane UI/spec. Native targets are hot-only; Kubernetes edit submissions retain runtime metadata.
-- Verification: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_filesystem_targets.py'` passed (7 tests); four targeted existing Docker/Kubernetes dispatch/route tests passed. One earlier attempt used incorrect test class names and failed; the corrected command passed. Tests emitted the existing `datetime.utcnow()` deprecation warning.
-- `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so the risk-gated independent verifier ran and confirmed the focused results and NFS-1 diff scope.
-- Full suite and Windows execution remain pending for feature close. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes were preserved and will not be included in the NFS-1 commit.
+- NFS-1 commit: `ffdd560` (`feat(control-plane): add native filesystem target configuration`). Only its code, tests, spec, and ODD task file were committed; existing dirty `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` paths were excluded.
+- NFS-2 implementation adds native worker selection and a local process RuntimePort; backup sources use JSON so spaces and Windows path spelling are preserved. The host backup engine avoids Docker for native mode; missing external tools are reported, cancellation/progress/timeouts are handled, and native restore fails closed pending NFS-3.
+- NFS-2 TDD evidence: native runtime tests first failed because the adapter was absent; timeout tests later failed before bounded timeout/cleanup was implemented. Final focused checks passed: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_runtime.py'` (7 tests), `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_worker_runtime_integration.py'` (9 tests), and `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_backup_integrity.BackupIntegrityTests.test_native_runtime_main_consumes_backup_sources_json_without_splitting_paths` (1 test).
+- NFS-1 verification: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_native_filesystem_targets.py'` passed (7 tests); four targeted existing Docker/Kubernetes dispatch/route tests passed. One earlier attempt used incorrect test class names and failed; the corrected command passed. Tests emitted the existing `datetime.utcnow()` deprecation warning. `git diff --cached --check` passed before NFS-1 commit.
+- `gentle_review assess` was unassessable because the worktree contains untracked paths; RDD is off, so a separate verifier ran for each task and confirmed the final focused results and diff behavior.
+- NFS-2 implementation is awaiting its explicitly authorized commit. Full suite and Windows execution remain pending for feature close. Pre-existing `.atl/`, `__pycache__`, `.codegraph/`, and `.playwright-mcp/` changes remain excluded.
 
 ## Next step
 
-Create the explicitly authorized NFS-1 work-unit commit from only NFS-1 code/docs/tests and the ODD task document. Then record its identity, close NFS-1, update the mirror and TODO projection, and delegate NFS-2.
+Create the explicitly authorized NFS-2 work-unit commit from only the native runtime, engine, tests/docs, and ODD task file. Then record its identity, close NFS-2, update the mirror and TODO, and delegate NFS-3.

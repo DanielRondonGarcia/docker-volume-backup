@@ -18,6 +18,7 @@ from src.worker_agent.application.services.worker_agent_service import WorkerAge
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.docker_runtime import DockerRuntimeAdapter
 from src.worker_agent.infrastructure.adapters.kubernetes_runtime import KubernetesRuntimeAdapter
+from src.worker_agent.infrastructure.adapters.native_runtime import NativeRuntimeAdapter
 from src.worker_agent.infrastructure.adapters.redis_cache import RedisSnapshotCache
 from src.worker_agent.infrastructure.api_client.control_plane_client import (
     ControlPlaneClient,
@@ -150,7 +151,7 @@ def _labels_from_env() -> dict:
     return labels
 
 
-_SUPPORTED_RUNTIME_KINDS = frozenset({"docker", "kubernetes"})
+_SUPPORTED_RUNTIME_KINDS = frozenset({"docker", "kubernetes", "native"})
 
 
 def _worker_runtime_kind() -> str:
@@ -181,6 +182,8 @@ def _build_runtime(runtime_kind: str, config: WorkerAgentConfig):
             namespace=os.environ.get("WORKER_KUBERNETES_NAMESPACE") or None,
             worker_id=config.worker_id,
         )
+    if runtime_kind == "native":
+        return NativeRuntimeAdapter()
     return DockerRuntimeAdapter()
 
 

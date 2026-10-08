@@ -9,6 +9,7 @@ from src.worker_agent import main as worker_main
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters import kubernetes_runtime
+from src.worker_agent.infrastructure.adapters.native_runtime import NativeRuntimeAdapter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,21 @@ class WorkerRuntimeSelectionTests(unittest.TestCase):
         self.assertEqual(service.config.labels["supported_runtimes"], "kubernetes")
         self.assertEqual(json.loads(service.config.labels["capabilities"]), ["kubernetes"])
         self.assertEqual(service.config.labels["lane"], "batch")
+
+    def test_native_runtime_is_selected_without_docker_or_kubernetes(self):
+        native = Mock(spec=NativeRuntimeAdapter, runtime_kind="native")
+        with patch.object(worker_main, "DockerRuntimeAdapter") as docker_factory, patch.object(
+            worker_main, "KubernetesRuntimeAdapter"
+        ) as kubernetes_factory, patch.object(worker_main, "NativeRuntimeAdapter", return_value=native) as native_factory:
+            service, _, _ = self.build_service({"WORKER_RUNTIME": "native"}, docker_factory, kubernetes_factory)
+
+        native_factory.assert_called_once_with()
+        docker_factory.assert_not_called()
+        kubernetes_factory.assert_not_called()
+        self.assertIs(service.runtime, native)
+        self.assertEqual(service.config.labels["runtime_kind"], "native")
+        self.assertEqual(service.config.labels["runtime_type"], "native")
+        self.assertEqual(json.loads(service.config.labels["capabilities"]), ["native"])
 
     def test_invalid_runtime_fails_safe_to_docker(self):
         docker = Mock(runtime_kind="docker")

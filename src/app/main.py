@@ -9,7 +9,10 @@ from src.app.domain.models import BackupConfig, ContainerConfig, RestoreConfig
 from src.app.application.services.backup_service import BackupService
 from src.app.application.services.restore_service import RestoreService
 from src.app.infrastructure.adapters.storage.multi_storage_adapter import MultiStorageAdapter
-from src.app.infrastructure.adapters.container.docker_adapter import DockerAdapter
+try:
+    from src.app.infrastructure.adapters.container.docker_adapter import DockerAdapter
+except ModuleNotFoundError:  # Native workers do not require the Docker SDK.
+    DockerAdapter = None
 from src.app.infrastructure.adapters.notifier.influx_notifier import InfluxNotifier
 from src.app.infrastructure.adapters.backup_strategy import TarballBackupStrategy, ResticBackupStrategy
 
@@ -35,6 +38,36 @@ def _strategy_for(strategy_name: str):
     if strategy_name == "restic":
         return ResticBackupStrategy()
     return TarballBackupStrategy()
+
+
+def _backup_sources_from_env():
+    raw_json = os.environ.get("BACKUP_SOURCES_JSON")
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("BACKUP_SOURCES_JSON must be a JSON array of path strings") from exc
+        if not isinstance(parsed, list) or not parsed or any(not isinstance(item, str) or not item or "\x00" in item for item in parsed):
+            raise ValueError("BACKUP_SOURCES_JSON must be a non-empty JSON array of path strings")
+        return parsed
+    return os.environ.get("BACKUP_SOURCES", "/backup").split()
+
+
+class _NoopContainerPort:
+    def get_containers_by_labels(self, labels):
+        return []
+
+    def stop_containers(self, container_ids):
+        return []
+
+    def start_containers(self, container_ids):
+        return []
+
+    def exec_command(self, container_id, cmd):
+        return None
+
+    def get_label_value(self, container_id, label):
+        return None
 
 MAX_RESTORE_RESULT_BYTES = 64 * 1024
 MAX_RESTORE_READ_ONLY_PATHS = 256
@@ -124,7 +157,7 @@ def _write_restore_result(result):
 
 def main():
     # Load config from env
-    backup_sources = os.environ.get("BACKUP_SOURCES", "/backup").split()
+    backup_sources = _backup_sources_from_env()
     backup_filename = os.environ.get("BACKUP_FILENAME", "backup-%Y-%m-%dT%H-%M-%S.tar.gz")
     gpg_passphrase = os.environ.get("GPG_PASSPHRASE")
 
@@ -153,7 +186,13 @@ def main():
     restore_strategy_name = os.environ.get("RESTORE_BACKUP_STRATEGY", backup_strategy_name).lower()
 
     storage_port = MultiStorageAdapter()
-    container_port = DockerAdapter()
+    runtime_type = (os.environ.get("BACKUP_RUNTIME_TYPE") or "docker").strip().lower()
+    if runtime_type == "native":
+        container_port = _NoopContainerPort()
+    else:
+        if DockerAdapter is None:
+            raise RuntimeError("Docker SDK is required for non-native backup runtime")
+        container_port = DockerAdapter()
 
     if _env_bool("RESTORE_MODE"):
         restore_config = RestoreConfig(

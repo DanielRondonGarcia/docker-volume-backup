@@ -541,6 +541,20 @@ El worker traduce la configuración central a variables de entorno compatibles c
 
 La plataforma nueva actúa como orquestador y el runtime actual sigue siendo el motor de backup/restore.
 
+### Contrato de ejecución nativa de backups
+
+Un worker con `WORKER_RUNTIME=native` registra `runtime_type: "native"` y ejecuta los jobs en el host local del worker, sin Docker daemon ni API de Kubernetes. Para `backup.run`, el Control Plane entrega `filesystem_paths[]` como la lista explícita configurada en el target; el worker la pasa al motor como JSON (`BACKUP_SOURCES_JSON`) y no la divide por espacios, no reescribe rutas Windows, y no crea mounts bajo `/backup`.
+
+Reglas de ejecución nativa:
+
+- solo acepta targets `runtime_type: "native"` y `backup_mode: "hot"`;
+- rechaza `volume_targets`, `runtime_volumes`, `pvc_names` y modo frío;
+- usa las estrategias existentes `tar` y `restic` cuando sus ejecutables están instalados en el host;
+- reporta claramente ejecutables faltantes (`tar`, `restic`, `gpg`, `rclone`, etc.) mediante `worker.self_check` o el resultado del job;
+- mantiene el ciclo existente de lease, progreso, cancelación, logs redactados y resultado del worker;
+- soporta operaciones Restic de metadatos/retención existentes que usan el mismo contrato de comando validado;
+- no implementa restore nativo en este paso.
+
 ## Gestión de secretos
 
 ### Requisitos

@@ -20,6 +20,11 @@ SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 UNSUPPORTED_METADATA = ["acl", "xattr", "timestamps", "special metadata"]
 
 
+def _require_executable(name: str) -> None:
+    if shutil.which(name) is None:
+        raise FileNotFoundError(f"required executable '{name}' is not available on PATH")
+
+
 class OwnershipNormalizationError(RuntimeError):
     def __init__(self, message: str, report: dict[str, Any]):
         self.report = report
@@ -271,9 +276,11 @@ class TarballBackupStrategy(BackupStrategy, RestoreStrategy):
         cmd = ["tar", "-czvf", filename] + sources
         
         try:
+            _require_executable("tar")
             subprocess.run(cmd, check=True)
             
             if config.gpg_passphrase:
+                _require_executable("gpg")
                 logger.info("Encrypting backup")
                 gpg_filename = f"{filename}.gpg"
                 gpg_cmd = [
@@ -477,6 +484,7 @@ class ResticBackupStrategy(BackupStrategy, RestoreStrategy):
         logger.info(f"Running restic backup for {sources}")
         
         try:
+            _require_executable("restic")
             # Check if repo is initialized
             init_check_cmd = ["restic", "snapshots", "--json", "--latest", "1"]
             try:

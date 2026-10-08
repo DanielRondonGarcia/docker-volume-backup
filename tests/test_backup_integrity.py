@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from src.app.application.services.backup_service import BackupService
 from src.app.application.services.restore_service import RestoreService
+from src.app import main as runtime_main
 from src.app.domain.models import BackupConfig, BackupResult, ContainerConfig, RestoreConfig, RestoreResult
 from src.app.infrastructure.adapters.backup_strategy import _restore_backup_dir_layout
 from src.app.infrastructure.adapters import backup_strategy as backup_module
@@ -47,6 +49,31 @@ class BackupIntegrityTests(unittest.TestCase):
         self.assertTrue(result.success)
         container.stop_containers.assert_not_called()
         container.start_containers.assert_not_called()
+
+    def test_native_runtime_main_consumes_backup_sources_json_without_splitting_paths(self):
+        captured = {}
+
+        class CapturingStrategy:
+            def perform_backup(self, config):
+                captured["source_paths"] = config.source_paths
+                return BackupResult(datetime.now(), 0, 0, True)
+
+        with patch.dict(
+            os.environ,
+            {
+                "BACKUP_RUNTIME_TYPE": "native",
+                "BACKUP_SOURCES_JSON": json.dumps(["/srv/data with spaces", r"C:\\Users\\Alice\\My Documents"]),
+                "BACKUP_STRATEGY": "tar",
+                "BACKUP_STOP_CONTAINERS": "false",
+            },
+            clear=True,
+        ), patch.object(runtime_main, "TarballBackupStrategy", return_value=CapturingStrategy()), patch.object(
+            runtime_main.MultiStorageAdapter, "upload"
+        ) as upload, patch.object(runtime_main.InfluxNotifier, "send_metrics"):
+            runtime_main.main()
+
+        self.assertEqual(captured["source_paths"], ["/srv/data with spaces", r"C:\\Users\\Alice\\My Documents"])
+        upload.assert_not_called()
 
     def test_cold_backup_stops_and_restarts_containers(self):
         container = Mock()
