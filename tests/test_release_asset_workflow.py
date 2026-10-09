@@ -4,11 +4,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DOCKERFILE = ROOT / "Dockerfile"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-dispatch.yml"
 
 
 class ReleaseAssetWorkflowTests(unittest.TestCase):
     def setUp(self):
+        self.dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
     def test_workflow_stays_manual_and_splits_prepare_native_image_publish_jobs(self):
@@ -86,6 +88,41 @@ class ReleaseAssetWorkflowTests(unittest.TestCase):
         self.assertIn("type=semver,pattern={{version}},value=${{ needs.prepare.outputs.new_version }}", self.workflow)
         self.assertIn("type=raw,value=latest", self.workflow)
         self.assertIn("INSTALL_DOCKER_CLI=true", self.workflow)
+
+    def test_release_image_builds_use_ecr_public_python_base_image(self):
+        self.assertRegex(
+            self.dockerfile,
+            r"(?m)^ARG PYTHON_BASE_IMAGE=python:3\.11-slim-bookworm$",
+        )
+        self.assertRegex(self.dockerfile, r"(?m)^FROM \$\{PYTHON_BASE_IMAGE\} AS app-base$")
+
+        build_steps = dict(
+            re.findall(
+                r"(?ms)^      - name: Build and push ([^\n]+)\n(.*?)(?=^      - name: |\Z)",
+                self.workflow,
+            )
+        )
+        expected_targets = {
+            "backup runtime image": "backup-runtime",
+            "Control Plane image": "control-plane",
+            "Worker image": "worker",
+        }
+        self.assertEqual(set(build_steps), set(expected_targets))
+        for image_name, target in expected_targets.items():
+            with self.subTest(target=target):
+                self.assertIn(f"target: {target}", build_steps[image_name])
+                build_args = re.search(
+                    r"(?ms)^          build-args: \|\n((?:(?!^          [\w-]+:).+\n)*)",
+                    build_steps[image_name],
+                )
+                self.assertIsNotNone(build_args)
+                self.assertIn(
+                    "PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-bookworm",
+                    build_args.group(1),
+                )
+                self.assertIn("APP_VERSION=${{ needs.prepare.outputs.new_version }}", build_args.group(1))
+                if target == "worker":
+                    self.assertIn("INSTALL_DOCKER_CLI=true", build_args.group(1))
 
 
 if __name__ == "__main__":

@@ -273,7 +273,9 @@ jobs:
           push: true
           tags: ${{ steps.meta_runtime.outputs.tags }}
           labels: ${{ steps.meta_runtime.outputs.labels }}
-          build-args: APP_VERSION=${{ needs.prepare.outputs.new_version }}
+          build-args: |
+            APP_VERSION=${{ needs.prepare.outputs.new_version }}
+            PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -286,7 +288,9 @@ jobs:
           push: true
           tags: ${{ steps.meta_control_plane.outputs.tags }}
           labels: ${{ steps.meta_control_plane.outputs.labels }}
-          build-args: APP_VERSION=${{ needs.prepare.outputs.new_version }}
+          build-args: |
+            APP_VERSION=${{ needs.prepare.outputs.new_version }}
+            PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -306,6 +310,7 @@ jobs:
           build-args: |
             APP_VERSION=${{ needs.prepare.outputs.new_version }}
             INSTALL_DOCKER_CLI=true
+            PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

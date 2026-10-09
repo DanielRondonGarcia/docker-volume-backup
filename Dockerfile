@@ -1,4 +1,5 @@
-FROM python:3.11-slim-bookworm AS app-base
+ARG PYTHON_BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${PYTHON_BASE_IMAGE} AS app-base
 
 # Install system dependencies. Docker CLI installation is optional so the
 # Kubernetes worker image can use the same multi-architecture base without
