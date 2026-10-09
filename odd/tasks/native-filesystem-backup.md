@@ -40,8 +40,8 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - Native execution must not invoke Docker or Kubernetes. Missing external backup/storage executables must be reported clearly by a local diagnostic/self-check; no third-party executable is silently downloaded.
 - Existing local modifications in `.atl/`, tracked `__pycache__`, `.codegraph/`, and `.playwright-mcp/` predate this feature and must remain untouched and excluded from feature commits.
 - Full test command: `python -m unittest discover tests` (from `.github/workflows/ci.yml:22-23`). Run focused tests per task first. Report any platform checks unavailable in this environment honestly.
-- No push, PR, or merge is authorized. Do not commit without explicit user authorization.
-- Forecast: approximately 1,900 authored changed lines across the full feature, revised from the initial estimate using observed NFS-1/2/3 diffs and the remaining CLI/service work; keep work units independently reviewable. Delivery strategy: `ask-on-risk`. User-selected chain strategy for any future PR: `feature-branch-chain`. No push or PR is authorized.
+- The NFS work units were authorized and committed locally; any later push or release evidence belongs to the relevant delivery record, not this task.
+- Forecast: approximately 1,900 authored changed lines across the full feature, revised from the initial estimate using observed NFS-1/2/3 diffs and the remaining CLI/service work; keep work units independently reviewable. Delivery strategy: `ask-on-risk`. User-selected chain strategy for any future PR: `feature-branch-chain`.
 
 ## Tasks
 
@@ -84,7 +84,8 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 
 ### NFS-5 — Fix test isolation and run feature-level close checks
 
-- Status: in progress (test repair and verification complete; explicit authorization received for the local commit).
+- Status: done.
+- Evidence: commit `0777a33` (`test: restore feature flag environment after tests`); includes the test isolation correction and ODD record.
 - Route: inline, one-file test-environment cleanup discovered by the full-suite run; focused and full-suite verification delegated.
 - Scope: ensure environment-mutating tests restore absent variables, rerun the full suite, and report Linux/Windows service validation limits accurately.
 - Acceptance: full unittest discovery passes without cross-test environment leakage; any platform-specific execution unavailable on this host is recorded as pending.
@@ -113,9 +114,9 @@ The product currently models sources as Docker volumes or Kubernetes PVCs. The C
 - NFS-4 exploration found the existing worker already has a native runtime selector, foreground loop, health endpoint, credential storage, and executable self-check, but no service-manager wrapper or packaging entrypoint. The bounded implementation uses a stdlib CLI wrapper, Linux systemd unit, and Windows Task Scheduler guidance; it does not present a scheduled task as a Windows SCM service.
 - NFS-4 implementation adds a redacted native self-check and foreground daemon CLI, a systemd unit example, and Spanish guidance for credentials and OS runners. Commit `81e9805` (`feat(worker): add native worker CLI and service guidance`) contains these files. Its 3 focused CLI tests and the final post-correction rerun passed. PowerShell cmdlet syntax was checked against Microsoft's current `Register-ScheduledTask` and `New-ScheduledTaskAction` reference; actual Windows execution remains unavailable.
 - The full suite ran 452 tests with one skipped and one failure: `FeatureFlagEnvTests.test_from_env_parses_values` left `SNAPSHOT_EXPLORER_NO_LOCK=true` in `os.environ` when the key was initially absent; a later native runtime test then received `--no-lock`. Both native-runtime-only and failing-test-isolated commands pass, confirming a test-order leak rather than a native runtime behavior regression.
-- NFS-5 fix removes keys that were absent before `FeatureFlagEnvTests.test_from_env_parses_values` in its `finally` cleanup. RED: full suite previously ran 452 tests with one skip and one failure from leaked `SNAPSHOT_EXPLORER_NO_LOCK`; GREEN: the focused interaction tests passed 3/3 and full discovery passed 452 tests (1 skipped, 0 failures).
+- NFS-5 fix removes keys that were absent before `FeatureFlagEnvTests.test_from_env_parses_values` in its `finally` cleanup. RED: full suite previously ran 452 tests with one skip and one failure from leaked `SNAPSHOT_EXPLORER_NO_LOCK`; GREEN: the focused interaction tests passed 3/3 and full discovery passed 452 tests (1 skipped, 0 failures). Commit `0777a33` (`test: restore feature flag environment after tests`) contains the fix and task record.
 - Feature-wide close checks are complete except platform executions unavailable on this host: `systemd-analyze` is not installed and Windows Task Scheduler/worker execution was not run. Microsoft Learn parameter references were reviewed for Task Scheduler syntax.
 
 ## Next step
 
-Create the authorized NFS-5 test-isolation commit with the ODD task record. Do not push, open a PR, or merge.
+Implementation is complete in local commits `81e9805` and `0777a33`; the ODD task record documents both identities. The published native-worker release is recorded separately in `odd/tasks/native-worker-installers.md`.

@@ -198,7 +198,7 @@ version-matched images for production:
 kubectl -n backup-worker set env deployment/docker-volume-backup-worker \
   CONTROL_PLANE_URL='http://control-plane:8080' \
   WORKER_RUNTIME=kubernetes \
-  BACKUP_RUNTIME_IMAGE='ghcr.io/danielrondongarcia/docker-volume-backup:1.2.3'
+  BACKUP_RUNTIME_IMAGE='ghcr.io/danielrondongarcia/vaultline:1.2.3'
 kubectl -n backup-worker rollout status deployment/docker-volume-backup-worker
 kubectl -n backup-worker logs deployment/docker-volume-backup-worker --tail=50
 ```

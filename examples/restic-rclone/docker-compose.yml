@@ -1,7 +1,7 @@
 
 services:
   backup:
-    image: danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/vaultline
     hostname: discourse-backup
     environment:
       BACKUP_STRATEGY: restic

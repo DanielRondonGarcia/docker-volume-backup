@@ -143,7 +143,7 @@ docker compose -f deploy/control-plane/docker-compose.ghcr.yml up -d
 
 Imagen esperada:
 
-- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
+- `ghcr.io/danielrondongarcia/vaultline-control-plane`
 
 ## Enrolamiento HMAC y transporte
 

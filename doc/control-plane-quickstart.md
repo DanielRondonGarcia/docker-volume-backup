@@ -127,8 +127,8 @@ docker compose -f deploy/worker/docker-compose.ghcr.yml up -d
 
 Imágenes esperadas:
 
-- `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane`
-- `ghcr.io/danielrondongarcia/docker-volume-backup-worker`
+- `ghcr.io/danielrondongarcia/vaultline-control-plane`
+- `ghcr.io/danielrondongarcia/vaultline-worker`
 
 ### Detener los stacks
 
@@ -205,7 +205,7 @@ La opción recomendada para nuevos workers nativos es el flujo V2 seguro desde l
 
 Flujo seguro:
 
-1. Descarga el asset que corresponda a la plataforma remota. Si la API de release no trae assets, usa el enlace a la página de release.
+1. Descarga el asset que corresponda a la plataforma remota. Si la API de release no trae assets, usa la [página canónica de releases de Vaultline](https://github.com/DanielRondonGarcia/vaultline/releases).
 2. Verifica el archivo con `SHA256SUMS` cuando esté disponible.
 3. Ejecuta `vaultline-worker enroll --control-plane-url <url>` y pega el secreto solo en el prompt oculto.
 4. No pongas el token en argumentos, archivos, artefactos, scripts, tareas programadas ni logs.
@@ -518,7 +518,7 @@ Ejemplo orientado al runtime actual del proyecto:
 ```powershell
 curl -X POST http://127.0.0.1:8080/api/v1/targets `
   -H "Content-Type: application/json" `
-  -d "{\"name\":\"grafana-backup\",\"worker_id\":\"<worker_id>\",\"compose_project\":\"grafana\",\"volume_targets\":[\"/backup/grafana-data\"],\"backup_mode\":\"hot\",\"backup_strategy\":\"restic\",\"runtime_image\":\"ghcr.io/danielrondongarcia/docker-volume-backup\",\"runtime_environment\":{\"BACKUP_STRATEGY\":\"restic\",\"RESTIC_REPOSITORY\":\"/repo\",\"RESTIC_PASSWORD\":\"change-me\",\"BACKUP_SOURCES\":\"/backup/grafana-data\"},\"runtime_volumes\":{\"grafana-data\":{\"bind\":\"/backup/grafana-data\",\"mode\":\"ro\"},\"restic-repo\":{\"bind\":\"/repo\",\"mode\":\"rw\"}}}"
+  -d "{\"name\":\"grafana-backup\",\"worker_id\":\"<worker_id>\",\"compose_project\":\"grafana\",\"volume_targets\":[\"/backup/grafana-data\"],\"backup_mode\":\"hot\",\"backup_strategy\":\"restic\",\"runtime_image\":\"ghcr.io/danielrondongarcia/vaultline\",\"runtime_environment\":{\"BACKUP_STRATEGY\":\"restic\",\"RESTIC_REPOSITORY\":\"/repo\",\"RESTIC_PASSWORD\":\"change-me\",\"BACKUP_SOURCES\":\"/backup/grafana-data\"},\"runtime_volumes\":{\"grafana-data\":{\"bind\":\"/backup/grafana-data\",\"mode\":\"ro\"},\"restic-repo\":{\"bind\":\"/repo\",\"mode\":\"rw\"}}}"
 ```
 
 ### Crear secretos y storage profiles
@@ -581,7 +581,7 @@ Al crear el target, enviar `storage_profile_id` y opcionalmente
 ```powershell
 curl -X POST http://127.0.0.1:8080/api/v1/targets `
   -H "Content-Type: application/json" `
-  -d "{\"name\":\"grafana-backup\",\"worker_id\":\"<worker_id>\",\"storage_profile_id\":\"<profile_id>\",\"retention_policy_id\":\"<policy_id>\",\"volume_targets\":[\"/backup/grafana-data\"],\"runtime_image\":\"ghcr.io/danielrondongarcia/docker-volume-backup\",\"runtime_volumes\":{\"grafana-data\":{\"bind\":\"/backup/grafana-data\",\"mode\":\"ro\"}}}"
+  -d "{\"name\":\"grafana-backup\",\"worker_id\":\"<worker_id>\",\"storage_profile_id\":\"<profile_id>\",\"retention_policy_id\":\"<policy_id>\",\"volume_targets\":[\"/backup/grafana-data\"],\"runtime_image\":\"ghcr.io/danielrondongarcia/vaultline\",\"runtime_volumes\":{\"grafana-data\":{\"bind\":\"/backup/grafana-data\",\"mode\":\"ro\"}}}"
 ```
 
 ### Validar configuración de un target

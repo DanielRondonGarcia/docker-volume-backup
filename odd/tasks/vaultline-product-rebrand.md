@@ -45,14 +45,15 @@ Replace the visible product brand "Docker Volume Backup" with "Vaultline" so the
 
 ## Worktree safety
 
-- Do not commit without explicit user authorization. No push, PR, or merge is authorized.
+- The presentation-rebrand work was committed locally; any later repository/image delivery or release evidence belongs to its own task record.
 - Preserve already-existing modifications in `.atl/`, `__pycache__`, `.codegraph/`, `.playwright-mcp/`, and the post-commit `odd/tasks/native-filesystem-backup.md` evidence update.
 
 ## Tasks
 
 ### VBR-1 — Apply Vaultline presentation branding
 
-- Status: in progress (implementation and checks complete; explicit authorization received for one local commit).
+- Status: done.
+- Evidence: commit `c37b2d6` (`refactor(branding): rebrand product as Vaultline`), covering the eight presentation surfaces and this task record.
 - Route: delegated bounded writer; update only user-facing brand and scope wording.
 - Acceptance: README and visible UI identify Vaultline; login/password pages use VL initials; product prose names Docker, Kubernetes, and native filesystem support; compatibility identifiers stay unchanged.
 - Evidence: updated the eight allowed presentation surfaces; no runtime contracts were changed.
@@ -68,8 +69,8 @@ Replace the visible product brand "Docker Volume Backup" with "Vaultline" so the
 
 - User selected **Vaultline** for visible product branding and accepted the presentation-only first stage; repo/image slugs, labels, environment/runtime identifiers, compose/Kubernetes names, and config/state paths remain unchanged.
 - The current branch contains the previous filesystem feature commits. Existing `.atl/`, generated `__pycache__`, `.codegraph/`, `.playwright-mcp/`, and the prior feature's ODD evidence update were preserved.
-- The user explicitly authorized one local commit limited to the eight presentation surfaces and this feature task record; all unrelated/pre-existing paths remain excluded.
+- The user authorized one local commit limited to the eight presentation surfaces and this feature task record. Commit `c37b2d6` was created; all unrelated/pre-existing paths remained excluded.
 
 ## Next step
 
-Create the authorized local Vaultline presentation-rebrand commit from only the allowed surfaces and this task record. Do not rename repository/image identifiers or push, open a PR, or merge.
+The presentation-only Vaultline rebrand is complete in local commit `c37b2d6`. Repository and image identifier migration is now tracked in `odd/tasks/vaultline-repository-image-rename.md`; the historical published release remains recorded in `odd/tasks/native-worker-installers.md`.

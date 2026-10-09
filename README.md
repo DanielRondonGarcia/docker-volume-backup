@@ -140,9 +140,9 @@ Imágenes:
 
 | Imagen | Uso |
 |---|---|
-| `ghcr.io/danielrondongarcia/docker-volume-backup-control-plane` | Control Plane (UI + API) |
-| `ghcr.io/danielrondongarcia/docker-volume-backup-worker` | Worker (agente en el host de los servicios) |
-| `ghcr.io/danielrondongarcia/docker-volume-backup` | Runtime de backup/restore legacy (usado internamente por el worker) |
+| `ghcr.io/danielrondongarcia/vaultline-control-plane` | Control Plane (UI + API) |
+| `ghcr.io/danielrondongarcia/vaultline-worker` | Worker (agente en el host de los servicios) |
+| `ghcr.io/danielrondongarcia/vaultline` | Runtime de backup/restore usado internamente por el worker |
 
 Cada imagen recibe los tags: `latest`, `{version}`, `{major}.{minor}`, `{major}`.
 
@@ -163,7 +163,7 @@ services:
       - "docker-volume-backup.stop-during-backup=true"
 
   backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/vaultline
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - db-data:/backup/db-data:ro
@@ -185,7 +185,7 @@ services:
       - app-data:/data
 
   backup:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup
+    image: ghcr.io/danielrondongarcia/vaultline
     environment:
       BACKUP_STRATEGY: restic
       RESTIC_REPOSITORY: rclone:myremote:/backups/docker-volumes
@@ -205,7 +205,7 @@ Inicializa el repositorio Restic una sola vez:
 docker run --rm \
   -v $(pwd)/rclone.conf:/root/.config/rclone/rclone.conf:ro \
   -e RESTIC_PASSWORD=my-secure-password \
-  ghcr.io/danielrondongarcia/docker-volume-backup \
+  ghcr.io/danielrondongarcia/vaultline \
   restic -r rclone:myremote:/backups/docker-volumes init
 ```
 
