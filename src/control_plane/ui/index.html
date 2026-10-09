@@ -538,7 +538,7 @@
             <a class="item" href="#" id="logoutBtn">${ICONS.logout}<span>Cerrar sesion</span></a>
           </nav>
           <div class="sidebar-footer-row">
-            <a href="https://github.com/DanielRondonGarcia/docker-volume-backup" target="_blank" rel="noopener" class="sidebar-github-link">${ICONS.github}</a>
+            <a href="https://github.com/DanielRondonGarcia/vaultline" target="_blank" rel="noopener" class="sidebar-github-link">${ICONS.github}</a>
             <span class="sidebar-version">v${escapeHtml(state.systemVersion)}</span>
           </div>
         </div>
@@ -583,7 +583,7 @@
           <div class="version-banner-inner">
             <span class="version-banner-icon">⚠</span>
             <span>Nueva version disponible: <strong>v${escapeHtml(state.latestVersion.replace(/^v/, ""))}</strong> (estas en v${escapeHtml(state.systemVersion)})</span>
-            <a href="${escapeHtml(state.latestVersionUrl || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest")}" target="_blank" rel="noopener" class="version-banner-link">Ver release</a>
+            <a href="${escapeHtml(state.latestVersionUrl || "https://github.com/DanielRondonGarcia/vaultline/releases/latest")}" target="_blank" rel="noopener" class="version-banner-link">Ver release</a>
             <button class="version-banner-close" id="versionBannerClose">&times;</button>
           </div>
         `;
@@ -1223,7 +1223,7 @@
     };
 
     function nativeWorkerReleaseUrl() {
-      return state.latestVersionUrl || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest";
+      return state.latestVersionUrl || "https://github.com/DanielRondonGarcia/vaultline/releases/latest";
     }
 
     function assetForSelectedNativePlatform() {
@@ -7340,7 +7340,7 @@ docker compose up -d
           if (latest && latest.tag_name) {
             const normalize = v => (v || "").replace(/^v/, "").trim();
             state.latestVersion = latest.tag_name;
-            state.latestVersionUrl = latest.html_url || "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/latest";
+            state.latestVersionUrl = latest.html_url || "https://github.com/DanielRondonGarcia/vaultline/releases/latest";
             state.latestAssets = latest.assets && typeof latest.assets === "object" ? latest.assets : {};
           }
         } catch (e) {}

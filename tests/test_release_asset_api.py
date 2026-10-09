@@ -7,7 +7,7 @@ from unittest.mock import patch
 from src.control_plane.main import _latest_release_payload
 
 
-OFFICIAL_BASE = "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/download/1.2.3"
+OFFICIAL_BASE = "https://github.com/DanielRondonGarcia/vaultline/releases/download/1.2.3"
 
 
 class LatestReleaseAssetAPITests(unittest.TestCase):
@@ -21,7 +21,7 @@ class LatestReleaseAssetAPITests(unittest.TestCase):
         digest = "sha256:" + "a" * 64
         data = {
             "tag_name": "1.2.3",
-            "html_url": "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/tag/1.2.3",
+            "html_url": "https://github.com/DanielRondonGarcia/vaultline/releases/tag/1.2.3",
             "assets": [
                 self.asset("vaultline-worker_1.2.3_amd64.deb", digest),
                 self.asset("vaultline-worker_1.2.3_arm64.deb", "sha256:" + "b" * 64),
@@ -49,7 +49,7 @@ class LatestReleaseAssetAPITests(unittest.TestCase):
     def test_unknown_filenames_and_external_urls_are_ignored(self):
         data = {
             "tag_name": "1.2.3",
-            "html_url": "https://github.com/DanielRondonGarcia/docker-volume-backup/releases/tag/1.2.3",
+            "html_url": "https://github.com/DanielRondonGarcia/vaultline/releases/tag/1.2.3",
             "assets": [
                 self.asset("vaultline-worker_1.2.3_linux-amd64.tar.gz", "sha256:" + "a" * 64),
                 self.asset("vaultline-worker_1.2.3_amd64.deb", "sha256:" + "b" * 64, "https://evil.example/releases/download/1.2.3"),

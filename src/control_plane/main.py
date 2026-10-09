@@ -96,7 +96,7 @@ LIVE_WORKER_FAILURE_MESSAGES = {
     "invalid_source": "live source is invalid",
     "invalid_request": "live request is invalid",
 }
-LATEST_RELEASE_REPOSITORY = "DanielRondonGarcia/docker-volume-backup"
+LATEST_RELEASE_REPOSITORY = "DanielRondonGarcia/vaultline"
 LATEST_RELEASE_DOWNLOAD_BASE = f"https://github.com/{LATEST_RELEASE_REPOSITORY}/releases/download"
 LATEST_RELEASE_ASSET_KEYS = {
     "linux-amd64": "vaultline-worker_{tag}_amd64.deb",
