@@ -46,11 +46,13 @@ The release workflow initially pulled `python:3.11-slim-bookworm` anonymously fr
 
 ### RBR-2 — Verify, commit, and publish the corrective release
 
-- Status: in progress.
+- Status: complete.
 - Route: independent verification then parent commit/push/release.
 - Scope: Buildx bootstrap mirror, workflow regression test, full suite, diff check, and stable patch release.
 - Acceptance: release image-build and publish-release jobs succeed; the corrected stable release and multi-architecture images are verified.
-- Evidence so far: independent verification passed 10 focused release workflow tests and 524 full tests (2 skipped); `git diff --check` passed. The Dockerfile base parameter is already committed in RBR-1; this follow-up only changes Buildx's builder image, its regression test, and this task record. No remote Buildx bootstrap/image build has yet validated the ECR mirrors.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest tests.test_release_asset_workflow` passed 10 tests; full discovery passed 524 tests with 2 skips; CI run `37995528589` passed. Release workflow `37995695926` completed all jobs, including Buildx bootstrap, three multi-architecture image builds, native Linux amd64/arm64 packages, Windows executable, checksum, and GitHub Release publication.
+- Commits: `66a85a0 fix(release): avoid Docker Hub base image throttling`; `dccc039 fix(release): use ECR mirror for Buildx builder`.
+- Release: stable `v3.7.4` — https://github.com/DanielRondonGarcia/vaultline/releases/tag/3.7.4.
 
 ## Authorized edit surfaces
 
@@ -74,9 +76,8 @@ The release workflow initially pulled `python:3.11-slim-bookworm` anonymously fr
 - Regression coverage checks the local Docker Hub default, all three base-image build args, and Buildx's ECR builder image while retaining `APP_VERSION` and worker `INSTALL_DOCKER_CLI=true`.
 - TDD evidence for the Python base change: before implementation, the focused command ran 9 tests and failed only the new regression test because the Dockerfile lacked the parameterized default; after implementation, the focused command ran 9 tests and passed (`OK`). For the Buildx follow-up, the focused command first failed because the setup step lacked ECR `driver-opts`; after configuring the mirror, the final focused suite passed 10 tests (`OK`).
 - Independent verification: focused release workflow suite passed 10 tests; full discovery passed 524 tests with 2 skips; `git diff --check` reported no whitespace errors (Git emitted line-ending conversion warnings).
-- No remote Buildx bootstrap/image build or corrected release workflow has yet validated ECR availability. ECR Public has its own unauthenticated quotas.
-- Completion of RBR-2 remains pending the actual corrected release workflow and successful image/publish jobs; this implementation does not establish remote release success.
+- Final remote verification confirmed Buildx bootstrapped from ECR Public, the ECR Python base built successfully for both architectures, and all three GHCR images and native assets were published. ECR Public has its own unauthenticated quotas.
 
 ## Next step
 
-Commit the Buildx ECR mirror follow-up and regression test, push to `master`, and run the stable patch release workflow. Verify Buildx bootstrap, image-build, and publish-release before reporting the version.
+No release action remains. Monitor the Node.js 20 deprecation annotations separately; they did not fail this release workflow.
