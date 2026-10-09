@@ -35,7 +35,7 @@ class LiveHelperImageResolutionTests(unittest.TestCase):
                 with patch.dict(os.environ, {variable: "3.3.1"}, clear=True):
                     self.assertEqual(
                         _resolve_live_helper_image(),
-                        "ghcr.io/danielrondongarcia/docker-volume-backup-worker:3.3.1",
+                        "ghcr.io/danielrondongarcia/vaultline-worker:3.3.1",
                     )
 
     def test_non_concrete_versions_keep_local_fallback(self):

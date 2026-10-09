@@ -145,9 +145,9 @@ class KubernetesDependencyAndReleaseTests(unittest.TestCase):
         self.assertIn("target: control-plane", workflow)
         self.assertIn("target: worker", workflow)
         self.assertIn("INSTALL_DOCKER_CLI=true", workflow)
-        self.assertIn("docker-volume-backup-worker:latest", manifest)
+        self.assertIn("ghcr.io/danielrondongarcia/vaultline-worker:latest", manifest)
         self.assertIn("name: WORKER_RUNTIME\n              value: kubernetes", manifest)
-        self.assertIn("name: BACKUP_RUNTIME_IMAGE", manifest)
+        self.assertIn("name: BACKUP_RUNTIME_IMAGE\n              value: ghcr.io/danielrondongarcia/vaultline:latest", manifest)
 
 
 if __name__ == "__main__":

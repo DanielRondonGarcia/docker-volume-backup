@@ -90,7 +90,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest
+          image: ghcr.io/danielrondongarcia/vaultline-worker:latest
           ports:
             - name: health
               containerPort: 8081
@@ -100,7 +100,7 @@ spec:
             - name: WORKER_RUNTIME
               value: kubernetes
             - name: BACKUP_RUNTIME_IMAGE
-              value: ghcr.io/danielrondongarcia/docker-volume-backup:latest
+              value: ghcr.io/danielrondongarcia/vaultline:latest
             - name: WORKER_HEALTH_HOST
               value: 0.0.0.0
             - name: WORKER_HEALTH_PORT

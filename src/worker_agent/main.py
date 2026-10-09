@@ -196,7 +196,7 @@ def _resolve_live_helper_image() -> str:
     for variable in ("WORKER_VERSION", "APP_VERSION"):
         version = (os.environ.get(variable) or "").strip()
         if re.fullmatch(r"\d+\.\d+\.\d+", version):
-            return f"ghcr.io/danielrondongarcia/docker-volume-backup-worker:{version}"
+            return f"ghcr.io/danielrondongarcia/vaultline-worker:{version}"
 
     return "docker-volume-backup-worker-local:dev"
 
@@ -352,7 +352,7 @@ def build_service() -> WorkerAgentService:
         labels=_labels_from_env(),
         backup_runtime_image=os.environ.get(
             "BACKUP_RUNTIME_IMAGE",
-            "ghcr.io/danielrondongarcia/docker-volume-backup",
+            "ghcr.io/danielrondongarcia/vaultline",
         ),
         enrollment_token=os.environ.get("WORKER_ENROLLMENT_TOKEN") or os.environ.get("WORKER_SECRET") or None,
         live_helper_image=_resolve_live_helper_image(),

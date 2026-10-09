@@ -2,7 +2,7 @@ name: docker-volume-backup-control-plane-ghcr
 
 services:
   control-plane:
-    image: ${CONTROL_PLANE_IMAGE:-ghcr.io/danielrondongarcia/docker-volume-backup-control-plane:latest}
+    image: ${CONTROL_PLANE_IMAGE:-ghcr.io/danielrondongarcia/vaultline-control-plane:latest}
     restart: unless-stopped
     environment:
       CONTROL_PLANE_HOST: 0.0.0.0

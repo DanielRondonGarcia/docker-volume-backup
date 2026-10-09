@@ -1292,7 +1292,7 @@ Register-ScheduledTask -TaskName "VaultlineWorker" -Action $Action -Trigger $Tri
 
       const composeYml = `services:
   worker:
-    image: ghcr.io/danielrondongarcia/docker-volume-backup-worker:latest
+    image: ghcr.io/danielrondongarcia/vaultline-worker:latest
     restart: unless-stopped
     environment:
       CONTROL_PLANE_URL: ${cpUrl}

@@ -10,7 +10,7 @@ class WorkerAgentConfig:
     version: str = "dev"
     labels: Dict[str, str] = field(default_factory=dict)
     worker_id: Optional[str] = None
-    backup_runtime_image: str = "ghcr.io/danielrondongarcia/docker-volume-backup"
+    backup_runtime_image: str = "ghcr.io/danielrondongarcia/vaultline"
     enrollment_token: Optional[str] = None
     live_helper_image: str = "docker-volume-backup-worker-local:dev"
 
