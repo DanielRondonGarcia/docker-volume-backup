@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import unittest
@@ -111,6 +112,32 @@ class JobOwnershipTests(unittest.TestCase):
             sqlite_renewed = sqlite_service.renew_job_lease("worker-a", sqlite_job.id, sqlite_claimed.lease_token)
             self.assertGreater(sqlite_renewed.lease_expires_at, sqlite_claimed.lease_expires_at)
 
+    def test_reported_renewal_failure_is_preserved_until_expiry(self):
+        service = self.make_service()
+        job = service.dispatch_job("worker-a", "backup.run")
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+
+        service.record_job_lease_diagnostic(
+            worker_id="worker-a",
+            job_id=job.id,
+            lease_token=claimed.lease_token,
+            lease_context={
+                "last_renewal": {
+                    "outcome": "failed",
+                    "error_type": "TimeoutError",
+                    "error_category": "connectivity",
+                }
+            },
+        )
+        claimed.lease_expires_at = utcnow() - timedelta(seconds=1)
+        service.job_repository.save(claimed)
+
+        diagnostics = service.get_job_view(job.id)["diagnostics"]
+
+        self.assertEqual(diagnostics["observed"]["last_renewal"]["outcome"], "failed")
+        self.assertEqual(diagnostics["observed"]["last_renewal"]["error_type"], "TimeoutError")
+        self.assertEqual(diagnostics["observed"]["last_renewal"]["error_category"], "connectivity")
+
     def test_read_reconciles_expired_lease_without_worker_fetch(self):
         service = self.make_service()
         interrupted = JobRecord(
@@ -123,11 +150,28 @@ class JobOwnershipTests(unittest.TestCase):
             lease_expires_at=utcnow() - timedelta(minutes=1),
         )
         service.job_repository.save(interrupted)
+        issued_at = interrupted.lease_issued_at.isoformat()
+        expires_at = interrupted.lease_expires_at.isoformat()
 
         observed = service.get_job(interrupted.id)
 
         self.assertEqual(observed.status, JobStatus.FAILED)
         self.assertEqual(observed.result_summary["recovery"], "worker_interrupted")
+        self.assertEqual(observed.result_summary["diagnostic_code"], "worker_lease_expired")
+        self.assertEqual(observed.result_summary["diagnostic_category"], "worker_interrupted")
+        self.assertIn("terminal result", observed.result_summary["diagnostic_message"])
+        diagnostics = observed.result_summary["lease_diagnostics"]
+        self.assertEqual(diagnostics["code"], "worker_lease_expired")
+        self.assertEqual(diagnostics["category"], "worker_interrupted")
+        self.assertIn("root_cause", diagnostics["unknown"])
+        self.assertEqual(diagnostics["observed"]["job_id"], interrupted.id)
+        self.assertEqual(diagnostics["observed"]["worker_id"], "worker-a")
+        self.assertEqual(diagnostics["observed"]["command"], "restore.run")
+        self.assertEqual(diagnostics["observed"]["lease_issued_at"], issued_at)
+        self.assertEqual(diagnostics["observed"]["lease_expires_at"], expires_at)
+        view = service.get_job_view(interrupted.id)
+        self.assertEqual(view["diagnostics"]["code"], "worker_lease_expired")
+        self.assertNotIn("lease-token", json.dumps(view, default=str))
         self.assertIsNone(observed.owner_worker_id)
         self.assertIsNone(observed.lease_token)
         self.assertEqual(observed.log_lines.count("Worker lease expired before terminal status was reported."), 1)

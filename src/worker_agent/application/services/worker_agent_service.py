@@ -7,6 +7,7 @@ import posixpath
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from urllib.error import HTTPError
 
@@ -44,6 +45,126 @@ def _safe_live_log_value(value: Any, fallback: str = "unknown") -> str:
     if not isinstance(value, str) or not value:
         return fallback
     return re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:128] or fallback
+
+
+def _safe_worker_error_type(error: Exception) -> str:
+    name = error.__class__.__name__ if error is not None else "Exception"
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", name)[:96] or "Exception"
+
+
+def _lease_error_category(error: Exception) -> tuple[str, Optional[str]]:
+    status = getattr(error, "status", getattr(error, "code", None))
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        category = "control_plane_rejection" if status < 500 else "control_plane_unavailable"
+        return category, f"{status // 100}xx"
+    if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+        return "connectivity", None
+    return "unknown", None
+
+
+class _LeaseDiagnosticState:
+    """Keep bounded lease evidence available to progress and terminal reports."""
+
+    _TEXT_FIELDS = {
+        "job_id",
+        "target_id",
+        "worker_id",
+        "command",
+        "lease_issued_at",
+        "lease_expires_at",
+        "last_repository_update_at",
+        "last_progress_at",
+    }
+
+    @staticmethod
+    def _safe_renewal(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        safe: Dict[str, Any] = {}
+        if value.get("outcome") in {"renewed", "failed", "unknown"}:
+            safe["outcome"] = value["outcome"]
+        at = value.get("at")
+        if isinstance(at, str) and 0 < len(at) <= 256:
+            try:
+                datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except (TypeError, ValueError, OverflowError):
+                at = None
+            if at and not any(ord(ch) < 32 for ch in at):
+                safe["at"] = at
+        error_type = value.get("error_type")
+        if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,95}", error_type):
+            safe["error_type"] = error_type
+        if value.get("error_category") in {"connectivity", "control_plane_rejection", "control_plane_unavailable", "unknown"}:
+            safe["error_category"] = value["error_category"]
+        if value.get("status_category") in {"1xx", "2xx", "3xx", "4xx", "5xx", "unknown"}:
+            safe["status_category"] = value["status_category"]
+        return safe
+
+    def __init__(self, worker_id: str, job: Dict[str, Any]):
+        self._lock = threading.RLock()
+        self._context: Dict[str, Any] = {}
+        if isinstance(worker_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", worker_id):
+            self._context["worker_id"] = worker_id
+        for key in self._TEXT_FIELDS:
+            value = job.get(key)
+            if isinstance(value, str) and value and len(value) <= 256 and not any(ord(ch) < 32 for ch in value):
+                if key in {"job_id", "target_id", "worker_id", "command"} and not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value
+                ):
+                    continue
+                if key not in {"job_id", "target_id", "worker_id", "command"}:
+                    try:
+                        datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                self._context[key] = value
+        for key in ("job_id", "target_id", "command"):
+            value = job.get("id" if key == "job_id" else key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value):
+                self._context.setdefault(key, value)
+        summary = job.get("result_summary") if isinstance(job.get("result_summary"), dict) else {}
+        existing = summary.get("lease_context") if isinstance(summary.get("lease_context"), dict) else {}
+        for key in ("lease_issued_at", "lease_expires_at", "last_repository_update_at", "last_progress_at"):
+            value = existing.get(key)
+            if isinstance(value, str) and value and len(value) <= 256 and not any(ord(ch) < 32 for ch in value):
+                try:
+                    datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                self._context[key] = value
+        sequence = existing.get("last_progress_sequence", summary.get("progress_sequence"))
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= 1_000_000_000:
+            self._context["last_progress_sequence"] = sequence
+        renewal = existing.get("last_renewal")
+        if isinstance(renewal, dict):
+            safe_renewal = self._safe_renewal(renewal)
+            if safe_renewal:
+                self._context["last_renewal"] = safe_renewal
+
+    def record_renewal(self, error: Optional[Exception] = None) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            if error is None:
+                self._context["last_renewal"] = {"outcome": "renewed", "at": now}
+            else:
+                category, status_category = _lease_error_category(error)
+                renewal = {
+                    "outcome": "failed",
+                    "at": now,
+                    "error_type": _safe_worker_error_type(error),
+                    "error_category": category,
+                }
+                if status_category:
+                    renewal["status_category"] = status_category
+                self._context["last_renewal"] = renewal
+            return self.snapshot()
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            snapshot = dict(self._context)
+            if isinstance(self._context.get("last_renewal"), dict):
+                snapshot["last_renewal"] = dict(self._context["last_renewal"])
+            return {key: value for key, value in snapshot.items() if value is not None}
 
 
 def _phase_from_line(line: str) -> Optional[str]:
@@ -97,11 +218,12 @@ class _JobProgressReporter:
     FLUSH_INTERVAL_SECONDS = 0.25
     MAX_PENDING_LINES = 32
 
-    def __init__(self, client, worker_id: str, job: Dict[str, Any]):
+    def __init__(self, client, worker_id: str, job: Dict[str, Any], lease_diagnostics: Optional[_LeaseDiagnosticState] = None):
         self.client = client
         self.worker_id = worker_id
         self.job_id = job.get("id")
         self.lease_token = job.get("lease_token")
+        self.lease_diagnostics = lease_diagnostics
         self.sequence = 0
         self.latest_progress: Dict[str, Any] = {}
         self._pending_lines: List[str] = []
@@ -178,21 +300,41 @@ class _JobProgressReporter:
     def _send(self, sequence: int, progress: Dict[str, Any], lines: List[str]) -> None:
         if not callable(self._send_method) or not self.job_id or not isinstance(self.lease_token, str):
             return
+        kwargs = {
+            "worker_id": self.worker_id,
+            "job_id": self.job_id,
+            "sequence": sequence,
+            "progress": progress,
+            "log_lines": lines,
+            "lease_token": self.lease_token,
+        }
+        if self.lease_diagnostics is not None:
+            lease_context = self.lease_diagnostics.snapshot()
+            if lease_context:
+                kwargs["lease_context"] = lease_context
         try:
-            self._send_method(
-                worker_id=self.worker_id,
-                job_id=self.job_id,
-                sequence=sequence,
-                progress=progress,
-                log_lines=lines,
-                lease_token=self.lease_token,
-            )
+            self._send_method(**kwargs)
+        except TypeError:
+            if "lease_context" in kwargs:
+                kwargs.pop("lease_context", None)
+                try:
+                    self._send_method(**kwargs)
+                except Exception as exc:
+                    logger.warning(
+                        "Job progress update failed for %s (error_type=%s)",
+                        self.job_id,
+                        exc.__class__.__name__,
+                    )
+                    return
+            else:
+                logger.warning("Job progress update failed for %s (error_type=TypeError)", self.job_id)
         except Exception as exc:
             logger.warning(
                 "Job progress update failed for %s (error_type=%s)",
                 self.job_id,
                 exc.__class__.__name__,
             )
+            return
 
 
 class WorkerAgentService:
@@ -1446,7 +1588,12 @@ class WorkerAgentService:
                 kwargs["output_callback"] = output_callback
         return method(**kwargs)
 
-    def _start_lease_renewal(self, worker_id: str, job: Dict[str, Any]):
+    def _start_lease_renewal(
+        self,
+        worker_id: str,
+        job: Dict[str, Any],
+        lease_diagnostics: Optional[_LeaseDiagnosticState] = None,
+    ):
         renew = self._optional_method(self.control_plane_client, "renew_job_lease")
         job_id = job.get("id")
         lease_token = job.get("lease_token")
@@ -1458,12 +1605,30 @@ class WorkerAgentService:
             while not stop_event.wait(self.JOB_LEASE_RENEWAL_INTERVAL_SECONDS):
                 try:
                     renew(worker_id, job_id, lease_token)
+                    if lease_diagnostics is not None:
+                        lease_diagnostics.record_renewal()
                 except Exception as exc:
+                    context = lease_diagnostics.record_renewal(exc) if lease_diagnostics is not None else None
                     logger.warning(
                         "Job lease renewal failed for %s (error_type=%s)",
                         job_id,
-                        exc.__class__.__name__,
+                        _safe_worker_error_type(exc),
                     )
+                    report = self._optional_method(self.control_plane_client, "report_job_lease_diagnostic")
+                    if callable(report) and context:
+                        try:
+                            report(
+                                worker_id=worker_id,
+                                job_id=job_id,
+                                lease_context=context,
+                                lease_token=lease_token,
+                            )
+                        except Exception as report_error:
+                            logger.debug(
+                                "Lease renewal diagnostic report failed for %s (error_type=%s)",
+                                job_id,
+                                _safe_worker_error_type(report_error),
+                            )
 
         thread = threading.Thread(target=renew_until_done, daemon=True, name=f"job-lease-{job_id}")
         thread.start()
@@ -1491,8 +1656,14 @@ class WorkerAgentService:
         results = []
         for job in jobs or []:
             self._persist_recovery_record(worker_id, job)
-            renewal = self._start_lease_renewal(worker_id, job)
-            progress_reporter = _JobProgressReporter(self.control_plane_client, worker_id, job)
+            lease_diagnostics = _LeaseDiagnosticState(worker_id, job)
+            renewal = self._start_lease_renewal(worker_id, job, lease_diagnostics)
+            progress_reporter = _JobProgressReporter(
+                self.control_plane_client,
+                worker_id,
+                job,
+                lease_diagnostics=lease_diagnostics,
+            )
             progress_reporter.start()
             try:
                 execution = self.execute_job(job, progress_reporter=progress_reporter)
@@ -1500,11 +1671,15 @@ class WorkerAgentService:
                 progress_reporter.finish()
                 self._stop_lease_renewal(renewal)
             try:
+                result_summary = dict(execution.result_summary) if isinstance(execution.result_summary, dict) else {}
+                lease_context = lease_diagnostics.snapshot()
+                if lease_context:
+                    result_summary["lease_context"] = lease_context
                 updated = self.control_plane_client.update_job_status(
                     worker_id=worker_id,
                     job_id=job["id"],
                     status=execution.status,
-                    result_summary=execution.result_summary,
+                    result_summary=result_summary,
                     log_lines=execution.log_lines,
                     lease_token=job.get("lease_token"),
                 )

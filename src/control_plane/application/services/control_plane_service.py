@@ -77,6 +77,22 @@ class ControlPlaneService:
     MIN_WORKER_OFFLINE_AFTER_SECONDS = 1.0
     MAX_WORKER_OFFLINE_AFTER_SECONDS = 3600.0
     JOB_LEASE_DURATION_SECONDS = 300
+    LEASE_DIAGNOSTIC_CODE = "worker_lease_expired"
+    LEASE_DIAGNOSTIC_CATEGORY = "worker_interrupted"
+    LEASE_DIAGNOSTIC_MESSAGE = (
+        "Control Plane observed that the worker lease expired before a terminal result arrived; "
+        "the worker or runtime cause is unknown."
+    )
+    LEASE_CONTEXT_OUTCOMES = frozenset({"renewed", "failed", "unknown"})
+    LEASE_CONTEXT_ERROR_CATEGORIES = frozenset(
+        {"connectivity", "control_plane_rejection", "control_plane_unavailable", "unknown"}
+    )
+    LEASE_CONTEXT_STATUS_CATEGORIES = frozenset({"1xx", "2xx", "3xx", "4xx", "5xx", "unknown"})
+    LEASE_CONTEXT_WORKER_STATUSES = frozenset(
+        {WorkerStatus.PENDING, WorkerStatus.ONLINE, WorkerStatus.OFFLINE, WorkerStatus.DISABLED, "missing"}
+    )
+    MAX_LEASE_CONTEXT_TEXT = 256
+    MAX_LEASE_CONTEXT_TYPE = 96
     MAX_SNAPSHOT_ENTRIES = 10_000
     MAX_PROGRESS_LOG_LINES = 100
     MAX_PROGRESS_LOG_CHARS = 64 * 1024
@@ -2857,6 +2873,35 @@ class ControlPlaneService:
         self.worker_repository.save(worker)
         return renewed
 
+    def record_job_lease_diagnostic(
+        self,
+        worker_id: str,
+        job_id: str,
+        lease_token: str,
+        lease_context: Optional[Dict[str, Any]] = None,
+    ) -> JobRecord:
+        """Persist bounded worker lease evidence without changing job ownership or status."""
+        self._require_worker(worker_id)
+        job = self._require_job(job_id, reconcile=False)
+        if job.owner_worker_id != worker_id:
+            raise ValueError(f"worker '{worker_id}' does not own job '{job_id}'")
+        if not isinstance(lease_token, str) or not hmac.compare_digest(job.lease_token or "", lease_token):
+            raise ValueError(f"job '{job_id}' lease token is invalid or stale")
+        if JobStatus.normalize(job.status) != JobStatus.IN_PROGRESS:
+            raise ValueError(f"job '{job_id}' is not in progress (current status: {job.status})")
+        now = utcnow()
+        if not job.lease_expires_at or job.lease_expires_at <= now:
+            self._reconcile_expired_jobs()
+            raise ValueError(f"job '{job_id}' lease has expired")
+        context = self._lease_context_for_job(job, lease_context, now=now)
+        summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+        summary["lease_context"] = context
+        job.result_summary = summary
+        job.updated_at = now
+        saved_job = self.job_repository.save(job)
+        self._publish_job_event(saved_job)
+        return saved_job
+
     def _job_storage_context(self, job: JobRecord) -> Dict[str, Any]:
         summary = job.result_summary if isinstance(job.result_summary, dict) else {}
         context = summary.get("storage_context")
@@ -2872,6 +2917,147 @@ class ControlPlaneService:
                 except Exception:
                     context = {}
         return self._safe_storage_context(context)
+
+    @classmethod
+    def _safe_lease_context(cls, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        safe: Dict[str, Any] = {}
+        identifier_fields = {"job_id", "target_id", "worker_id", "command"}
+        timestamp_fields = {
+            "observed_at",
+            "lease_issued_at",
+            "lease_expires_at",
+            "last_repository_update_at",
+            "last_progress_at",
+            "worker_last_seen_at",
+        }
+        for key in identifier_fields | timestamp_fields:
+            raw = value.get(key)
+            if not isinstance(raw, str) or not raw or len(raw) > cls.MAX_LEASE_CONTEXT_TEXT:
+                continue
+            if any(ord(character) < 32 for character in raw):
+                continue
+            if key in identifier_fields:
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", raw):
+                    continue
+            else:
+                try:
+                    datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            safe[key] = raw
+
+        sequence = value.get("last_progress_sequence")
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= 1_000_000_000:
+            safe["last_progress_sequence"] = sequence
+
+        worker_status = value.get("worker_status")
+        if worker_status in cls.LEASE_CONTEXT_WORKER_STATUSES:
+            safe["worker_status"] = worker_status
+
+        renewal = value.get("last_renewal")
+        if isinstance(renewal, dict):
+            safe_renewal: Dict[str, Any] = {}
+            outcome = renewal.get("outcome")
+            if outcome in cls.LEASE_CONTEXT_OUTCOMES:
+                safe_renewal["outcome"] = outcome
+            renewal_at = renewal.get("at")
+            if isinstance(renewal_at, str) and 0 < len(renewal_at) <= cls.MAX_LEASE_CONTEXT_TEXT:
+                try:
+                    datetime.fromisoformat(renewal_at.replace("Z", "+00:00"))
+                except (TypeError, ValueError, OverflowError):
+                    renewal_at = None
+                if renewal_at and not any(ord(character) < 32 for character in renewal_at):
+                    safe_renewal["at"] = renewal_at
+            error_type = renewal.get("error_type")
+            if isinstance(error_type, str) and 0 < len(error_type) <= cls.MAX_LEASE_CONTEXT_TYPE:
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]*", error_type):
+                    safe_renewal["error_type"] = error_type
+            error_category = renewal.get("error_category")
+            if error_category in cls.LEASE_CONTEXT_ERROR_CATEGORIES:
+                safe_renewal["error_category"] = error_category
+            status_category = renewal.get("status_category")
+            if status_category in cls.LEASE_CONTEXT_STATUS_CATEGORIES:
+                safe_renewal["status_category"] = status_category
+            if safe_renewal:
+                safe["last_renewal"] = safe_renewal
+        return safe
+
+    def _lease_context_for_job(self, job: JobRecord, incoming: Any = None, now: Optional[datetime] = None) -> Dict[str, Any]:
+        summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+        context = self._safe_lease_context(summary.get("lease_context"))
+        supplied = self._safe_lease_context(incoming)
+        for key, value in supplied.items():
+            if key == "last_renewal" and isinstance(value, dict):
+                previous = context.get("last_renewal") if isinstance(context.get("last_renewal"), dict) else {}
+                context[key] = {**previous, **value}
+            else:
+                context[key] = value
+        context.setdefault("job_id", job.id)
+        context.setdefault("target_id", job.target_id)
+        context.setdefault("worker_id", job.owner_worker_id or job.worker_id)
+        context.setdefault("command", job.command)
+        if job.lease_issued_at is not None:
+            context.setdefault("lease_issued_at", job.lease_issued_at.isoformat())
+        if job.lease_expires_at is not None:
+            context.setdefault("lease_expires_at", job.lease_expires_at.isoformat())
+        context.setdefault("last_repository_update_at", job.updated_at.isoformat())
+        if now is not None:
+            context["observed_at"] = now.isoformat()
+        try:
+            sequence = int(context.get("last_progress_sequence", summary.get("progress_sequence", 0)) or 0)
+        except (TypeError, ValueError):
+            sequence = 0
+        if 0 <= sequence <= 1_000_000_000:
+            context["last_progress_sequence"] = sequence
+        return context
+
+    @staticmethod
+    def _job_lease_expired(job: JobRecord, now: datetime) -> bool:
+        expires_at = job.lease_expires_at
+        if expires_at and expires_at.tzinfo and now.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=None)
+        try:
+            return (
+                JobStatus.normalize(job.status) == JobStatus.IN_PROGRESS
+                and expires_at is not None
+                and expires_at <= now
+            )
+        except TypeError:
+            return False
+
+    def _capture_expired_lease_context(self, now: datetime) -> List[str]:
+        expired_ids: List[str] = []
+        list_for_context = getattr(self.job_repository, "list_for_lease_context", None)
+        try:
+            jobs = list_for_context() if callable(list_for_context) else self.job_repository.list()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Reconciliation itself remains repository-atomic; a malformed legacy
+            # summary must not make lightweight job listings fail closed.
+            return expired_ids
+        for job in jobs:
+            if not self._job_lease_expired(job, now):
+                continue
+            worker_id = job.owner_worker_id or job.worker_id
+            worker = self.worker_repository.get(worker_id) if worker_id else None
+            context = self._lease_context_for_job(job, now=now)
+            context["worker_id"] = worker_id
+            context["worker_status"] = self._worker_status(worker, now) if worker is not None else "missing"
+            context["worker_last_seen_at"] = worker.last_seen_at.isoformat() if worker and worker.last_seen_at else None
+            context["last_repository_update_at"] = job.updated_at.isoformat()
+            update_context = getattr(self.job_repository, "update_lease_context", None)
+            if callable(update_context):
+                if not update_context(job.id, context):
+                    continue
+            else:
+                summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+                summary["lease_context"] = context
+                job.result_summary = summary
+                self.job_repository.save(job)
+            expired_ids.append(job.id)
+        return expired_ids
 
     @staticmethod
     def _job_sensitive_values(job: JobRecord) -> set[str]:
@@ -2984,6 +3170,12 @@ class ControlPlaneService:
                 safe[key] = self._redact_job_text(value, self._job_sensitive_values(job))[:2048]
             else:
                 safe[key] = self._safe_public_value(value, job)
+        diagnostics = self._safe_lease_diagnostics(raw.get("lease_diagnostics"), job)
+        if diagnostics:
+            safe["lease_diagnostics"] = diagnostics
+            safe["diagnostic_code"] = diagnostics["code"]
+            safe["diagnostic_category"] = diagnostics["category"]
+            safe["diagnostic_message"] = diagnostics["message"]
         ownership = self._safe_restore_ownership(raw.get("restore_ownership"), job)
         if ownership:
             safe["restore_ownership"] = ownership
@@ -3046,6 +3238,58 @@ class ControlPlaneService:
             if projected:
                 safe[section] = projected
         return safe
+
+    def _safe_lease_diagnostics(self, value: Any, job: JobRecord) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        if value.get("code") != self.LEASE_DIAGNOSTIC_CODE or value.get("category") != self.LEASE_DIAGNOSTIC_CATEGORY:
+            return {}
+        raw_observed = value.get("observed")
+        if not isinstance(raw_observed, dict):
+            return {}
+        normalized_observed = self._safe_lease_context(raw_observed)
+        observed: Dict[str, Any] = {}
+        for key in (
+            "job_id",
+            "target_id",
+            "worker_id",
+            "command",
+            "lease_issued_at",
+            "lease_expires_at",
+            "last_repository_update_at",
+            "last_progress_at",
+            "worker_last_seen_at",
+        ):
+            raw = normalized_observed.get(key)
+            if raw is None:
+                continue
+            if not isinstance(raw, str) or not raw or len(raw) > self.MAX_LEASE_CONTEXT_TEXT:
+                continue
+            if any(ord(character) < 32 for character in raw):
+                continue
+            observed[key] = self._redact_job_text(raw, self._job_sensitive_values(job))[: self.MAX_LEASE_CONTEXT_TEXT]
+        sequence = normalized_observed.get("last_progress_sequence")
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= 1_000_000_000:
+            observed["last_progress_sequence"] = sequence
+        worker_status = normalized_observed.get("worker_status")
+        if worker_status in self.LEASE_CONTEXT_WORKER_STATUSES:
+            observed["worker_status"] = worker_status
+        renewal = normalized_observed.get("last_renewal")
+        if isinstance(renewal, dict):
+            normalized = self._safe_lease_context({"last_renewal": renewal}).get("last_renewal")
+            if normalized:
+                observed["last_renewal"] = normalized
+        unknown = value.get("unknown")
+        unknown_items = [item for item in unknown if isinstance(item, str) and item in {"terminal_result", "root_cause"}] if isinstance(unknown, list) else []
+        if not unknown_items:
+            unknown_items = ["terminal_result", "root_cause"]
+        return {
+            "code": self.LEASE_DIAGNOSTIC_CODE,
+            "category": self.LEASE_DIAGNOSTIC_CATEGORY,
+            "message": self.LEASE_DIAGNOSTIC_MESSAGE,
+            "observed": observed,
+            "unknown": unknown_items,
+        }
 
     @classmethod
     def _safe_snapshot_about_stats(cls, value: Any) -> Dict[str, int]:
@@ -3136,6 +3380,7 @@ class ControlPlaneService:
         summary = self._safe_result_summary(job)
         context = summary.get("storage_context") or self._job_storage_context(job)
         progress = summary.get("progress")
+        diagnostics = summary.get("lease_diagnostics")
         return {
             "id": job.id,
             "worker_id": job.worker_id,
@@ -3146,6 +3391,7 @@ class ControlPlaneService:
             "status": JobStatus.normalize(job.status),
             "attempt_count": job.attempt_count,
             "result_summary": summary,
+            "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
             "storage_context": context,
             "progress": progress if isinstance(progress, dict) else None,
             "log_lines": self._bounded_job_log_lines(job),
@@ -3180,6 +3426,7 @@ class ControlPlaneService:
             "status": JobStatus.normalize(job.status),
             "attempt_count": job.attempt_count,
             "result_summary": {},
+            "diagnostics": None,
             "storage_context": {},
             "progress": None,
             "log_lines": [],
@@ -3212,6 +3459,7 @@ class ControlPlaneService:
         progress: Any,
         log_lines: Any = None,
         lease_token: Optional[str] = None,
+        lease_context: Optional[Dict[str, Any]] = None,
     ) -> JobRecord:
         self._require_worker(worker_id)
         job = self._require_job(job_id, reconcile=False)
@@ -3230,12 +3478,20 @@ class ControlPlaneService:
             return job
 
         current_summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+        normalized_lease_context = self._lease_context_for_job(job, lease_context, now=utcnow())
         summary_context = self._safe_storage_context(current_summary.get("storage_context"))
         if not summary_context:
             summary_context = self._safe_storage_context(
                 (job.payload or {}).get("storage_context") if isinstance(job.payload, dict) else None
             )
-        result_summary = {"storage_context": summary_context} if summary_context else None
+        result_summary: Optional[Dict[str, Any]] = {"storage_context": summary_context} if summary_context else {}
+        if lease_context is not None:
+            result_summary["lease_context"] = normalized_lease_context
+            current_summary = dict(current_summary)
+            current_summary["lease_context"] = normalized_lease_context
+            job.result_summary = current_summary
+            job.updated_at = utcnow()
+            self.job_repository.save(job)
         updater = getattr(self.job_repository, "update_progress", None)
         if callable(updater):
             updated = updater(
@@ -3245,7 +3501,7 @@ class ControlPlaneService:
                 sequence=normalized_sequence,
                 progress=normalized_progress,
                 log_lines=normalized_lines,
-                result_summary=result_summary,
+                result_summary=result_summary or None,
             )
             if updated is None:
                 raise ValueError(f"job '{job_id}' progress lease is invalid or stale")
@@ -3278,6 +3534,7 @@ class ControlPlaneService:
         result_summary: Optional[Dict[str, Any]] = None,
         log_lines: Optional[List[str]] = None,
         lease_token: Optional[str] = None,
+        lease_context: Optional[Dict[str, Any]] = None,
     ) -> JobRecord:
         self._require_worker(worker_id)
         job = self._require_job(job_id, reconcile=False)
@@ -3297,13 +3554,27 @@ class ControlPlaneService:
             raise ValueError(f"job '{job_id}' cannot be completed with status: {status}")
         job.status = status
         job.updated_at = utcnow()
+        incoming_lease_context = lease_context
+        if incoming_lease_context is None and isinstance(result_summary, dict):
+            incoming_lease_context = result_summary.get("lease_context")
+        normalized_lease_context = (
+            self._lease_context_for_job(job, incoming_lease_context, now=job.updated_at)
+            if incoming_lease_context is not None
+            else None
+        )
         if result_summary is not None:
             completed_summary = dict(result_summary) if isinstance(result_summary, dict) else {}
+            if normalized_lease_context is not None:
+                completed_summary["lease_context"] = normalized_lease_context
             if "storage_context" not in completed_summary:
                 context = self._job_storage_context(job)
                 if context:
                     completed_summary["storage_context"] = context
             job.result_summary = completed_summary
+        elif normalized_lease_context is not None:
+            current_summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+            current_summary["lease_context"] = normalized_lease_context
+            job.result_summary = current_summary
         if log_lines:
             job.log_lines = self._bounded_job_log_lines(job, list(job.log_lines or []) + list(log_lines))
         else:
@@ -3362,12 +3633,11 @@ class ControlPlaneService:
         job.updated_at = utcnow()
         if not job.finished_at:
             job.finished_at = utcnow()
-        if not job.result_summary:
-            job.result_summary = {
-                "recovery": "operator_canceled",
-                "error": "job canceled",
-                "message": "Job canceled by operator before terminal worker completion.",
-            }
+        summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+        summary.setdefault("recovery", "operator_canceled")
+        summary.setdefault("error", "job canceled")
+        summary.setdefault("message", "Job canceled by operator before terminal worker completion.")
+        job.result_summary = summary
         if not job.log_lines:
             job.log_lines = ["Job canceled by operator before terminal worker completion."]
         saved_job = self.job_repository.save(job)
@@ -3879,7 +4149,17 @@ class ControlPlaneService:
 
     def _reconcile_expired_jobs(self) -> int:
         reconcile = getattr(self.job_repository, "reconcile_expired_leases", None)
-        return reconcile() if callable(reconcile) else 0
+        if not callable(reconcile):
+            return 0
+        now = utcnow()
+        expired_ids = self._capture_expired_lease_context(now)
+        reconciled = reconcile()
+        if reconciled:
+            for job_id in expired_ids:
+                job = self.job_repository.get(job_id)
+                if job is not None and JobStatus.normalize(job.status) == JobStatus.FAILED:
+                    self._publish_job_event(job)
+        return reconciled
 
     def _require_target(self, target_id: str) -> BackupTargetRecord:
         target = self.target_repository.get(target_id)

@@ -154,8 +154,12 @@
     .snapshot-empty strong { display: block; margin-bottom: 6px; color: var(--foreground); }
     .snapshot-pagination-control { display: flex; justify-content: center; padding: 12px 0 4px; }
     .snapshot-pagination-control .btn { min-width: 128px; touch-action: manipulation; }
-    .snapshot-safe-note { margin-top: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; }
-    @media (max-width: 760px) {
+     .snapshot-safe-note { margin-top: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; }
+     .job-lease-diagnostics { display: grid; gap: 6px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--destructive) 42%, var(--border)); border-radius: var(--radius); background: color-mix(in srgb, var(--destructive) 7%, var(--card)); color: var(--muted-foreground); font-size: 12px; line-height: 1.45; }
+     .job-lease-diagnostics strong { color: var(--foreground); }
+     .job-lease-diagnostics code { color: var(--destructive); font: 600 11px/1.4 var(--font-mono); }
+     .job-lease-diagnostics-detail { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+     @media (max-width: 760px) {
       .modal-snapshots { width: 100%; height: 92vh; }
       .snapshot-explorer-shell { grid-template-columns: 1fr; grid-template-rows: minmax(170px, 34%) minmax(0, 1fr); }
       .snapshot-navigation { padding: 12px; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -374,7 +378,7 @@
       }[key] || (key ? String(phase) : "");
     }
 
-    function renderJobProgress(job) {
+     function renderJobProgress(job) {
       const status = normalizeJobStatus(job && job.status);
       const summary = job && job.result_summary && typeof job.result_summary === "object" ? job.result_summary : {};
       const progress = job && job.progress && typeof job.progress === "object" ? job.progress : (summary.progress || {});
@@ -396,8 +400,45 @@
         ? `<div class="job-progress-track" role="progressbar" aria-label="Progreso del job" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="job-progress-fill" style="width:${percent}%"></div></div>`
         : (status === "in_progress" ? `<div class="job-progress-track" role="progressbar" aria-label="Job en progreso" aria-valuetext="Procesando sin porcentaje disponible"><div class="job-progress-fill indeterminate"></div></div>` : "");
       const meta = counters.join(" · ") || (phaseLabel ? `Estado: ${phaseLabel}` : (status === "in_progress" ? "Esperando estado del runtime..." : "Sin metricas de progreso"));
-      return `<div class="job-progress" aria-live="polite"><div class="job-progress-heading"><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(phase)}</span></div>${track}<div class="job-progress-meta">${escapeHtml(meta)}</div></div>`;
-    }
+       return `<div class="job-progress" aria-live="polite"><div class="job-progress-heading"><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(phase)}</span></div>${track}<div class="job-progress-meta">${escapeHtml(meta)}</div></div>`;
+     }
+
+     function renderJobLeaseDiagnostics(job) {
+       const summary = job && job.result_summary && typeof job.result_summary === "object" ? job.result_summary : {};
+       const diagnostic = job && job.diagnostics && typeof job.diagnostics === "object"
+         ? job.diagnostics
+         : (summary.lease_diagnostics && typeof summary.lease_diagnostics === "object" ? summary.lease_diagnostics : null);
+       const diagnosticCode = summary.diagnostic_code || (diagnostic && diagnostic.code);
+       const diagnosticCategory = summary.diagnostic_category || (diagnostic && diagnostic.category);
+       if (!diagnostic || diagnosticCode !== "worker_lease_expired") return "";
+       const observed = diagnostic.observed && typeof diagnostic.observed === "object" ? diagnostic.observed : {};
+       const renewal = observed.last_renewal && typeof observed.last_renewal === "object" ? observed.last_renewal : null;
+       const unknownLabels = {
+         terminal_result: "resultado terminal",
+         root_cause: "causa raiz",
+       };
+       const unknown = (Array.isArray(diagnostic.unknown) ? diagnostic.unknown : [])
+         .map(item => unknownLabels[item] || item)
+         .filter(Boolean)
+         .map(item => escapeHtml(item));
+       const renewalText = renewal
+         ? `${renewal.outcome || "no informado"}${renewal.error_category ? ` · ${renewal.error_category}` : ""}${renewal.error_type ? ` · ${renewal.error_type}` : ""}`
+         : "No se recibio un resultado de renovacion";
+       const value = (item, fallback = "No disponible") => escapeHtml(item === undefined || item === null || item === "" ? fallback : String(item));
+       const facts = [
+         `Job: ${value(observed.job_id || job.id)}`,
+         `Target: ${value(observed.target_id || job.target_id)}`,
+         `Worker: ${value(observed.worker_id || job.worker_id)}`,
+         `Comando: ${value(observed.command || job.command)}`,
+         `Lease emitido: ${value(fmtDate(observed.lease_issued_at))}`,
+         `Lease expiro: ${value(fmtDate(observed.lease_expires_at))}`,
+         `Ultima actualizacion CP: ${value(fmtDate(observed.last_repository_update_at))}`,
+         `Ultimo progreso: ${value(fmtDate(observed.last_progress_at))} · secuencia ${value(observed.last_progress_sequence, "No disponible")}`,
+         `Heartbeat worker: ${value(fmtDate(observed.worker_last_seen_at))} · estado ${value(observed.worker_status)}`,
+         `Ultima renovacion: ${value(renewalText)}`,
+       ];
+       return `<section class="job-lease-diagnostics" role="status" aria-live="polite"><div><strong>Diagnostico de lease del worker</strong> <code>${value(diagnosticCode)}</code> · ${value(diagnosticCategory)}</div><div>${value(summary.diagnostic_message || diagnostic.message)}</div><div><strong>Observado:</strong></div><div class="job-lease-diagnostics-detail">${facts.map(item => `<span>${item}</span>`).join("")}</div><div><strong>No se demostro la causa raiz:</strong> ${unknown.length ? unknown.join(" · ") : "resultado terminal o motivo de interrupcion"}. Revise el worker y el runtime.</div></section>`;
+     }
 
     function jobTriggerInfo(trigger) {
       const raw = String(trigger || "").trim();
@@ -5195,11 +5236,11 @@ docker compose up -d
       if (closeButton) closeButton.addEventListener("click", closeLogPanel);
     }
 
-    function renderJobDetailSummary(job, root) {
-      const summary = root ? root.querySelector("[data-job-detail-summary]") : null;
-      if (!summary) return;
-      summary.innerHTML = `${renderJobProgress(job)}${renderJobStorageContext(job)}${renderRestoreOwnershipEvidence(job)}`;
-    }
+     function renderJobDetailSummary(job, root) {
+       const summary = root ? root.querySelector("[data-job-detail-summary]") : null;
+       if (!summary) return;
+       summary.innerHTML = `${renderJobLeaseDiagnostics(job)}${renderJobProgress(job)}${renderJobStorageContext(job)}${renderRestoreOwnershipEvidence(job)}`;
+     }
 
     function renderTargetJobLogsInto(job, root) {
       if (!root) return;

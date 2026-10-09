@@ -41,6 +41,14 @@ from src.control_plane.domain.models import (
 from src.control_plane.infrastructure.sqlite_runtime import SQLiteConnection as _SQLiteConnection
 
 
+LEASE_DIAGNOSTIC_CODE = "worker_lease_expired"
+LEASE_DIAGNOSTIC_CATEGORY = "worker_interrupted"
+LEASE_DIAGNOSTIC_MESSAGE = (
+    "Control Plane observed that the worker lease expired before a terminal result arrived; "
+    "the worker or runtime cause is unknown."
+)
+
+
 def _dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -51,6 +59,92 @@ def _json_load(value: Optional[str], fallback):
     if not value:
         return fallback
     return json.loads(value)
+
+
+def _datetime_text(value: Any) -> Optional[str]:
+    return value.isoformat() if hasattr(value, "isoformat") else value if isinstance(value, str) else None
+
+
+def _lease_context_for_values(
+    *,
+    job_id: str,
+    worker_id: Optional[str],
+    target_id: Optional[str],
+    command: Optional[str],
+    lease_issued_at: Any,
+    lease_expires_at: Any,
+    updated_at: Any,
+    result_summary: Any,
+    now: Any = None,
+) -> Dict[str, Any]:
+    summary = result_summary if isinstance(result_summary, dict) else {}
+    current = summary.get("lease_context")
+    context = dict(current) if isinstance(current, dict) else {}
+    context.setdefault("job_id", job_id)
+    context.setdefault("target_id", target_id)
+    context.setdefault("worker_id", worker_id)
+    context.setdefault("command", command)
+    if lease_issued_at is not None:
+        context.setdefault("lease_issued_at", _datetime_text(lease_issued_at))
+    if lease_expires_at is not None:
+        context.setdefault("lease_expires_at", _datetime_text(lease_expires_at))
+    context.setdefault("last_repository_update_at", _datetime_text(updated_at))
+    if now is not None:
+        context.setdefault("observed_at", _datetime_text(now))
+    return context
+
+
+def _lease_diagnostics(
+    *,
+    job_id: str,
+    worker_id: Optional[str],
+    target_id: Optional[str],
+    command: Optional[str],
+    lease_issued_at: Any,
+    lease_expires_at: Any,
+    updated_at: Any,
+    result_summary: Any,
+    now: Any,
+) -> Dict[str, Any]:
+    context = _lease_context_for_values(
+        job_id=job_id,
+        worker_id=worker_id,
+        target_id=target_id,
+        command=command,
+        lease_issued_at=lease_issued_at,
+        lease_expires_at=lease_expires_at,
+        updated_at=updated_at,
+        result_summary=result_summary,
+        now=now,
+    )
+    summary = result_summary if isinstance(result_summary, dict) else {}
+    try:
+        sequence = int(context.get("last_progress_sequence", summary.get("progress_sequence", 0)) or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+    observed = {
+        "job_id": context.get("job_id") or job_id,
+        "target_id": context.get("target_id", target_id),
+        "worker_id": context.get("worker_id") or worker_id,
+        "command": context.get("command") or command,
+        "lease_issued_at": context.get("lease_issued_at"),
+        "lease_expires_at": context.get("lease_expires_at"),
+        "last_repository_update_at": context.get("last_repository_update_at") or _datetime_text(updated_at),
+        "last_progress_at": context.get("last_progress_at"),
+        "last_progress_sequence": sequence,
+        "worker_status": context.get("worker_status"),
+        "worker_last_seen_at": context.get("worker_last_seen_at"),
+    }
+    renewal = context.get("last_renewal")
+    if isinstance(renewal, dict):
+        observed["last_renewal"] = dict(renewal)
+    return {
+        "code": LEASE_DIAGNOSTIC_CODE,
+        "category": LEASE_DIAGNOSTIC_CATEGORY,
+        "message": LEASE_DIAGNOSTIC_MESSAGE,
+        "observed": observed,
+        "unknown": ["terminal_result", "root_cause"],
+    }
 
 
 class SQLiteRepositoryBase:
@@ -584,6 +678,61 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             rows = connection.execute("SELECT * FROM jobs ORDER BY submitted_at DESC").fetchall()
         return [self._row_to_job(row) for row in rows]
 
+    def list_for_lease_context(self) -> List[JobRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, worker_id, command, target_id, status, owner_worker_id,
+                       lease_issued_at, lease_expires_at, attempt_count,
+                       result_summary_json, submitted_at, started_at, finished_at, updated_at
+                FROM jobs
+                WHERE status = ? AND lease_expires_at IS NOT NULL
+                """,
+                (JobStatus.IN_PROGRESS,),
+            ).fetchall()
+        jobs = []
+        for row in rows:
+            try:
+                result_summary = _json_load(row["result_summary_json"], None)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result_summary = None
+            jobs.append(
+                JobRecord(
+                    id=row["id"],
+                    worker_id=row["worker_id"],
+                    command=row["command"],
+                    target_id=row["target_id"],
+                    status=JobStatus.normalize(row["status"]),
+                    owner_worker_id=row["owner_worker_id"],
+                    lease_issued_at=_dt(row["lease_issued_at"]),
+                    lease_expires_at=_dt(row["lease_expires_at"]),
+                    attempt_count=row["attempt_count"] or 0,
+                    result_summary=result_summary if isinstance(result_summary, dict) else None,
+                    submitted_at=_dt(row["submitted_at"]) or datetime.utcnow(),
+                    started_at=_dt(row["started_at"]),
+                    finished_at=_dt(row["finished_at"]),
+                    updated_at=_dt(row["updated_at"]) or datetime.utcnow(),
+                )
+            )
+        return jobs
+
+    def update_lease_context(self, job_id: str, lease_context: Dict[str, Any]) -> bool:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT result_summary_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                summary = _json_load(row["result_summary_json"], None)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                summary = None
+            summary = dict(summary) if isinstance(summary, dict) else {}
+            summary["lease_context"] = dict(lease_context)
+            connection.execute(
+                "UPDATE jobs SET result_summary_json = ? WHERE id = ? AND status = ?",
+                (json.dumps(summary), job_id, JobStatus.IN_PROGRESS),
+            )
+            return True
+
     def list_for_listing(self, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[JobRecord], int]:
         start = max(0, offset)
         columns = """
@@ -624,7 +773,9 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
     def _reconcile_expired_leases_locked(connection, now) -> int:
         rows = connection.execute(
             """
-            SELECT id, result_summary_json, log_lines_json, lease_expires_at
+            SELECT id, worker_id, command, target_id, owner_worker_id,
+                   result_summary_json, log_lines_json, lease_issued_at,
+                   lease_expires_at, updated_at
             FROM jobs
             WHERE status = ? AND lease_expires_at IS NOT NULL
             """,
@@ -642,6 +793,21 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
             result_summary = dict(result_summary) if isinstance(result_summary, dict) else {}
             result_summary.setdefault("error", "worker lease expired before the job reported a terminal result")
             result_summary["recovery"] = "worker_interrupted"
+            result_summary["diagnostic_code"] = LEASE_DIAGNOSTIC_CODE
+            result_summary["diagnostic_category"] = LEASE_DIAGNOSTIC_CATEGORY
+            result_summary["diagnostic_message"] = LEASE_DIAGNOSTIC_MESSAGE
+            result_summary["lease_diagnostics"] = _lease_diagnostics(
+                job_id=row["id"],
+                worker_id=row["owner_worker_id"] or row["worker_id"],
+                target_id=row["target_id"],
+                command=row["command"],
+                lease_issued_at=_dt(row["lease_issued_at"]),
+                lease_expires_at=lease_expires_at,
+                updated_at=_dt(row["updated_at"]),
+                result_summary=result_summary,
+                now=now,
+            )
+            result_summary.pop("lease_context", None)
             log_lines = _json_load(row["log_lines_json"], [])
             log_lines = list(log_lines) if isinstance(log_lines, list) else []
             if interruption_log not in log_lines:
@@ -711,15 +877,32 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                     connection.commit()
                     return None
                 expires_at = now + timedelta(seconds=lease_duration_seconds)
+                current_summary = _json_load(row["result_summary_json"], None)
+                current_summary = dict(current_summary) if isinstance(current_summary, dict) else {}
+                context = _lease_context_for_values(
+                    job_id=row["id"],
+                    worker_id=row["owner_worker_id"] or row["worker_id"],
+                    target_id=row["target_id"],
+                    command=row["command"],
+                    lease_issued_at=_dt(row["lease_issued_at"]),
+                    lease_expires_at=expires_at,
+                    updated_at=now,
+                    result_summary=current_summary,
+                    now=now,
+                )
+                context["lease_expires_at"] = _datetime_text(expires_at)
+                context["last_repository_update_at"] = _datetime_text(now)
+                current_summary["lease_context"] = context
                 updated = connection.execute(
                     """
                     UPDATE jobs
-                    SET lease_expires_at = ?, updated_at = ?
+                    SET lease_expires_at = ?, result_summary_json = ?, updated_at = ?
                     WHERE id = ? AND status = ? AND owner_worker_id = ?
                       AND lease_token = ? AND lease_expires_at > ?
                     """,
                     (
                         expires_at.isoformat(),
+                        json.dumps(current_summary),
                         now.isoformat(),
                         job_id,
                         JobStatus.IN_PROGRESS,
@@ -784,6 +967,21 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                     current_summary.update(result_summary)
                 current_summary["progress"] = dict(progress)
                 current_summary["progress_sequence"] = sequence
+                context = _lease_context_for_values(
+                    job_id=row["id"],
+                    worker_id=row["owner_worker_id"] or row["worker_id"],
+                    target_id=row["target_id"],
+                    command=row["command"],
+                    lease_issued_at=_dt(row["lease_issued_at"]),
+                    lease_expires_at=lease_expires_at,
+                    updated_at=now,
+                    result_summary=current_summary,
+                    now=now,
+                )
+                context["last_repository_update_at"] = _datetime_text(now)
+                context["last_progress_at"] = _datetime_text(now)
+                context["last_progress_sequence"] = sequence
+                current_summary["lease_context"] = context
                 current_logs = _json_load(row["log_lines_json"], [])
                 current_logs = list(current_logs) if isinstance(current_logs, list) else []
                 current_logs = (current_logs + list(log_lines or []))[-self.MAX_LOG_LINES :]
@@ -841,12 +1039,33 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                 for row in rows:
                     lease_token = secrets.token_urlsafe(32)
                     attempt_count = (row["attempt_count"] or 0) + 1
+                    current_summary = _json_load(row["result_summary_json"], None)
+                    current_summary = dict(current_summary) if isinstance(current_summary, dict) else {}
+                    context = _lease_context_for_values(
+                        job_id=row["id"],
+                        worker_id=worker_id,
+                        target_id=row["target_id"],
+                        command=row["command"],
+                        lease_issued_at=now,
+                        lease_expires_at=expires_at,
+                        updated_at=now,
+                        result_summary=current_summary,
+                        now=now,
+                    )
+                    context.update(
+                        {
+                            "lease_issued_at": _datetime_text(now),
+                            "lease_expires_at": _datetime_text(expires_at),
+                            "last_repository_update_at": _datetime_text(now),
+                        }
+                    )
+                    current_summary["lease_context"] = context
                     updated = connection.execute(
                         """
                         UPDATE jobs
                         SET status = ?, owner_worker_id = ?, lease_token = ?,
                             lease_issued_at = ?, lease_expires_at = ?, attempt_count = ?,
-                            started_at = ?, updated_at = ?
+                            started_at = ?, result_summary_json = ?, updated_at = ?
                         WHERE id = ? AND status = ?
                         """,
                         (
@@ -857,6 +1076,7 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                             expires_at.isoformat(),
                             attempt_count,
                             now.isoformat(),
+                            json.dumps(current_summary),
                             now.isoformat(),
                             row["id"],
                             JobStatus.PENDING,
@@ -873,6 +1093,7 @@ class SQLiteJobRepository(SQLiteRepositoryBase, JobRepository):
                     job.attempt_count = attempt_count
                     job.started_at = now
                     job.updated_at = now
+                    job.result_summary = current_summary
                     claimed.append(job)
                 connection.commit()
                 return claimed

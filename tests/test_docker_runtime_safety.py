@@ -1129,6 +1129,55 @@ class WorkerReadPathTests(unittest.TestCase):
         self.assertTrue(client.renewals)
         self.assertEqual(client.renewals[0], ("worker", "job-1", "lease-token"))
 
+    def test_worker_renewal_failure_is_bounded_and_carried_to_terminal_report(self):
+        class Client:
+            credential_store = None
+
+            def __init__(self):
+                self.reports = []
+                self.updates = []
+
+            def renew_job_lease(self, worker_id, job_id, lease_token):
+                raise TimeoutError("control plane token=private-token https://private.example/retry")
+
+            def report_job_lease_diagnostic(self, **kwargs):
+                self.reports.append(kwargs)
+                raise ConnectionError("control plane unavailable")
+
+            def update_job_status(self, **kwargs):
+                self.updates.append(kwargs)
+                return kwargs
+
+        client = Client()
+        runtime = Mock()
+
+        def run_runtime_job(**kwargs):
+            time.sleep(0.05)
+            return {"success": True, "status_code": 0, "logs": "done", "stderr": ""}
+
+        runtime.run_runtime_job.side_effect = run_runtime_job
+        service = WorkerAgentService(
+            WorkerAgentConfig("http://control-plane", "worker", "host", worker_id="worker"),
+            client,
+            runtime,
+        )
+        service.JOB_LEASE_RENEWAL_INTERVAL_SECONDS = 0.01
+
+        service._process_jobs(
+            "worker",
+            [{"id": "job-1", "command": "backup.run", "payload": {}, "lease_token": "lease-token"}],
+        )
+
+        self.assertTrue(client.reports)
+        renewal = client.updates[0]["result_summary"]["lease_context"]["last_renewal"]
+        self.assertEqual(renewal["outcome"], "failed")
+        self.assertEqual(renewal["error_type"], "TimeoutError")
+        self.assertEqual(renewal["error_category"], "connectivity")
+        rendered = json.dumps(client.updates[0])
+        self.assertNotIn("private-token", rendered)
+        self.assertNotIn("private.example", rendered)
+        self.assertNotIn("control plane token", rendered)
+
     def test_control_plane_cancellation_probe_is_bounded_and_exception_safe(self):
         class Client:
             credential_store = None

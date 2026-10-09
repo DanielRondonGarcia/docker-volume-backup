@@ -1915,6 +1915,33 @@ class ControlPlaneRouteTests(unittest.TestCase):
         )
         self.assertEqual(handler._write_json.call_args.args[0], 200)
 
+    def test_worker_lease_diagnostic_route_accepts_bounded_context(self):
+        handler = self.make_handler(
+            "/api/v1/workers/worker-a/jobs/job-1/lease-diagnostic",
+            '{"lease_token":"lease-token","lease_context":{"last_renewal":{"outcome":"failed","error_type":"TimeoutError","error_category":"connectivity"}}}',
+        )
+        handler._require_worker_identity = Mock(return_value=True)
+        service = Mock()
+        service.record_job_lease_diagnostic.return_value = SimpleNamespace(id="job-1", status=JobStatus.IN_PROGRESS)
+        handler._control_plane_service = Mock(return_value=service)
+
+        handler.do_POST()
+
+        handler._require_worker_identity.assert_called_once_with("worker-a")
+        service.record_job_lease_diagnostic.assert_called_once_with(
+            worker_id="worker-a",
+            job_id="job-1",
+            lease_token="lease-token",
+            lease_context={
+                "last_renewal": {
+                    "outcome": "failed",
+                    "error_type": "TimeoutError",
+                    "error_category": "connectivity",
+                }
+            },
+        )
+        self.assertEqual(handler._write_json.call_args.args, (202, {"ok": True}))
+
     def test_admin_revoke_route_delegates_worker_state_change_to_service(self):
         handler = self.make_handler("/api/v1/admin/workers/worker-a/revoke", "{}")
         handler._require_auth.reset_mock()

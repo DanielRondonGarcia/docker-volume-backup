@@ -958,6 +958,19 @@ process.stdout.write(JSON.stringify({ bySource, byLegacyPath, byEmptyLegacy }));
             self.assertIsNotNone(markup)
             self.assertIn("data-job-detail-summary", markup.group(0))
 
+    def test_job_lease_diagnostics_render_observed_and_unknown_facts(self):
+        for marker in (
+            "function renderJobLeaseDiagnostics(job)",
+            "worker_lease_expired",
+            "diagnostic_code",
+            "diagnostic_category",
+            "last_renewal",
+            "No se demostro la causa raiz",
+            "renderJobLeaseDiagnostics(job)",
+            "job-lease-diagnostics",
+        ):
+            self.assertIn(marker, self.source)
+
     def test_retention_guide_explains_union_prune_and_updates_draft_or_selected_policy_summary(self):
         retention = re.search(r"function renderRetention\(content\) \{.*?\n    \}\n\n    function renderSecrets", self.source, re.S)
         self.assertIsNotNone(retention)

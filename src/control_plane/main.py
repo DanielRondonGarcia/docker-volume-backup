@@ -1087,6 +1087,22 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                 len(parts) == 7
                 and parts[:3] == ["api", "v1", "workers"]
                 and parts[4] == "jobs"
+                and parts[6] == "lease-diagnostic"
+            ):
+                if not self._require_worker_identity(parts[3]):
+                    return
+                self._control_plane_service().record_job_lease_diagnostic(
+                    worker_id=parts[3],
+                    job_id=parts[5],
+                    lease_token=body.get("lease_token"),
+                    lease_context=body.get("lease_context"),
+                )
+                return self._write_json(202, {"ok": True})
+
+            if (
+                len(parts) == 7
+                and parts[:3] == ["api", "v1", "workers"]
+                and parts[4] == "jobs"
                 and parts[6] == "cancel-status"
             ):
                 if not self._require_worker_identity(parts[3]):
@@ -1109,6 +1125,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     result_summary=body.get("result_summary"),
                     log_lines=body.get("log_lines"),
                     lease_token=body.get("lease_token"),
+                    lease_context=body.get("lease_context"),
                 )
                 return self._write_json(200, self._control_plane_service().public_job_view(job))
 
@@ -1127,6 +1144,7 @@ class ControlPlaneRequestHandler(BaseHTTPRequestHandler):
                     progress=body.get("progress"),
                     log_lines=body.get("log_lines"),
                     lease_token=body.get("lease_token"),
+                    lease_context=body.get("lease_context"),
                 )
                 return self._write_json(200, _to_jsonable(job))
 

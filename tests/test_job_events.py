@@ -2,6 +2,7 @@ import json
 import threading
 import time
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -131,6 +132,25 @@ class JobEventServiceTests(unittest.TestCase):
         self.assert_safe_view(terminal_event)
 
         subscription.close()
+
+    def test_expired_job_event_projection_explains_observed_facts_without_secrets(self):
+        service = self.make_service(JobEventBroker())
+        job = service.dispatch_job("worker-a", "backup.run")
+        claimed = service.fetch_jobs_for_worker("worker-a")[0]
+        claimed.lease_issued_at = utcnow() - timedelta(minutes=6)
+        claimed.lease_expires_at = utcnow() - timedelta(minutes=1)
+        service.job_repository.save(claimed)
+
+        view = service.get_job_view(job.id)
+
+        self.assertEqual(view["status"], JobStatus.FAILED)
+        self.assertEqual(view["diagnostics"]["code"], "worker_lease_expired")
+        self.assertEqual(view["diagnostics"]["category"], "worker_interrupted")
+        self.assertIn("terminal result", view["diagnostics"]["message"])
+        self.assertIn("root_cause", view["diagnostics"]["unknown"])
+        self.assertNotIn("lease_token", view)
+        self.assertNotIn("payload", view)
+        self.assertNotIn("lease-token", json.dumps(view, default=str))
 
 
 class _FakeWFile:

@@ -38,6 +38,68 @@ from src.control_plane.domain.models import (
 )
 
 
+LEASE_DIAGNOSTIC_CODE = "worker_lease_expired"
+LEASE_DIAGNOSTIC_CATEGORY = "worker_interrupted"
+LEASE_DIAGNOSTIC_MESSAGE = (
+    "Control Plane observed that the worker lease expired before a terminal result arrived; "
+    "the worker or runtime cause is unknown."
+)
+
+
+def _datetime_text(value: Any) -> Optional[str]:
+    return value.isoformat() if hasattr(value, "isoformat") else value if isinstance(value, str) else None
+
+
+def _lease_context_for_job(job: JobRecord, now=None) -> Dict[str, Any]:
+    summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+    current = summary.get("lease_context")
+    context = dict(current) if isinstance(current, dict) else {}
+    context.setdefault("job_id", job.id)
+    context.setdefault("target_id", job.target_id)
+    context.setdefault("worker_id", job.owner_worker_id or job.worker_id)
+    context.setdefault("command", job.command)
+    if job.lease_issued_at is not None:
+        context.setdefault("lease_issued_at", _datetime_text(job.lease_issued_at))
+    if job.lease_expires_at is not None:
+        context.setdefault("lease_expires_at", _datetime_text(job.lease_expires_at))
+    context.setdefault("last_repository_update_at", _datetime_text(job.updated_at))
+    if now is not None:
+        context.setdefault("observed_at", _datetime_text(now))
+    return context
+
+
+def _lease_diagnostics(job: JobRecord, now) -> Dict[str, Any]:
+    context = _lease_context_for_job(job, now)
+    summary = job.result_summary if isinstance(job.result_summary, dict) else {}
+    try:
+        sequence = int(context.get("last_progress_sequence", summary.get("progress_sequence", 0)) or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+    observed = {
+        "job_id": context.get("job_id") or job.id,
+        "target_id": context.get("target_id", job.target_id),
+        "worker_id": context.get("worker_id") or job.owner_worker_id or job.worker_id,
+        "command": context.get("command") or job.command,
+        "lease_issued_at": context.get("lease_issued_at"),
+        "lease_expires_at": context.get("lease_expires_at"),
+        "last_repository_update_at": context.get("last_repository_update_at") or _datetime_text(job.updated_at),
+        "last_progress_at": context.get("last_progress_at"),
+        "last_progress_sequence": sequence,
+        "worker_status": context.get("worker_status"),
+        "worker_last_seen_at": context.get("worker_last_seen_at"),
+    }
+    renewal = context.get("last_renewal")
+    if isinstance(renewal, dict):
+        observed["last_renewal"] = dict(renewal)
+    return {
+        "code": LEASE_DIAGNOSTIC_CODE,
+        "category": LEASE_DIAGNOSTIC_CATEGORY,
+        "message": LEASE_DIAGNOSTIC_MESSAGE,
+        "observed": observed,
+        "unknown": ["terminal_result", "root_cause"],
+    }
+
+
 class InMemoryWorkerRepository(WorkerRepository):
     def __init__(self):
         self._items: Dict[str, WorkerRecord] = {}
@@ -149,6 +211,24 @@ class InMemoryJobRepository(JobRepository):
     def list(self) -> List[JobRecord]:
         return sorted(self._items.values(), key=lambda item: item.submitted_at, reverse=True)
 
+    def list_for_lease_context(self) -> List[JobRecord]:
+        with self._lock:
+            return [
+                job
+                for job in self._items.values()
+                if JobStatus.normalize(job.status) == JobStatus.IN_PROGRESS and job.lease_expires_at is not None
+            ]
+
+    def update_lease_context(self, job_id: str, lease_context: Dict[str, Any]) -> bool:
+        with self._lock:
+            job = self._items.get(job_id)
+            if job is None:
+                return False
+            summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+            summary["lease_context"] = dict(lease_context)
+            job.result_summary = summary
+            return True
+
     def list_for_listing(self, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[JobRecord], int]:
         jobs = sorted(self._items.values(), key=lambda item: (item.submitted_at, item.id), reverse=True)
         total = len(jobs)
@@ -190,6 +270,12 @@ class InMemoryJobRepository(JobRepository):
                 result_summary = dict(job.result_summary or {})
                 result_summary.setdefault("error", "worker lease expired before the job reported a terminal result")
                 result_summary["recovery"] = "worker_interrupted"
+                job.result_summary = result_summary
+                result_summary["diagnostic_code"] = LEASE_DIAGNOSTIC_CODE
+                result_summary["diagnostic_category"] = LEASE_DIAGNOSTIC_CATEGORY
+                result_summary["diagnostic_message"] = LEASE_DIAGNOSTIC_MESSAGE
+                result_summary["lease_diagnostics"] = _lease_diagnostics(job, now)
+                result_summary.pop("lease_context", None)
                 job.status = JobStatus.FAILED
                 job.owner_worker_id = None
                 job.lease_token = None
@@ -233,6 +319,12 @@ class InMemoryJobRepository(JobRepository):
             ):
                 return None
             job.lease_expires_at = now + timedelta(seconds=lease_duration_seconds)
+            summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+            context = _lease_context_for_job(job, now)
+            context["lease_expires_at"] = _datetime_text(job.lease_expires_at)
+            context["last_repository_update_at"] = _datetime_text(now)
+            summary["lease_context"] = context
+            job.result_summary = summary
             job.updated_at = now
             return job
 
@@ -274,6 +366,11 @@ class InMemoryJobRepository(JobRepository):
                 current_summary.update(result_summary)
             current_summary["progress"] = dict(progress)
             current_summary["progress_sequence"] = sequence
+            context = _lease_context_for_job(job, now)
+            context["last_repository_update_at"] = _datetime_text(now)
+            context["last_progress_at"] = _datetime_text(now)
+            context["last_progress_sequence"] = sequence
+            current_summary["lease_context"] = context
             job.result_summary = current_summary
             job.log_lines = (list(job.log_lines or []) + list(log_lines or []))[-self.MAX_LOG_LINES :]
             while job.log_lines and sum(len(line) for line in job.log_lines if isinstance(line, str)) > self.MAX_LOG_CHARS:
@@ -300,6 +397,17 @@ class InMemoryJobRepository(JobRepository):
                 job.attempt_count = (job.attempt_count or 0) + 1
                 job.started_at = now
                 job.updated_at = now
+                summary = dict(job.result_summary) if isinstance(job.result_summary, dict) else {}
+                context = _lease_context_for_job(job, now)
+                context.update(
+                    {
+                        "lease_issued_at": _datetime_text(now),
+                        "lease_expires_at": _datetime_text(expires_at),
+                        "last_repository_update_at": _datetime_text(now),
+                    }
+                )
+                summary["lease_context"] = context
+                job.result_summary = summary
                 claimed.append(job)
             return claimed
 

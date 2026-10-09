@@ -193,16 +193,17 @@ class ControlPlaneClient:
         result_summary: Dict[str, Any],
         log_lines: List[str],
         lease_token: str | None = None,
+        lease_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        return self._post(
-            f"/api/v1/workers/{worker_id}/jobs/{job_id}/status",
-            {
-                "status": status,
-                "result_summary": result_summary,
-                "log_lines": log_lines,
-                "lease_token": lease_token,
-            },
-        )
+        payload = {
+            "status": status,
+            "result_summary": result_summary,
+            "log_lines": log_lines,
+            "lease_token": lease_token,
+        }
+        if isinstance(lease_context, dict):
+            payload["lease_context"] = lease_context
+        return self._post(f"/api/v1/workers/{worker_id}/jobs/{job_id}/status", payload)
 
     def update_job_progress(
         self,
@@ -212,21 +213,37 @@ class ControlPlaneClient:
         progress: Dict[str, Any],
         log_lines: List[str],
         lease_token: str | None = None,
+        lease_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        return self._post(
-            f"/api/v1/workers/{worker_id}/jobs/{job_id}/progress",
-            {
-                "sequence": sequence,
-                "progress": progress,
-                "log_lines": log_lines,
-                "lease_token": lease_token,
-            },
-        )
+        payload = {
+            "sequence": sequence,
+            "progress": progress,
+            "log_lines": log_lines,
+            "lease_token": lease_token,
+        }
+        if isinstance(lease_context, dict):
+            payload["lease_context"] = lease_context
+        return self._post(f"/api/v1/workers/{worker_id}/jobs/{job_id}/progress", payload)
 
     def renew_job_lease(self, worker_id: str, job_id: str, lease_token: str) -> Dict[str, Any]:
         return self._post(
             f"/api/v1/workers/{worker_id}/jobs/{job_id}/renew-lease",
             {"lease_token": lease_token},
+        )
+
+    def report_job_lease_diagnostic(
+        self,
+        worker_id: str,
+        job_id: str,
+        lease_context: Dict[str, Any],
+        lease_token: str | None = None,
+    ) -> Dict[str, Any]:
+        return self._post(
+            f"/api/v1/workers/{worker_id}/jobs/{job_id}/lease-diagnostic",
+            {
+                "lease_context": lease_context,
+                "lease_token": lease_token,
+            },
         )
 
     def fetch_live_requests(self, worker_id: str, limit: int = 4) -> List[Dict[str, Any]]:

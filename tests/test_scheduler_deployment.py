@@ -239,6 +239,8 @@ class SchedulerDeploymentTests(unittest.TestCase):
             attempt_count=1,
         )
         pending = JobRecord(worker_id="worker-a", command="worker.self_check")
+        issued_at = interrupted.lease_issued_at.isoformat()
+        expires_at = interrupted.lease_expires_at.isoformat()
         repository.save(interrupted)
         repository.save(pending)
         claimed = repository.claim_pending_for_worker("worker-a")
@@ -257,13 +259,16 @@ class SchedulerDeploymentTests(unittest.TestCase):
         self.assertIsNone(failed.lease_token)
         self.assertIsNone(failed.lease_issued_at)
         self.assertIsNone(failed.lease_expires_at)
-        self.assertEqual(
-            failed.result_summary,
-            {
-                "error": "worker lease expired before the job reported a terminal result",
-                "recovery": "worker_interrupted",
-            },
-        )
+        self.assertEqual(failed.result_summary["error"], "worker lease expired before the job reported a terminal result")
+        self.assertEqual(failed.result_summary["recovery"], "worker_interrupted")
+        self.assertEqual(failed.result_summary["diagnostic_code"], "worker_lease_expired")
+        self.assertEqual(failed.result_summary["diagnostic_category"], "worker_interrupted")
+        observed = failed.result_summary["lease_diagnostics"]["observed"]
+        self.assertEqual(observed["job_id"], interrupted.id)
+        self.assertEqual(observed["worker_id"], "worker-a")
+        self.assertEqual(observed["command"], "backup.run")
+        self.assertEqual(observed["lease_issued_at"], issued_at)
+        self.assertEqual(observed["lease_expires_at"], expires_at)
         self.assertEqual(failed.log_lines, ["Worker lease expired before terminal status was reported."])
 
         service = self._service(repository)
