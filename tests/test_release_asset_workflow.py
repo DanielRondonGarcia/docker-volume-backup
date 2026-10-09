@@ -89,6 +89,12 @@ class ReleaseAssetWorkflowTests(unittest.TestCase):
         self.assertIn("type=raw,value=latest", self.workflow)
         self.assertIn("INSTALL_DOCKER_CLI=true", self.workflow)
 
+    def test_buildx_uses_ecr_public_buildkit_image(self):
+        self.assertRegex(
+            self.workflow,
+            r"(?m)^      - name: Set up Docker Buildx\n        uses: docker/setup-buildx-action@v3\n        with:\n          driver-opts: image=public\.ecr\.aws/vend/moby/buildkit:buildx-stable-1$",
+        )
+
     def test_release_image_builds_use_ecr_public_python_base_image(self):
         self.assertRegex(
             self.dockerfile,
