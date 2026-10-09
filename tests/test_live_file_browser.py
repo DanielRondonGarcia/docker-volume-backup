@@ -455,8 +455,12 @@ class _FakeLiveWorker:
                 result = handle.list_entries(command["path"], command["limit"], command.get("cursor"))
                 self.lane.respond("worker-a", operation_id, {"status": 200, **result})
             elif command["operation"] == "file":
+                reader = iter(handle.read_file(command["path"], max_bytes=command["max_bytes"]))
+                first_chunk = next(reader, None)
                 self.lane.respond("worker-a", operation_id, {"status": 200, "content_type": "application/octet-stream"})
-                for chunk in handle.read_file(command["path"], max_bytes=command["max_bytes"]):
+                if first_chunk is not None:
+                    self.lane.chunk("worker-a", operation_id, first_chunk)
+                for chunk in reader:
                     self.lane.chunk("worker-a", operation_id, chunk)
                 self.lane.chunk("worker-a", operation_id, b"", final=True)
             else:
