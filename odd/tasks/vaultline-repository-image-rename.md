@@ -43,9 +43,11 @@ Align repository links, GHCR image references, deployment defaults, examples, an
 
 ### VRI-3 — Update user documentation and verify the rename boundary
 
-- Status: in progress.
+- Status: done.
 - Scope: update README, quickstart/deployment guides, examples, and image-reference tests; audit remaining old-name matches and document intentional compatibility identifiers. Run focused tests and the full suite.
-- Acceptance: no active repository/image URL references point to the old name; remaining `docker-volume-backup` identifiers are intentionally preserved deployment contracts or historical records. Commit the work units on this feature branch and record their identities here.
+- Evidence: `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_*.py'` passed 502 tests with 2 platform-specific skips; `git diff --check` passed with line-ending warnings only.
+- Commit: `efbfe0d refactor(docs): complete Vaultline repository image rename`.
+- Acceptance: no active repository/image URL references point to the old name; remaining `docker-volume-backup` identifiers are intentionally preserved deployment contracts or historical records. Historical release evidence remains in `odd/tasks/native-worker-installers.md`.
 
 ## Out of scope
 
