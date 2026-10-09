@@ -28,56 +28,56 @@ architecture, web UI, Restic/Rclone support, and cold or hot backups.
 
 ```mermaid
 graph TB
-    subgraph "Control Plane Host"
-        CP["Control Plane<br/>UI + REST API<br/>SQLite + Job Queue"]
+    CP["Control Plane<br/>ghcr.io/danielrondongarcia/vaultline-control-plane<br/>UI + REST API • SQLite + Job Queue<br/>service: control-plane • control_plane_state:/data<br/>network: docker-volume-backup-control-plane_default"]
+    ST[("Shared storage<br/>Restic • S3 • Rclone • Local • SCP")]
+
+    subgraph DOCKER["Docker worker / runtime"]
+        DW["Worker Agent<br/>ghcr.io/danielrondongarcia/vaultline-worker<br/>WORKER_RUNTIME=docker<br/>CONTROL_PLANE_URL=http://control-plane:8080<br/>/var/run/docker.sock"]
+        DR["Runtime container<br/>ghcr.io/danielrondongarcia/vaultline<br/>docker.sock + target volumes<br/>read-only mounts<br/>label: docker-volume-backup.stop-during-backup"]
+        DW -->|"launch + mount"| DR
     end
 
-    subgraph "Worker Host A"
-        WA["Worker A<br/>Polls Control Plane"]
-        SA1["Service 1<br/>+ volúmenes"]
-        SA2["Service 2<br/>+ volúmenes"]
-        WA -.->|docker.sock| SA1
-        WA -.->|docker.sock| SA2
+    subgraph KUBERNETES["Kubernetes Job / PVC runtime"]
+        KW["Worker Deployment<br/>docker-volume-backup-worker<br/>app.kubernetes.io/name=docker-volume-backup-worker<br/>WORKER_RUNTIME=kubernetes • ns: backup-worker"]
+        KJ["Kubernetes Job<br/>ghcr.io/danielrondongarcia/vaultline<br/>BACKUP_RUNTIME_IMAGE • explicit PVCs"]
+        KW -->|"create Job"| KJ
     end
 
-    subgraph "Worker Host B"
-        WB["Worker B<br/>Polls Control Plane"]
-        SB1["Service 3<br/>+ volúmenes"]
-        WB -.->|docker.sock| SB1
+    subgraph NATIVE["Native worker / local engine"]
+        NW["Native worker service<br/>docker-volume-backup-worker.service<br/>WORKER_RUNTIME=native<br/>/etc/docker-volume-backup/worker.env"]
+        NE["Local engine<br/>explicit filesystem_paths[]<br/>worker state: /var/lib/docker-volume-backup"]
+        NW -->|"run local engine"| NE
     end
 
-    CP -->|1. Dispatch job| WA
-    CP -->|1. Dispatch job| WB
-    WA -->|2. Run runtime container| RT["Backup/Restore Runtime<br/>Mounts target volumes"]
-    RT -->|3. Stop affected containers| SA1
-    RT -->|4. Backup to storage| ST[("Restic / S3 / Rclone<br/>Local / SCP")]
-    RT -->|5. Restart containers| SA1
-    WA -->|6. Report result| CP
-    CP -->|7. Update UI| UI["Dashboard / Jobs / Targets"]
-
-    WB -->|2. Run runtime container| RT2["Backup/Restore Runtime"]
-    RT2 -->|3-5. Same flow| ST
-    WB -->|6. Report result| CP
+    CP -->|"dispatch job"| DW
+    CP -->|"dispatch job"| KW
+    CP -->|"dispatch job"| NW
+    DW -->|"result + logs"| CP
+    KW -->|"result + logs"| CP
+    NW -->|"result + logs"| CP
+    DR -->|"backup / restore"| ST
+    KJ -->|"backup / restore"| ST
+    NE -->|"backup / restore"| ST
 
     style CP fill:#4f46e5,color:#fff,stroke:none
-    style WA fill:#059669,color:#fff,stroke:none
-    style WB fill:#059669,color:#fff,stroke:none
-    style RT fill:#d97706,color:#fff,stroke:none
-    style RT2 fill:#d97706,color:#fff,stroke:none
+    style DW fill:#059669,color:#fff,stroke:none
+    style KW fill:#059669,color:#fff,stroke:none
+    style NW fill:#059669,color:#fff,stroke:none
+    style DR fill:#d97706,color:#fff,stroke:none
+    style KJ fill:#d97706,color:#fff,stroke:none
+    style NE fill:#d97706,color:#fff,stroke:none
     style ST fill:#374151,color:#fff,stroke:none
-    style UI fill:#7c3aed,color:#fff,stroke:none
 ```
 
 ### Flujo de un job
 
-1. El operador dispara un backup/restore desde la UI del Control Plane
-2. El Control Plane encola el job y lo asigna al Worker correspondiente
-3. El Worker levanta un **runtime container** efímero que monta los volúmenes del target
-4. Si es cold backup/restore, el runtime detiene los contenedores afectados
-5. El runtime ejecuta el backup (Restic/tar) o el restore, sube a storage
-6. El runtime reinicia los contenedores detenidos
-7. El Worker reporta el resultado (logs, snapshots, métricas) al Control Plane
-8. La UI se actualiza en tiempo real con polling
+1. El operador dispara un backup/restore desde la UI del Control Plane.
+2. El Control Plane encola el job y lo asigna al worker según `WORKER_RUNTIME`.
+3. El worker prepara su rama: Docker monta `docker.sock` y los volúmenes; Kubernetes crea un Job con `PVCs` explícitos; el worker nativo pasa `filesystem_paths[]` al motor local.
+4. En modo cold, Docker respeta `docker-volume-backup.stop-during-backup`; Kubernetes quiesce los workloads seleccionados. El runtime nativo es hot-only.
+5. El runtime o motor local ejecuta el backup/restore (incluido `RESTORE_TARGET_PATH`) y usa el storage compartido: Restic, S3, Rclone, Local o SCP.
+6. El worker reporta logs, snapshots, métricas y el resultado al Control Plane.
+7. La UI del Control Plane actualiza el estado del job y queda disponible para la siguiente operación.
 
 ## Inicio rápido
 
