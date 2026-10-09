@@ -568,9 +568,9 @@ class RuntimeAndResticStreamingTests(unittest.TestCase):
 
         callback_lines = []
         strategy = ResticBackupStrategy()
-        with patch("src.app.infrastructure.adapters.backup_strategy.subprocess.Popen", return_value=Process()) as popen, patch(
-            "src.app.infrastructure.adapters.backup_strategy.subprocess.run"
-        ) as run:
+        with patch("src.app.infrastructure.adapters.backup_strategy._require_executable") as require_executable, patch(
+            "src.app.infrastructure.adapters.backup_strategy.subprocess.Popen", return_value=Process()
+        ) as popen, patch("src.app.infrastructure.adapters.backup_strategy.subprocess.run") as run:
             result = strategy.perform_backup(
                 BackupConfig(source_paths=["/backup"], restic_repository="local:/repo", restic_password="password"),
                 output_callback=callback_lines.append,
@@ -580,6 +580,7 @@ class RuntimeAndResticStreamingTests(unittest.TestCase):
         self.assertEqual(result.size, 123)
         self.assertEqual(result.duration, 4.5)
         self.assertTrue(any('"message_type":"status"' in line for line in callback_lines))
+        require_executable.assert_called_once_with("restic")
         popen.assert_called_once()
         self.assertNotIn("shell", popen.call_args.kwargs)
         self.assertEqual(run.call_count, 2)

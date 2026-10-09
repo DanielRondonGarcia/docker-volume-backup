@@ -1,4 +1,4 @@
-import json, os, tempfile, threading, time, unittest
+import errno, json, os, tempfile, threading, time, unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -7,7 +7,7 @@ from src.worker_agent.application.services.live_target_session_manager import Li
 from src.worker_agent.application.services.worker_agent_service import WorkerAgentService
 from src.worker_agent.domain.models import WorkerAgentConfig
 from src.worker_agent.infrastructure.adapters.live_file_runtime import LiveAccessDeniedError, LiveFileRuntime, LiveFileSource
-from src.worker_agent.live_file_helper import PROTECTED_VOLUME_EXIT_CODE, ProtectedVolumeError, list_entries, read_file, virtual_parts, watch_snapshot
+from src.worker_agent.live_file_helper import PROTECTED_VOLUME_EXIT_CODE, ProtectedVolumeError, list_entries, open_confined, read_file, virtual_parts, watch_snapshot
 
 
 class _FakeLiveHelperContainer:
@@ -217,6 +217,55 @@ class LiveFileRuntimeSafetyTests(unittest.TestCase):
             else:
                 with self.assertRaises(ValueError): list(runtime.read_file("/link.txt"))
             with self.assertRaisesRegex(Exception, "canceled"): list(runtime.read_file("/safe.txt", cancel_check=lambda: True))
+
+    def test_open_confined_translates_no_follow_eloop_to_value_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch(
+                "src.worker_agent.live_file_helper.os.open",
+                side_effect=OSError(errno.ELOOP, "too many symbolic links"),
+            ):
+                with self.assertRaisesRegex(ValueError, "live links are not allowed"):
+                    open_confined(root, "/safe.txt")
+
+    def test_list_entries_sort_before_cursor_and_limit_for_helper_and_direct_runtime(self):
+        with tempfile.TemporaryDirectory() as root:
+            for name in ("a.txt", "b.txt", "c.txt"):
+                Path(root, name).write_bytes(name.encode("utf-8"))
+
+            class Entry:
+                def __init__(self, name):
+                    self.name = name
+
+                def is_symlink(self):
+                    return False
+
+                def stat(self, follow_symlinks=False):
+                    return os.stat(Path(root, self.name), follow_symlinks=follow_symlinks)
+
+                def is_dir(self, follow_symlinks=False):
+                    return False
+
+                def is_file(self, follow_symlinks=False):
+                    return True
+
+            class Scan:
+                def __enter__(self):
+                    return iter((Entry("c.txt"), Entry("a.txt"), Entry("b.txt")))
+
+                def __exit__(self, *_args):
+                    return None
+
+            with patch("src.worker_agent.live_file_helper.os.scandir", return_value=Scan()):
+                helper = list_entries(root, "/", limit=2)
+                helper_after_cursor = list_entries(root, "/", limit=2, cursor="a.txt")
+                runtime = LiveFileRuntime(root, "s" * 32)
+                direct = runtime.list_entries("/", limit=2)
+                direct_after_cursor = runtime.list_entries("/", limit=2, cursor="a.txt")
+
+            for result in (helper, direct):
+                self.assertEqual([entry["name"] for entry in result["entries"]], ["a.txt", "b.txt"])
+            for result in (helper_after_cursor, direct_after_cursor):
+                self.assertEqual([entry["name"] for entry in result["entries"]], ["b.txt", "c.txt"])
 
     def test_permission_denials_are_classified_without_exposing_helper_details(self):
         with tempfile.TemporaryDirectory() as root:

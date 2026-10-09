@@ -28,6 +28,13 @@ from src.control_plane.infrastructure.repositories.in_memory import (
 from src.worker_agent.infrastructure.adapters.native_runtime import NativeRuntimeAdapter
 
 
+class _WindowsOSProxy:
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
 class NativeRestoreTests(unittest.TestCase):
     def make_service(self):
         workers = InMemoryWorkerRepository()
@@ -331,7 +338,7 @@ class NativeRestoreTests(unittest.TestCase):
             runtime_type="native",
             filesystem_paths=(r"C:\\Data\\App",),
         )
-        with patch("src.app.application.services.restore_service.os.name", "nt"):
+        with patch("src.app.application.services.restore_service.os", _WindowsOSProxy()):
             result = RestoreService(storage, container, strategy, config).execute_restore()
 
         self.assertFalse(result.success)

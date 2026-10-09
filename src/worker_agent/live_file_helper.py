@@ -88,6 +88,8 @@ def open_confined(root, path, flags=os.O_RDONLY):
         return os.open(confined_path(root, path), flags | nofollow)
     except OSError as exc:
         _raise_if_protected(exc)
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            raise ValueError("live links are not allowed") from exc
         raise
 
 
@@ -100,11 +102,11 @@ def list_entries(root, path="/", limit=100, cursor=None):
     entries, after = [], cursor or ""
     try:
         with os.scandir(directory) as scan:
-            for scanned, entry in enumerate(scan):
+            for scanned, entry in enumerate(
+                entry for entry in sorted(scan, key=lambda item: item.name) if entry.name > after and not entry.is_symlink()
+            ):
                 if scanned >= limit + 1:
                     break
-                if entry.name <= after or entry.is_symlink():
-                    continue
                 stat, is_dir = entry.stat(follow_symlinks=False), entry.is_dir(follow_symlinks=False)
                 if not is_dir and not entry.is_file(follow_symlinks=False):
                     continue

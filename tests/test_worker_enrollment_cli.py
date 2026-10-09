@@ -11,6 +11,13 @@ from src.security.hmac_protocol import digest_secret
 from src.worker_agent.infrastructure.security.credential_store import WorkerCredentialStore
 
 
+class _WindowsOSProxy:
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
 class WorkerEnrollmentCLITests(unittest.TestCase):
     def run_enroll(self, directory, token="t" * 32, client_factory=None, argv=None):
         from src.worker_agent import cli
@@ -162,7 +169,7 @@ class WorkerEnrollmentCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "credentials.json")
             store = WorkerCredentialStore(path)
-            with patch("src.worker_agent.infrastructure.security.credential_store.os.name", "nt"), \
+            with patch("src.worker_agent.infrastructure.security.credential_store.os", _WindowsOSProxy()), \
                 patch("src.worker_agent.infrastructure.security.credential_store.subprocess.run") as run:
                 store.save_pending_enrollment("attempt-123456789012", "c" * 32, digest_secret("a" * 32))
             self.assertTrue(run.called)
@@ -170,7 +177,7 @@ class WorkerEnrollmentCLITests(unittest.TestCase):
             self.assertEqual(args[0].lower(), "icacls")
             self.assertIn(str(store.pending_path), args)
 
-            with patch("src.worker_agent.infrastructure.security.credential_store.os.name", "nt"), \
+            with patch("src.worker_agent.infrastructure.security.credential_store.os", _WindowsOSProxy()), \
                 patch("src.worker_agent.infrastructure.security.credential_store.subprocess.run", side_effect=OSError("icacls missing")):
                 with self.assertRaises(PermissionError):
                     store.save_pending_enrollment("attempt-abcdef123456", "d" * 32, digest_secret("a" * 32))
@@ -187,7 +194,7 @@ class WorkerEnrollmentCLITests(unittest.TestCase):
                 writes.append(stream.name)
                 return real_dump(payload, stream, *args, **kwargs)
 
-            with patch("src.worker_agent.infrastructure.security.credential_store.os.name", "nt"), \
+            with patch("src.worker_agent.infrastructure.security.credential_store.os", _WindowsOSProxy()), \
                 patch("src.worker_agent.infrastructure.security.credential_store.subprocess.run", side_effect=OSError("icacls missing")) as run, \
                 patch("src.worker_agent.infrastructure.security.credential_store.json.dump", side_effect=record_dump):
                 with self.assertRaises(PermissionError):

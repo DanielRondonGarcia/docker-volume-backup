@@ -354,11 +354,11 @@ class LiveFileRuntime:
                 raise LiveRuntimeError("live path is not a directory", reason="invalid_request", status=400)
             entries, after = [], cursor or ""
             with os.scandir(directory) as scan:
-                for scanned, entry in enumerate(scan):
+                for scanned, entry in enumerate(
+                    entry for entry in sorted(scan, key=lambda item: item.name) if entry.name > after and not entry.is_symlink()
+                ):
                     if scanned >= limit + 1:
                         break
-                    if entry.name <= after or entry.is_symlink():
-                        continue
                     stat, is_dir = entry.stat(follow_symlinks=False), entry.is_dir(follow_symlinks=False)
                     if not is_dir and not entry.is_file(follow_symlinks=False):
                         continue
