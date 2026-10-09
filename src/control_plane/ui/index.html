@@ -6064,24 +6064,62 @@ docker compose up -d
       const targetMap = {};
       (state.targets || []).forEach(t => { targetMap[t.id] = t.name; });
 
+      const jobFilterValue = (value) => value === null || value === undefined ? "" : String(value);
+      const uniqueJobFilterValues = (jobs, getter) => {
+        const values = jobs.map(getter).filter(value => value !== "");
+        return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+      };
+      function parseJobTimestamp(value) {
+        if (value === null || value === undefined || value === "") return null;
+        const timestamp = new Date(value).getTime();
+        return Number.isFinite(timestamp) ? timestamp : null;
+      }
+      const renderJobFilterOptions = (values, labelForValue) => `<option value="">Todos</option>${values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(labelForValue(value))}</option>`).join("")}`;
+      const syncJobFilterOptions = (allJobs) => {
+        const optionValues = {
+          command: uniqueJobFilterValues(allJobs, j => jobFilterValue(j.command)),
+          origin: uniqueJobFilterValues(allJobs, j => jobFilterValue(j.trigger)),
+          status: uniqueJobFilterValues(allJobs, j => normalizeJobStatus(j.status)),
+        };
+        Object.entries(optionValues).forEach(([column, values]) => {
+          const select = content.querySelector(`select.dt-filter[data-col="${column}"]`);
+          if (!select) return;
+          const valueSet = new Set(values);
+          if (jobsTableState.filters[column] && !valueSet.has(jobsTableState.filters[column])) {
+            jobsTableState.filters[column] = "";
+          }
+          select.innerHTML = renderJobFilterOptions(values, value => {
+            if (column === "origin") return jobTriggerLabel(value);
+            if (column === "status") return jobStatusLabel(value);
+            return value;
+          });
+          select.value = valueSet.has(jobsTableState.filters[column]) ? jobsTableState.filters[column] : "";
+        });
+      };
+
       const renderTableBody = () => {
         const allJobs = state.jobs || [];
+        syncJobFilterOptions(allJobs);
+        const startedFilter = jobsTableState.filters.started;
+        const finishedFilter = jobsTableState.filters.finished;
+        const startedBound = startedFilter ? parseJobTimestamp(startedFilter) : null;
+        const finishedBound = finishedFilter ? parseJobTimestamp(finishedFilter) : null;
         let jobs = allJobs.slice();
         jobs = jobs.filter(j => {
           const id = String(j.id || "").toLowerCase();
           const target = (targetMap[j.target_id] || j.target_id || "").toLowerCase();
-          const cmd = (j.command || "").toLowerCase();
-          const status = (j.status || "").toLowerCase();
-          const origin = `${jobTriggerLabel(j.trigger)} ${String(j.trigger || "")}`.toLowerCase();
-          const started = j.started_at ? new Date(j.started_at).toLocaleString().toLowerCase() : "";
-          const finished = j.finished_at ? new Date(j.finished_at).toLocaleString().toLowerCase() : "";
+          const cmd = jobFilterValue(j.command);
+          const status = normalizeJobStatus(j.status);
+          const origin = jobFilterValue(j.trigger);
+          const startedAt = parseJobTimestamp(j.started_at);
+          const finishedAt = parseJobTimestamp(j.finished_at);
           if (jobsTableState.filters.id && !id.includes(jobsTableState.filters.id.toLowerCase())) return false;
           if (jobsTableState.filters.target && !target.includes(jobsTableState.filters.target.toLowerCase())) return false;
-          if (jobsTableState.filters.command && !cmd.includes(jobsTableState.filters.command.toLowerCase())) return false;
-          if (jobsTableState.filters.status && !status.includes(jobsTableState.filters.status.toLowerCase())) return false;
-          if (jobsTableState.filters.origin && !origin.includes(jobsTableState.filters.origin.toLowerCase())) return false;
-          if (jobsTableState.filters.started && !started.includes(jobsTableState.filters.started.toLowerCase())) return false;
-          if (jobsTableState.filters.finished && !finished.includes(jobsTableState.filters.finished.toLowerCase())) return false;
+          if (jobsTableState.filters.command && cmd !== jobsTableState.filters.command) return false;
+          if (jobsTableState.filters.status && status !== jobsTableState.filters.status) return false;
+          if (jobsTableState.filters.origin && origin !== jobsTableState.filters.origin) return false;
+          if (startedFilter && (startedAt === null || startedBound === null || startedAt < startedBound)) return false;
+          if (finishedFilter && (finishedAt === null || finishedBound === null || finishedAt > finishedBound)) return false;
           return true;
         });
         const dir = jobsTableState.sortDir === "asc" ? 1 : -1;
@@ -6209,13 +6247,13 @@ docker compose up -d
                 <th>Acciones</th>
               </tr>
               <tr class="filter-row">
-                <th><input type="text" class="dt-filter" data-col="id" placeholder="Filtrar ID..." value="${escapeHtml(jobsTableState.filters.id)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="target" placeholder="Filtrar target..." value="${escapeHtml(jobsTableState.filters.target)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="command" placeholder="Filtrar comando..." value="${escapeHtml(jobsTableState.filters.command)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="origin" placeholder="Filtrar origen..." value="${escapeHtml(jobsTableState.filters.origin)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="status" placeholder="Filtrar status..." value="${escapeHtml(jobsTableState.filters.status)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="started" placeholder="Filtrar inicio..." value="${escapeHtml(jobsTableState.filters.started)}" /></th>
-                <th><input type="text" class="dt-filter" data-col="finished" placeholder="Filtrar fin..." value="${escapeHtml(jobsTableState.filters.finished)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="id" aria-label="Filtrar ID" placeholder="Filtrar ID..." value="${escapeHtml(jobsTableState.filters.id)}" /></th>
+                <th><input type="text" class="dt-filter" data-col="target" aria-label="Filtrar target" placeholder="Filtrar target..." value="${escapeHtml(jobsTableState.filters.target)}" /></th>
+                <th><select class="dt-filter" data-col="command" aria-label="Filtrar comando"><option value="">Todos</option></select></th>
+                <th><select class="dt-filter" data-col="origin" aria-label="Filtrar origen"><option value="">Todos</option></select></th>
+                <th><select class="dt-filter" data-col="status" aria-label="Filtrar status"><option value="">Todos</option></select></th>
+                <th><input type="datetime-local" class="dt-filter" data-col="started" aria-label="Inicio desde" placeholder="Inicio desde" value="${escapeHtml(jobsTableState.filters.started)}" /></th>
+                <th><input type="datetime-local" class="dt-filter" data-col="finished" aria-label="Fin hasta" placeholder="Fin hasta" value="${escapeHtml(jobsTableState.filters.finished)}" /></th>
                 <th></th>
               </tr>
             </thead>
@@ -6250,12 +6288,16 @@ docker compose up -d
             renderTableBody();
           });
         });
-        content.querySelectorAll(".dt-filter").forEach(input => {
-          input.addEventListener("input", () => {
-            jobsTableState.filters[input.dataset.col] = input.value;
-            jobsTableState.page = 1;
-            renderTableBody();
-          });
+        const updateJobFilter = (control) => {
+          jobsTableState.filters[control.dataset.col] = control.value;
+          jobsTableState.page = 1;
+          renderTableBody();
+        };
+        content.querySelectorAll("input.dt-filter").forEach(input => {
+          input.addEventListener("input", () => updateJobFilter(input));
+        });
+        content.querySelectorAll("select.dt-filter").forEach(select => {
+          select.addEventListener("change", () => updateJobFilter(select));
         });
         const pageSizeSelect = document.getElementById("jobsPageSize");
         if (pageSizeSelect) {
@@ -6340,7 +6382,7 @@ docker compose up -d
           const oldIds = new Set((state.jobs || []).map(j => j.id));
           const hasNew = newJobs.some(j => !oldIds.has(j.id));
           const mergedJobs = mergeJobList(newJobs);
-          const jobFingerprint = j => JSON.stringify([j.id, normalizeJobStatus(j.status), j.updated_at || "", j.progress || (j.result_summary && j.result_summary.progress) || null, (j.log_lines || []).length]);
+          const jobFingerprint = j => JSON.stringify([j.id, j.command || "", j.trigger || "", normalizeJobStatus(j.status), j.updated_at || "", j.progress || (j.result_summary && j.result_summary.progress) || null, (j.log_lines || []).length]);
           const hasChanged = JSON.stringify(mergedJobs.map(jobFingerprint)) !== JSON.stringify((state.jobs || []).map(jobFingerprint));
           state.jobs = mergedJobs;
           if (hasNew || hasChanged) {

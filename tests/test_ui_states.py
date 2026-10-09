@@ -1114,6 +1114,46 @@ process.stdout.write(JSON.stringify({ bySource, byLegacyPath, byEmptyLegacy }));
         self.assertIsNotNone(trigger_renderer)
         self.assertIn("escapeHtml", trigger_renderer.group(0))
 
+    def test_jobs_filter_controls_use_typed_values_and_date_bounds(self):
+        render_jobs = re.search(
+            r"function renderJobs\(content\) \{.*?\n    let _jobsRenderTableBody",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(render_jobs)
+        render_source = render_jobs.group(0)
+        for marker in (
+            '<select class="dt-filter" data-col="command"',
+            '<select class="dt-filter" data-col="origin"',
+            '<select class="dt-filter" data-col="status"',
+            '<input type="datetime-local" class="dt-filter" data-col="started"',
+            '<input type="datetime-local" class="dt-filter" data-col="finished"',
+            'aria-label="Inicio desde"',
+            'placeholder="Inicio desde"',
+            'aria-label="Fin hasta"',
+            'placeholder="Fin hasta"',
+            '<option value="">Todos</option>',
+            "const uniqueJobFilterValues =",
+            "new Set(values)",
+            "j => jobFilterValue(j.command)",
+            "j => jobFilterValue(j.trigger)",
+            "j => normalizeJobStatus(j.status)",
+            "jobTriggerLabel(value)",
+            "jobStatusLabel(value)",
+            "escapeHtml(value)",
+            "!valueSet.has(jobsTableState.filters[column])",
+            "select.value = valueSet.has(jobsTableState.filters[column])",
+            "function parseJobTimestamp(value)",
+            "startedAt === null",
+            "finishedAt === null",
+            "startedAt < startedBound",
+            "finishedAt > finishedBound",
+            'input.addEventListener("input"',
+            'select.addEventListener("change"',
+            "jobsTableState.page = 1;",
+        ):
+            self.assertIn(marker, render_source)
+
     def test_open_job_logs_use_sse_with_bounded_polling_fallback_for_both_panels(self):
         for marker in (
             "function connectJobEvents(jobId",
